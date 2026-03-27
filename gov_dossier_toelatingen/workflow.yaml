@@ -1,0 +1,493 @@
+name: "toelatingen"
+description: "Toelatingen beschermd erfgoed"
+version: "0.1"
+
+roles:
+  - name: "oe:aanvrager"
+    description: "Aanvrager van de toelating"
+  - name: "oe:behandelaar"
+    description: "Dossierbehandelaar"
+  - name: "oe:verantwoordelijke_organisatie"
+    description: "Organisatie verantwoordelijk voor de behandeling"
+  - name: "oe:ondertekenaar"
+    description: "Persoon die de beslissing ondertekent"
+
+poc_users:
+  - id: "1"
+    username: "claeyswo"
+    type: "persoon"
+    name: "Wouter Claeys"
+    roles: ["beheerder"]
+    properties:
+      ovo_code: "OVO000104"
+      
+  - id: "aaa00000-0000-0000-0000-000000000001"
+    username: "jan.aanvrager"
+    type: "persoon"
+    name: "Jan Peeters"
+    roles: ["85010100123"]
+    properties:
+      rrn: "85010100123"
+
+  - id: "aaa00000-0000-0000-0000-000000000002"
+    username: "firma.acme"
+    type: "persoon"
+    name: "ACME BV"
+    roles: ["kbo-toevoeger:0123456789"]
+    properties:
+      kbo: "0123456789"
+
+  - id: "bbb00000-0000-0000-0000-000000000001"
+    username: "marie.brugge"
+    type: "medewerker"
+    name: "Marie Vandenbroeck"
+    roles: ["behandelaar", "beslisser", "gemeente-toevoeger:https://data.vlaanderen.be/id/organisatie/brugge"]
+    properties:
+      gemeente: "Brugge"
+
+  - id: "bbb00000-0000-0000-0000-000000000002"
+    username: "benjamma"
+    type: "medewerker"
+    name: "Ben Jansen"
+    roles: ["behandelaar", "beslisser", "gemeente-toevoeger:https://data.vlaanderen.be/id/organisatie/oe"]
+    properties:
+      organisatie: "oe"
+
+entity_types:
+  - type: "oe:aanvraag"
+    description: "Aanvraag voor een toelating"
+    cardinality: "single"
+    revisable: true
+    model: "gov_dossier_toelatingen.entities.Aanvraag"
+
+  - type: "oe:beslissing"
+    description: "Beslissing over een toelating"
+    cardinality: "single"
+    revisable: true
+    model: "gov_dossier_toelatingen.entities.Beslissing"
+
+  - type: "oe:handtekening"
+    description: "Handtekening op een beslissing"
+    cardinality: "single"
+    revisable: true
+    model: "gov_dossier_toelatingen.entities.Handtekening"
+
+  - type: "oe:verantwoordelijke_organisatie"
+    description: "Verantwoordelijke organisatie voor een toelating"
+    cardinality: "single"
+    revisable: true
+    model: "gov_dossier_toelatingen.entities.VerantwoordelijkeOrganisatie"
+
+  - type: "oe:behandelaar"
+    description: "Behandelaar van de toelating"
+    cardinality: "multiple"
+    revisable: true
+    model: "gov_dossier_toelatingen.entities.Behandelaar"
+
+  - type: "oe:system_fields"
+    description: "Berekende velden voor een toelating"
+    cardinality: "single"
+    revisable: true
+    model: "gov_dossier_toelatingen.entities.SystemFields"
+
+  - type: "oe:dossier_access"
+    description: "Bepaalt wie dit dossier kan zien en wat ze kunnen zien"
+    cardinality: "single"
+    revisable: true
+    model: "gov_dossier_engine.entities.DossierAccess"
+
+authorization:
+  create_dossier:
+    access: "authenticated"
+
+activities:
+
+  - name: "dienAanvraagIn"
+    label: "Dien aanvraag in"
+    description: "Dien aanvraag in voor een toelating"
+    can_create_dossier: true
+
+    authorization:
+      access: "authenticated"
+
+    used:
+      - type: "oe:aanvraag"
+        accept: "new"
+        required: true
+        description: "De nieuwe aanvraag"
+      - type: "object"
+        external: true
+        required: true
+        description: "URI van het beschermd erfgoed object"
+
+    generates:
+      - "oe:aanvraag"
+
+    status: "ingediend"
+
+    validators:
+      - name: "valideer_indiening"
+        description: "Valideert de aanvraag bij indiening"
+
+    side_effects:
+      - activity: "setDossierAccess"
+      - activity: "duidVerantwoordelijkeOrganisatieAan"
+      - activity: "setSystemFields"
+
+    tasks:
+      - type: "notification"
+        description: "Stuur ontvangstbevestiging"
+        delay: null
+        channel: "email"
+        template: "ontvangstbevestiging"
+        to:
+          role: "oe:aanvrager"
+
+  - name: "bewerkAanvraag"
+    label: "Bewerk aanvraag"
+    description: "Behandelaar bewerkt de aanvraag"
+    can_create_dossier: false
+
+    authorization:
+      access: "roles"
+      roles:
+        - role: "behandelaar"
+
+    requirements:
+      statuses:
+        - "klaar_voor_behandeling"
+
+    used:
+      - type: "oe:aanvraag"
+        accept: "new"
+        required: true
+        description: "Nieuwe versie van de aanvraag"
+      - type: "object"
+        external: true
+        required: true
+        description: "URI van het beschermd erfgoed object"
+
+    generates:
+      - "oe:aanvraag"
+
+    status: "ingediend"
+
+    validators:
+      - name: "valideer_indiening"
+        description: "Valideert de bewerkte aanvraag"
+
+    side_effects:
+      - activity: "setDossierAccess"
+      - activity: "duidVerantwoordelijkeOrganisatieAan"
+      - activity: "setSystemFields"
+
+    tasks: []
+
+  - name: "vervolledigAanvraag"
+    label: "Vervolledig aanvraag"
+    description: "Aanvrager vervolledig een onvolledige aanvraag"
+    can_create_dossier: false
+
+    authorization:
+      access: "roles"
+      roles:
+        - role: "kbo-toevoeger"
+          scope:
+            from_entity: "oe:aanvraag"
+            field: "content.aanvrager.kbo"
+        - from_entity: "oe:aanvraag"
+          field: "content.aanvrager.rrn"
+
+    requirements:
+      statuses:
+        - "aanvraag_onvolledig"
+
+    used:
+      - type: "oe:aanvraag"
+        accept: "new"
+        required: true
+        description: "Vervolledigde versie van de aanvraag"
+      - type: "object"
+        external: true
+        required: true
+        description: "URI van het beschermd erfgoed object"
+
+    generates:
+      - "oe:aanvraag"
+
+    status: "ingediend"
+
+    validators:
+      - name: "valideer_indiening"
+        description: "Valideert de vervolledigde aanvraag"
+
+    side_effects:
+      - activity: "setDossierAccess"
+      - activity: "duidVerantwoordelijkeOrganisatieAan"
+      - activity: "setSystemFields"
+
+    tasks:
+      - type: "notification"
+        description: "Stuur ontvangstbevestiging"
+        delay: null
+        channel: "email"
+        template: "ontvangstbevestiging"
+        to:
+          role: "oe:aanvrager"
+
+  - name: "doeVoorstelBeslissing"
+    label: "Doe voorstel beslissing"
+    description: "Behandelaar doet een voorstel voor een beslissing"
+    can_create_dossier: false
+
+    authorization:
+      access: "roles"
+      roles:
+        - role: "behandelaar"
+
+    requirements:
+      statuses:
+        - "klaar_voor_behandeling"
+
+    used:
+      - type: "oe:aanvraag"
+        accept: "reference"
+        required: false
+        auto_resolve: "latest"
+        description: "De aanvraag"
+      - type: "oe:beslissing"
+        accept: "any"
+        required: true
+        description: "De voorgestelde beslissing (nieuw of revisie)"
+
+    generates:
+      - "oe:beslissing"
+
+    status: "beslissing_te_tekenen"
+
+    validators: []
+    side_effects: []
+    tasks: []
+
+  - name: "tekenBeslissing"
+    label: "Teken beslissing"
+    description: "Ondertekenaar tekent de beslissing"
+    can_create_dossier: false
+
+    authorization:
+      access: "roles"
+      roles:
+        - role: "beslisser"
+
+    requirements:
+      entities:
+        - "oe:beslissing"
+      statuses:
+        - "beslissing_te_tekenen"
+
+    used:
+      - type: "oe:beslissing"
+        accept: "reference"
+        required: false
+        auto_resolve: "latest"
+        description: "De beslissing die getekend wordt"
+      - type: "oe:handtekening"
+        accept: "new"
+        required: true
+        description: "De handtekening (getekend: true/false)"
+
+    generates:
+      - "oe:handtekening"
+
+    status: "beslissing_ondertekend"
+
+    validators: []
+    side_effects:
+      - activity: "neemBeslissing"
+    tasks: []
+
+  - name: "neemBeslissing"
+    label: "Neem beslissing"
+    description: "Neem een beslissing. Kan direct aangeroepen worden (met beslissing + handtekening) of automatisch getriggerd via tekenBeslissing."
+    can_create_dossier: false
+
+    handler: "neem_beslissing"
+
+    authorization:
+      access: "roles"
+      roles:
+        - role: "systeemgebruiker"
+        - role: "gemeente-toevoeger"
+          scope:
+            from_entity: "oe:verantwoordelijke_organisatie"
+            field: "content.uri"
+
+    requirements:
+      statuses:
+        - "klaar_voor_behandeling"
+        - "beslissing_ondertekend"
+
+    used:
+      - type: "oe:handtekening"
+        accept: "any"
+        required: false
+        auto_resolve: "latest"
+        description: "De handtekening"
+      - type: "oe:beslissing"
+        accept: "any"
+        required: false
+        auto_resolve: "latest"
+        description: "De beslissing"
+
+    generates:
+      - "oe:handtekening"
+      - "oe:beslissing"
+
+    status: null
+
+    validators: []
+    side_effects: []
+    tasks:
+      - type: "custom"
+        name: "neem_beslissing_tasks"
+        description: "Taken na het nemen van de beslissing"
+        delay: null
+
+# =====================================================================
+# System activities
+# =====================================================================
+
+  - name: "setDossierAccess"
+    label: "Stel dossiertoegang in"
+    description: "Bepaalt wie dit dossier kan zien"
+    can_create_dossier: false
+    client_callable: false
+    handler: "set_dossier_access"
+
+    authorization:
+      access: "roles"
+      roles:
+        - role: "systeemgebruiker"
+
+    used:
+      - type: "oe:aanvraag"
+        accept: "reference"
+        required: false
+        auto_resolve: "latest"
+        description: "De aanvraag"
+
+    generates:
+      - "oe:dossier_access"
+
+    status: null
+    validators: []
+    side_effects: []
+    tasks: []
+
+  - name: "duidVerantwoordelijkeOrganisatieAan"
+    label: "Duid verantwoordelijke organisatie aan"
+    description: "Bepaalt welke organisatie verantwoordelijk is"
+    can_create_dossier: false
+    client_callable: false
+    handler: "set_verantwoordelijke_organisatie"
+
+    authorization:
+      access: "roles"
+      roles:
+        - role: "systeemgebruiker"
+
+    requirements:
+      activities:
+        - "dienAanvraagIn"
+      entities:
+        - "oe:aanvraag"
+
+    used:
+      - type: "oe:aanvraag"
+        accept: "reference"
+        required: false
+        auto_resolve: "latest"
+        description: "De aanvraag"
+
+    generates:
+      - "oe:verantwoordelijke_organisatie"
+
+    status: null
+    validators: []
+    side_effects:
+      - activity: "duidBehandelaarAan"
+    tasks:
+      - type: "custom"
+        name: "duid_verantwoordelijke_org_tasks"
+        description: "Taken na aanduiding verantwoordelijke organisatie"
+        delay: null
+
+  - name: "duidBehandelaarAan"
+    label: "Duid behandelaar aan"
+    description: "Wijst een behandelaar toe aan het dossier"
+    can_create_dossier: false
+    client_callable: false
+    handler: "duid_behandelaar_aan"
+
+    authorization:
+      access: "roles"
+      roles:
+        - role: "systeemgebruiker"
+
+    requirements:
+      entities:
+        - "oe:verantwoordelijke_organisatie"
+
+    used:
+      - type: "oe:verantwoordelijke_organisatie"
+        accept: "reference"
+        required: false
+        auto_resolve: "latest"
+        description: "De verantwoordelijke organisatie"
+      - type: "oe:aanvraag"
+        accept: "reference"
+        required: false
+        auto_resolve: "latest"
+        description: "De aanvraag"
+
+    generates:
+      - "oe:behandelaar"
+
+    status: null
+    validators: []
+    side_effects: []
+    tasks:
+      - type: "notification"
+        description: "Stuur notificatie naar behandelaar"
+        delay: null
+        channel: "email"
+        template: "behandelaar_toegevoegd"
+        to:
+          role: "oe:behandelaar"
+
+  - name: "setSystemFields"
+    label: "Stel systeemvelden in"
+    description: "Berekent systeemvelden (datum, aanmaker)"
+    can_create_dossier: false
+    client_callable: false
+    handler: "set_system_fields"
+
+    authorization:
+      access: "roles"
+      roles:
+        - role: "systeemgebruiker"
+
+    used:
+      - type: "oe:aanvraag"
+        accept: "reference"
+        required: false
+        auto_resolve: "latest"
+        description: "De aanvraag"
+
+    generates:
+      - "oe:system_fields"
+
+    status: null
+    validators: []
+    side_effects: []
+    tasks: []

@@ -1,0 +1,10 @@
+database:
+  url: "sqlite+aiosqlite:///./dossiers.db"
+  # For PostgreSQL:
+  # url: "postgresql+asyncpg://user:pass@localhost:5432/dossiers"
+
+plugins:
+  - gov_dossier_toelatingen
+
+auth:
+  mode: "poc"
