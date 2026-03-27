@@ -748,24 +748,67 @@ node.filter(d => d.url).on("click", (event, d) => {{
     window.open(d.url, "_blank");
 }});
 
-// ── Tooltip ──
+// ── Tooltip + Highlight ──
 const tooltip = d3.select("#tooltip");
+
+function getConnected(d) {{
+    // Find all edges connected to this node
+    const connectedNodeIds = new Set([d.id]);
+    const connectedEdgeIndices = new Set();
+    edges.forEach((e, i) => {{
+        const sid = typeof e.source === "string" ? e.source : e.source.id;
+        const tid = typeof e.target === "string" ? e.target : e.target.id;
+        if (sid === d.id || tid === d.id) {{
+            connectedNodeIds.add(sid);
+            connectedNodeIds.add(tid);
+            connectedEdgeIndices.add(i);
+        }}
+    }});
+    return {{ connectedNodeIds, connectedEdgeIndices }};
+}}
+
 node.on("mouseover", (event, d) => {{
     let html = d.detail || d.label;
     if (d.url) html += "\\n\\n(click to view entity)";
     tooltip.style("opacity", 1).html(html);
-    linkLabel.style("opacity", e => {{
-        const sid = typeof e.source === "string" ? e.source : e.source.id;
-        const tid = typeof e.target === "string" ? e.target : e.target.id;
-        return (sid === d.id || tid === d.id) ? 1 : 0;
-    }});
+
+    const {{ connectedNodeIds, connectedEdgeIndices }} = getConnected(d);
+
+    // Dim unconnected nodes
+    node.transition().duration(150)
+        .style("opacity", n => connectedNodeIds.has(n.id) ? 1 : 0.15);
+
+    // Highlight connected edges, dim the rest
+    link.transition().duration(150)
+        .style("opacity", (e, i) => connectedEdgeIndices.has(i) ? 1 : 0.05)
+        .attr("stroke-width", (e, i) => {{
+            if (!connectedEdgeIndices.has(i)) return 1;
+            return e.type === "derived" ? 4 : e.type === "informed" ? 3 : 2.5;
+        }});
+
+    // Show and enlarge connected edge labels
+    linkLabel.transition().duration(150)
+        .style("opacity", (e, i) => connectedEdgeIndices.has(i) ? 1 : 0)
+        .attr("font-size", (e, i) => connectedEdgeIndices.has(i) ? "10px" : "8px")
+        .attr("font-weight", (e, i) => connectedEdgeIndices.has(i) ? "bold" : "normal")
+        .attr("fill", (e, i) => connectedEdgeIndices.has(i) ? "#e2e8f0" : "#64748b");
 }})
 .on("mousemove", (event) => {{
     tooltip.style("left", (event.clientX + 16) + "px").style("top", (event.clientY - 10) + "px");
 }})
 .on("mouseout", () => {{
     tooltip.style("opacity", 0);
-    linkLabel.style("opacity", 0);
+
+    // Restore everything
+    node.transition().duration(200).style("opacity", 1);
+    link.transition().duration(200)
+        .style("opacity", 0.35)
+        .attr("stroke-width", d => d.type === "derived" ? 2.5 : d.type === "informed" ? 2 : 1.2);
+    linkLabel.transition().duration(200)
+        .style("opacity", 0)
+        .attr("font-size", "8px")
+        .attr("font-weight", "normal")
+        .attr("fill", "#64748b");
 }});
 
 // ── Minimal simulation for edge resolution ──
