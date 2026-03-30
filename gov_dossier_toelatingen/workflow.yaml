@@ -272,6 +272,8 @@ activities:
     allowed_roles: ["oe:ondertekenaar"]
     default_role: "oe:ondertekenaar"
 
+    handler: "handle_beslissing"
+
     authorization:
       access: "roles"
       roles:
@@ -292,11 +294,10 @@ activities:
     generates:
       - "oe:handtekening"
 
-    status: "beslissing_ondertekend"
+    status: null
 
     validators: []
-    side_effects:
-      - activity: "neemBeslissing"
+    side_effects: []
     tasks: []
 
   - name: "neemBeslissing"
@@ -307,7 +308,7 @@ activities:
     allowed_roles: ["oe:verantwoordelijke_organisatie"]
     default_role: "oe:verantwoordelijke_organisatie"
 
-    handler: "neem_beslissing"
+    handler: "handle_beslissing"
 
     authorization:
       access: "roles"
@@ -324,14 +325,10 @@ activities:
         - "beslissing_ondertekend"
 
     used:
-      - type: "oe:handtekening"
+      - type: "oe:aanvraag"
         required: false
         auto_resolve: "latest"
-        description: "De handtekening"
-      - type: "oe:beslissing"
-        required: false
-        auto_resolve: "latest"
-        description: "De beslissing"
+        description: "De aanvraag"
 
     generates:
       - "oe:handtekening"

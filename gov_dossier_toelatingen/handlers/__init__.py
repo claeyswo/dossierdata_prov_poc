@@ -115,7 +115,7 @@ async def set_system_fields(context: ActivityContext, content: dict | None) -> H
     )
 
 
-async def neem_beslissing(context: ActivityContext, content: dict | None) -> HandlerResult:
+async def handle_beslissing(context: ActivityContext, content: dict | None) -> HandlerResult:
     """
     System activity triggered after tekenBeslissing.
     Determines the final status based on the handtekening and beslissing.
@@ -171,6 +171,6 @@ HANDLERS = {
     "set_dossier_access": set_dossier_access,
     "set_verantwoordelijke_organisatie": set_verantwoordelijke_organisatie,
     "set_system_fields": set_system_fields,
-    "neem_beslissing": neem_beslissing,
+    "handle_beslissing": handle_beslissing,
     "duid_behandelaar_aan": duid_behandelaar_aan,
 }
