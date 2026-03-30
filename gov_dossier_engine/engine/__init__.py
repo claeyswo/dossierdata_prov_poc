@@ -600,9 +600,12 @@ async def execute_activity(
             "endedAtTime": now.isoformat(),
         },
         "used": [
-            {"entity": r["entity"], "type": r.get("type", "external")}
+            {
+                "entity": r["entity"],
+                "type": r.get("type", "external"),
+                **({"autoResolved": True} if r.get("auto_resolved") else {}),
+            }
             for r in used_refs
-            if not r.get("auto_resolved")
         ],
         "generated": generated_response,
         "dossier": {
