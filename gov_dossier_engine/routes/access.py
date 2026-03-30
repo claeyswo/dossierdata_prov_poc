@@ -3,41 +3,24 @@
 from __future__ import annotations
 
 from uuid import UUID
+from fastapi import HTTPException
 from ..db.models import Repository
 from ..auth import User
 
 
-async def get_visible_types(repo: Repository, dossier_id: UUID, user: User) -> set[str] | None:
-    """Get the set of entity types visible to this user, or None if no filtering.
+async def check_dossier_access(repo: Repository, dossier_id: UUID, user: User) -> dict | None:
+    """Check if user has access to this dossier. Returns the matched access entry.
     
     Returns:
-        None — no dossier_access entity exists, no filtering applied
-        set[str] — entity types the user can see (may be empty = see nothing)
-    """
-    access_entity = await repo.get_latest_entity(dossier_id, "oe:dossier_access")
-    if not access_entity or not access_entity.content:
-        return None
-
-    for entry in access_entity.content.get("access", []):
-        entry_role = entry.get("role")
-        if entry_role and entry_role in user.roles:
-            return set(entry.get("view", []))
-        entry_agents = entry.get("agents", [])
-        if user.id in entry_agents:
-            return set(entry.get("view", []))
-
-    return set()  # no match = see nothing
-
-
-async def get_access_entry(repo: Repository, dossier_id: UUID, user: User) -> dict | None:
-    """Get the full matched dossier_access entry for this user.
+        None — no dossier_access entity exists (no restrictions)
+        dict — the matched access entry (with role, view, activity_view)
     
-    Returns the matched entry dict (with role, view, activity_view), 
-    or None if no access entity or no match.
+    Raises:
+        HTTPException 403 if user has no access
     """
     access_entity = await repo.get_latest_entity(dossier_id, "oe:dossier_access")
     if not access_entity or not access_entity.content:
-        return None
+        return None  # no access entity = no restrictions
 
     for entry in access_entity.content.get("access", []):
         entry_role = entry.get("role")
@@ -47,4 +30,19 @@ async def get_access_entry(repo: Repository, dossier_id: UUID, user: User) -> di
         if user.id in entry_agents:
             return entry
 
-    return None  # no match
+    raise HTTPException(403, detail="No access to this dossier")
+
+
+def get_visibility_from_entry(entry: dict | None) -> tuple[set[str] | None, str]:
+    """Extract visible types and activity_view mode from an access entry.
+    
+    Returns:
+        (visible_types, activity_view_mode)
+        visible_types is None if no restrictions, otherwise a set of entity type strings
+    """
+    if entry is None:
+        return None, "all"
+    
+    visible = set(entry.get("view", []))
+    activity_view = entry.get("activity_view", "all")
+    return visible, activity_view

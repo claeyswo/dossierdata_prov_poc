@@ -17,7 +17,7 @@ from ..auth import User
 from ..db import get_session_factory, Repository
 from ..db.models import ActivityRow, EntityRow, AssociationRow, UsedRow
 from ..plugin import PluginRegistry
-from .access import get_visible_types
+from .access import check_dossier_access, get_visibility_from_entry
 
 from sqlalchemy import select
 
@@ -49,8 +49,9 @@ def register_prov_routes(app, registry: PluginRegistry, get_user):
             plugin = registry.get(dossier.workflow)
             prefix = "oe"
 
-            # Determine visibility
-            visible_types = await get_visible_types(repo, dossier_id, user)
+            # Check access + determine visibility
+            access_entry = await check_dossier_access(repo, dossier_id, user)
+            visible_types, activity_view_mode = get_visibility_from_entry(access_entry)
 
             # Load all data
             activities = await repo.get_activities_for_dossier(dossier_id)
@@ -63,11 +64,6 @@ def register_prov_routes(app, registry: PluginRegistry, get_user):
             # Filter entities by visibility
             if visible_types is not None:
                 all_entities = [e for e in all_entities if e.type in visible_types]
-
-            all_entities_result = await session.execute(
-                select(EntityRow).where(EntityRow.dossier_id == dossier_id).order_by(EntityRow.created_at)
-            )
-            all_entities = list(all_entities_result.scalars().all())
 
             # Load associations for all activities
             activity_ids = [a.id for a in activities]
@@ -110,6 +106,24 @@ def register_prov_routes(app, registry: PluginRegistry, get_user):
                 "wasInformedBy": {},
                 "actedOnBehalfOf": {},
             }
+
+            # Filter activities by activity_view_mode
+            visible_entity_ids = set(e.id for e in all_entities)
+            if activity_view_mode != "all":
+                filtered_activities = []
+                for act in activities:
+                    if activity_view_mode == "own":
+                        assocs = assoc_by_activity.get(act.id, [])
+                        if any(a.agent_id == user.id for a in assocs):
+                            filtered_activities.append(act)
+                    elif activity_view_mode == "related":
+                        assocs = assoc_by_activity.get(act.id, [])
+                        used = used_by_activity.get(act.id, [])
+                        is_own = any(a.agent_id == user.id for a in assocs)
+                        touches_visible = any(u.entity_id in visible_entity_ids for u in used)
+                        if is_own or touches_visible:
+                            filtered_activities.append(act)
+                activities = filtered_activities
 
             # Agents (deduplicated)
             agents_seen = set()
@@ -240,8 +254,9 @@ def register_prov_routes(app, registry: PluginRegistry, get_user):
 
             plugin = registry.get(dossier.workflow)
 
-            # Determine visibility based on dossier_access
-            visible_types = await get_visible_types(repo, dossier_id, user)
+            # Check access + determine visibility
+            access_entry = await check_dossier_access(repo, dossier_id, user)
+            visible_types, activity_view_mode = get_visibility_from_entry(access_entry)
 
             # Load all data
             activities = await repo.get_activities_for_dossier(dossier_id)
@@ -292,13 +307,6 @@ def register_prov_routes(app, registry: PluginRegistry, get_user):
                         skipped_activity_ids.add(act.id)
 
             # Apply activity_view access filtering
-            from .access import get_access_entry
-            access_entry = await get_access_entry(repo, dossier_id, user)
-            activity_view_mode = "all"
-            if access_entry:
-                activity_view_mode = access_entry.get("activity_view", "all")
-
-            # Build set of visible entity version IDs (for "related" mode)
             visible_entity_version_ids = set(e.id for e in all_entities)
 
             if activity_view_mode != "all":

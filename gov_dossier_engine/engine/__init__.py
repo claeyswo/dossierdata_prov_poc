@@ -361,6 +361,18 @@ async def execute_activity(
     if not authorized:
         raise ActivityError(403, error)
 
+    # 3b. Validate/default functional role
+    allowed_roles = activity_def.get("allowed_roles", [])
+    default_role = activity_def.get("default_role")
+    if not role and default_role:
+        role = default_role
+    if not role and allowed_roles:
+        role = allowed_roles[0]
+    if not role:
+        role = "participant"
+    if allowed_roles and role not in allowed_roles:
+        raise ActivityError(422, f"Role '{role}' not allowed. Allowed: {allowed_roles}")
+
     # 4. Validate workflow rules (skip for new dossiers)
     if not activity_def.get("can_create_dossier") or await repo.get_activities_for_dossier(dossier_id):
         valid, error = await validate_workflow_rules(activity_def, repo, dossier_id)

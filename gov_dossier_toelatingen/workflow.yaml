@@ -100,17 +100,15 @@ authorization:
   create_dossier:
     access: "authenticated"
 
-# =====================================================================
-# used  = things this activity reads/references (not modified)
-# generates = things this activity creates (new or revision)
-# =====================================================================
-
 activities:
 
   - name: "dienAanvraagIn"
     label: "Dien aanvraag in"
     description: "Dien aanvraag in voor een toelating"
     can_create_dossier: true
+
+    allowed_roles: ["oe:aanvrager"]
+    default_role: "oe:aanvrager"
 
     authorization:
       access: "authenticated"
@@ -149,6 +147,9 @@ activities:
     description: "Behandelaar bewerkt de aanvraag"
     can_create_dossier: false
 
+    allowed_roles: ["oe:behandelaar"]
+    default_role: "oe:behandelaar"
+
     authorization:
       access: "roles"
       roles:
@@ -184,6 +185,9 @@ activities:
     label: "Vervolledig aanvraag"
     description: "Aanvrager vervolledig een onvolledige aanvraag"
     can_create_dossier: false
+
+    allowed_roles: ["oe:aanvrager"]
+    default_role: "oe:aanvrager"
 
     authorization:
       access: "roles"
@@ -233,6 +237,9 @@ activities:
     description: "Behandelaar doet een voorstel voor een beslissing"
     can_create_dossier: false
 
+    allowed_roles: ["oe:behandelaar"]
+    default_role: "oe:behandelaar"
+
     authorization:
       access: "roles"
       roles:
@@ -261,6 +268,9 @@ activities:
     label: "Teken beslissing"
     description: "Ondertekenaar tekent de beslissing"
     can_create_dossier: false
+
+    allowed_roles: ["oe:ondertekenaar"]
+    default_role: "oe:ondertekenaar"
 
     authorization:
       access: "roles"
@@ -291,8 +301,11 @@ activities:
 
   - name: "neemBeslissing"
     label: "Neem beslissing"
-    description: "Neem een beslissing. Kan direct aangeroepen worden (met beslissing + handtekening) of automatisch getriggerd via tekenBeslissing."
+    description: "Neem een beslissing. Kan direct aangeroepen worden of automatisch getriggerd via tekenBeslissing."
     can_create_dossier: false
+
+    allowed_roles: ["oe:verantwoordelijke_organisatie"]
+    default_role: "oe:verantwoordelijke_organisatie"
 
     handler: "neem_beslissing"
 
@@ -343,6 +356,7 @@ activities:
     description: "Bepaalt wie dit dossier kan zien"
     can_create_dossier: false
     client_callable: false
+    default_role: "systeem"
     handler: "set_dossier_access"
 
     authorization:
@@ -369,6 +383,7 @@ activities:
     description: "Bepaalt welke organisatie verantwoordelijk is"
     can_create_dossier: false
     client_callable: false
+    default_role: "systeem"
     handler: "set_verantwoordelijke_organisatie"
 
     authorization:
@@ -406,6 +421,7 @@ activities:
     description: "Wijst een behandelaar toe aan het dossier"
     can_create_dossier: false
     client_callable: false
+    default_role: "systeem"
     handler: "duid_behandelaar_aan"
 
     authorization:
@@ -447,6 +463,7 @@ activities:
     description: "Berekent systeemvelden (datum, aanmaker)"
     can_create_dossier: false
     client_callable: false
+    default_role: "systeem"
     handler: "set_system_fields"
 
     authorization:
