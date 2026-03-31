@@ -20,7 +20,7 @@ poc_users:
     roles: ["beheerder"]
     properties:
       ovo_code: "OVO000104"
-      
+
   - id: "aaa00000-0000-0000-0000-000000000001"
     username: "jan.aanvrager"
     type: "persoon"
@@ -49,7 +49,15 @@ poc_users:
     username: "benjamma"
     type: "medewerker"
     name: "Ben Jansen"
-    roles: ["behandelaar", "beslisser", "gemeente-toevoeger:https://data.vlaanderen.be/id/organisatie/oe"]
+    roles: ["behandelaar", "gemeente-toevoeger:https://data.vlaanderen.be/id/organisatie/oe"]
+    properties:
+      organisatie: "oe"
+
+  - id: "bbb00000-0000-0000-0000-000000000003"
+    username: "sophie.tekent"
+    type: "medewerker"
+    name: "Sophie De Smet"
+    roles: ["beslisser", "gemeente-toevoeger:https://data.vlaanderen.be/id/organisatie/oe"]
     properties:
       organisatie: "oe"
 

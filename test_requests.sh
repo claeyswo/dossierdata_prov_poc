@@ -123,11 +123,13 @@ echo ""
 
 
 echo "============================================"
-echo "DOSSIER 2: Gent, KBO aanvrager"
+echo "DOSSIER 2: Gent, KBO aanvrager, separate signer, declined signing"
+echo "  behandelaar: benjamma"
+echo "  ondertekenaar: sophie.tekent"
 echo "============================================"
 echo ""
 
-echo "--- D2 Step 1: dienAanvraagIn ---"
+echo "--- D2 Step 1: dienAanvraagIn (firma.acme) ---"
 curl -s -X PUT "$BASE_URL/dossiers/d2000000-0000-0000-0000-000000000001/activities/a2000000-0000-0000-0000-000000000001/dienAanvraagIn" \
   -H "Content-Type: application/json" \
   -H "X-POC-User: firma.acme" \
@@ -151,7 +153,7 @@ curl -s -X PUT "$BASE_URL/dossiers/d2000000-0000-0000-0000-000000000001/activiti
   }' | python3 -m json.tool
 echo ""
 
-echo "--- D2 Step 2: doeVoorstelBeslissing (onvolledig) ---"
+echo "--- D2 Step 2: doeVoorstelBeslissing — onvolledig (benjamma) ---"
 curl -s -X PUT "$BASE_URL/dossiers/d2000000-0000-0000-0000-000000000001/activities/a2000000-0000-0000-0000-000000000002/doeVoorstelBeslissing" \
   -H "Content-Type: application/json" \
   -H "X-POC-User: benjamma" \
@@ -170,10 +172,10 @@ curl -s -X PUT "$BASE_URL/dossiers/d2000000-0000-0000-0000-000000000001/activiti
   }' | python3 -m json.tool
 echo ""
 
-echo "--- D2 Step 3: tekenBeslissing (triggers neemBeslissing → onvolledig) ---"
+echo "--- D2 Step 3: tekenBeslissing — sophie signs (triggers neemBeslissing → onvolledig) ---"
 curl -s -X PUT "$BASE_URL/dossiers/d2000000-0000-0000-0000-000000000001/activities/a2000000-0000-0000-0000-000000000003/tekenBeslissing" \
   -H "Content-Type: application/json" \
-  -H "X-POC-User: benjamma" \
+  -H "X-POC-User: sophie.tekent" \
   -d '{
     "generated": [
       {
@@ -189,7 +191,7 @@ curl -s "$BASE_URL/dossiers/d2000000-0000-0000-0000-000000000001" \
   -H "X-POC-User: benjamma" | python3 -c "import sys,json; d=json.load(sys.stdin); print(f'Status: {d[\"status\"]}')"
 echo ""
 
-echo "--- D2 Step 4: vervolledigAanvraag ---"
+echo "--- D2 Step 4: vervolledigAanvraag (firma.acme) ---"
 curl -s -X PUT "$BASE_URL/dossiers/d2000000-0000-0000-0000-000000000001/activities/a2000000-0000-0000-0000-000000000004/vervolledigAanvraag" \
   -H "Content-Type: application/json" \
   -H "X-POC-User: firma.acme" \
@@ -213,7 +215,7 @@ curl -s -X PUT "$BASE_URL/dossiers/d2000000-0000-0000-0000-000000000001/activiti
   }' | python3 -m json.tool
 echo ""
 
-echo "--- D2 Step 5: bewerkAanvraag ---"
+echo "--- D2 Step 5: bewerkAanvraag (benjamma) ---"
 curl -s -X PUT "$BASE_URL/dossiers/d2000000-0000-0000-0000-000000000001/activities/a2000000-0000-0000-0000-000000000005/bewerkAanvraag" \
   -H "Content-Type: application/json" \
   -H "X-POC-User: benjamma" \
@@ -237,7 +239,7 @@ curl -s -X PUT "$BASE_URL/dossiers/d2000000-0000-0000-0000-000000000001/activiti
   }' | python3 -m json.tool
 echo ""
 
-echo "--- D2 Step 6: doeVoorstelBeslissing (goedgekeurd) ---"
+echo "--- D2 Step 6: doeVoorstelBeslissing — goedgekeurd (benjamma) ---"
 curl -s -X PUT "$BASE_URL/dossiers/d2000000-0000-0000-0000-000000000001/activities/a2000000-0000-0000-0000-000000000006/doeVoorstelBeslissing" \
   -H "Content-Type: application/json" \
   -H "X-POC-User: benjamma" \
@@ -257,15 +259,55 @@ curl -s -X PUT "$BASE_URL/dossiers/d2000000-0000-0000-0000-000000000001/activiti
   }' | python3 -m json.tool
 echo ""
 
-echo "--- D2 Step 7: tekenBeslissing (triggers neemBeslissing → goedgekeurd) ---"
+echo "--- D2 Step 7: tekenBeslissing — sophie DECLINES (getekend: false → klaar_voor_behandeling) ---"
 curl -s -X PUT "$BASE_URL/dossiers/d2000000-0000-0000-0000-000000000001/activities/a2000000-0000-0000-0000-000000000007/tekenBeslissing" \
   -H "Content-Type: application/json" \
-  -H "X-POC-User: benjamma" \
+  -H "X-POC-User: sophie.tekent" \
   -d '{
     "generated": [
       {
         "entity": "oe:handtekening/e2000000-0000-0000-0000-000000000003@f2000000-0000-0000-0000-000000000007",
         "derivedFrom": "oe:handtekening/e2000000-0000-0000-0000-000000000003@f2000000-0000-0000-0000-000000000003",
+        "content": { "getekend": false }
+      }
+    ]
+  }' | python3 -m json.tool
+echo ""
+
+echo "--- D2 Check status (expect: klaar_voor_behandeling) ---"
+curl -s "$BASE_URL/dossiers/d2000000-0000-0000-0000-000000000001" \
+  -H "X-POC-User: benjamma" | python3 -c "import sys,json; d=json.load(sys.stdin); print(f'Status: {d[\"status\"]}')"
+echo ""
+
+echo "--- D2 Step 8: doeVoorstelBeslissing — goedgekeurd second attempt (benjamma) ---"
+curl -s -X PUT "$BASE_URL/dossiers/d2000000-0000-0000-0000-000000000001/activities/a2000000-0000-0000-0000-000000000008/doeVoorstelBeslissing" \
+  -H "Content-Type: application/json" \
+  -H "X-POC-User: benjamma" \
+  -d '{
+    "generated": [
+      {
+        "entity": "oe:beslissing/e2000000-0000-0000-0000-000000000002@f2000000-0000-0000-0000-000000000008",
+        "derivedFrom": "oe:beslissing/e2000000-0000-0000-0000-000000000002@f2000000-0000-0000-0000-000000000006",
+        "content": {
+          "beslissing": "goedgekeurd",
+          "datum": "2026-03-29T10:00:00Z",
+          "object": "https://id.erfgoed.net/erfgoedobjecten/20001",
+          "brief": "https://dms.example.com/brieven/d2-brief-003"
+        }
+      }
+    ]
+  }' | python3 -m json.tool
+echo ""
+
+echo "--- D2 Step 9: tekenBeslissing — sophie SIGNS (triggers neemBeslissing → goedgekeurd) ---"
+curl -s -X PUT "$BASE_URL/dossiers/d2000000-0000-0000-0000-000000000001/activities/a2000000-0000-0000-0000-000000000009/tekenBeslissing" \
+  -H "Content-Type: application/json" \
+  -H "X-POC-User: sophie.tekent" \
+  -d '{
+    "generated": [
+      {
+        "entity": "oe:handtekening/e2000000-0000-0000-0000-000000000003@f2000000-0000-0000-0000-000000000009",
+        "derivedFrom": "oe:handtekening/e2000000-0000-0000-0000-000000000003@f2000000-0000-0000-0000-000000000007",
         "content": { "getekend": true }
       }
     ]
