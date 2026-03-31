@@ -399,7 +399,7 @@ def register_prov_routes(app, registry: PluginRegistry, get_user):
                             entity_url = f"/dossiers/{dossier_id}/entities/{entity.type}/{entity.entity_id}/{entity.id}"
                             nodes.append({
                                 "id": ent_id,
-                                "label": entity.type,
+                                "label": entity.content.get("uri", entity.type) if entity.type == "external" and entity.content else entity.type,
                                 "type": "entity",
                                 "entity_type": entity.type,
                                 "logical_id": str(entity.entity_id),
@@ -448,7 +448,7 @@ def register_prov_routes(app, registry: PluginRegistry, get_user):
                 if ent_id not in node_ids:
                     nodes.append({
                         "id": ent_id,
-                        "label": entity.type,
+                        "label": entity.content.get("uri", entity.type) if entity.type == "external" and entity.content else entity.type,
                         "type": "entity",
                         "entity_type": entity.type,
                         "logical_id": str(entity.entity_id),

@@ -3,6 +3,9 @@ Handler functions for toelatingen system activities.
 
 Each handler receives an ActivityContext and optional client content,
 and returns a HandlerResult with the computed entity content and optional status.
+
+Handlers use context.get_typed("oe:type") to get Pydantic model instances
+instead of accessing raw dicts.
 """
 
 from __future__ import annotations
@@ -10,6 +13,9 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from gov_dossier_engine.engine import ActivityContext, HandlerResult
+from gov_dossier_toelatingen.entities import (
+    Aanvraag, Beslissing, Handtekening, VerantwoordelijkeOrganisatie,
+)
 
 
 async def set_dossier_access(context: ActivityContext, content: dict | None) -> HandlerResult:
@@ -20,30 +26,27 @@ async def set_dossier_access(context: ActivityContext, content: dict | None) -> 
     access_entries = []
 
     # Aanvrager can always see their own dossier
-    aanvraag = context.get_used_entity("oe:aanvraag")
-    if aanvraag and aanvraag.content:
-        aanvrager = aanvraag.content.get("aanvrager", {})
-        # Add the aanvrager by their identifier
-        if aanvrager.get("kbo"):
+    aanvraag: Aanvraag | None = context.get_typed("oe:aanvraag")
+    if aanvraag:
+        if aanvraag.aanvrager.kbo:
             access_entries.append({
-                "role": f"kbo-toevoeger:{aanvrager['kbo']}",
-                "view": ["oe:aanvraag", "oe:beslissing", "oe:handtekening"],
+                "role": f"kbo-toevoeger:{aanvraag.aanvrager.kbo}",
+                "view": ["oe:aanvraag", "oe:beslissing", "oe:handtekening", "external", "external"],
                 "activity_view": "own",
             })
-        if aanvrager.get("rrn"):
+        if aanvraag.aanvrager.rrn:
             access_entries.append({
-                "role": aanvrager["rrn"],
-                "view": ["oe:aanvraag", "oe:beslissing", "oe:handtekening"],
+                "role": aanvraag.aanvrager.rrn,
+                "view": ["oe:aanvraag", "oe:beslissing", "oe:handtekening", "external", "external"],
                 "activity_view": "own",
             })
 
     # Verantwoordelijke organisatie gets full access
-    verantw = await context.get_latest_entity("oe:verantwoordelijke_organisatie")
-    if verantw and verantw.content:
-        org_uri = verantw.content.get("uri", "")
+    verantw: VerantwoordelijkeOrganisatie | None = await context.get_latest_typed("oe:verantwoordelijke_organisatie")
+    if verantw:
         access_entries.append({
-            "role": f"gemeente-toevoeger:{org_uri}",
-            "view": ["oe:aanvraag", "oe:beslissing", "oe:handtekening",
+            "role": f"gemeente-toevoeger:{verantw.uri}",
+            "view": ["oe:aanvraag", "oe:beslissing", "oe:handtekening", "external",
                       "oe:verantwoordelijke_organisatie", "oe:behandelaar",
                       "oe:system_fields"],
             "activity_view": "all",
@@ -54,7 +57,7 @@ async def set_dossier_access(context: ActivityContext, content: dict | None) -> 
     if behandelaar:
         access_entries.append({
             "role": "behandelaar",
-            "view": ["oe:aanvraag", "oe:beslissing", "oe:handtekening",
+            "view": ["oe:aanvraag", "oe:beslissing", "oe:handtekening", "external",
                       "oe:verantwoordelijke_organisatie", "oe:behandelaar",
                       "oe:system_fields"],
             "activity_view": "all",
@@ -63,7 +66,7 @@ async def set_dossier_access(context: ActivityContext, content: dict | None) -> 
     # Beheerder gets everything
     access_entries.append({
         "role": "beheerder",
-        "view": ["oe:aanvraag", "oe:beslissing", "oe:handtekening",
+        "view": ["oe:aanvraag", "oe:beslissing", "oe:handtekening", "external",
                   "oe:verantwoordelijke_organisatie", "oe:behandelaar",
                   "oe:system_fields", "oe:dossier_access"],
         "activity_view": "all",
@@ -78,17 +81,13 @@ async def set_dossier_access(context: ActivityContext, content: dict | None) -> 
 async def set_verantwoordelijke_organisatie(context: ActivityContext, content: dict | None) -> HandlerResult:
     """
     Determines the responsible organization based on the aanvraag.
-    In a real system, this would look up the organisation registry.
-    For POC: derives from gemeente field.
     """
-    aanvraag = context.get_used_entity("oe:aanvraag")
-    if not aanvraag or not aanvraag.content:
+    aanvraag: Aanvraag | None = context.get_typed("oe:aanvraag")
+    if not aanvraag:
         return HandlerResult(content={"uri": "https://organisatie.onbekend"}, status=None)
 
-    gemeente = aanvraag.content.get("gemeente", "onbekend")
-
     # POC: simple mapping. In production: lookup in organisation registry.
-    if gemeente == "Brugge":
+    if aanvraag.gemeente == "Brugge":
         org_uri = "https://data.vlaanderen.be/id/organisatie/brugge"
     else:
         org_uri = "https://data.vlaanderen.be/id/organisatie/oe"
@@ -103,8 +102,8 @@ async def set_system_fields(context: ActivityContext, content: dict | None) -> H
     """
     Sets system-computed fields: creation date, creator.
     """
-    aanvraag = context.get_used_entity("oe:aanvraag")
-    aanmaker = aanvraag.attributed_to if aanvraag else "unknown"
+    entity = context.get_used_entity("oe:aanvraag")
+    aanmaker = entity.attributed_to if entity else "unknown"
 
     return HandlerResult(
         content={
@@ -120,23 +119,19 @@ async def handle_beslissing(context: ActivityContext, content: dict | None) -> H
     System activity triggered after tekenBeslissing.
     Determines the final status based on the handtekening and beslissing.
     """
-    handtekening = context.get_used_entity("oe:handtekening")
-    beslissing = context.get_used_entity("oe:beslissing")
+    handtekening: Handtekening | None = context.get_typed("oe:handtekening")
+    beslissing: Beslissing | None = context.get_typed("oe:beslissing")
 
-    if not handtekening or not handtekening.content:
+    if not handtekening:
         return HandlerResult(content=None, status="beslissing_te_tekenen")
 
-    getekend = handtekening.content.get("getekend", False)
-
-    if not getekend:
-        # Signature rejected — go back to proposal
+    if not handtekening.getekend:
         return HandlerResult(content=None, status="klaar_voor_behandeling")
 
-    if beslissing and beslissing.content:
-        uitkomst = beslissing.content.get("beslissing", "afgekeurd")
-        if uitkomst == "goedgekeurd":
+    if beslissing:
+        if beslissing.beslissing == "goedgekeurd":
             return HandlerResult(content=None, status="toelating_verleend")
-        elif uitkomst == "onvolledig":
+        elif beslissing.beslissing == "onvolledig":
             return HandlerResult(content=None, status="aanvraag_onvolledig")
         else:
             return HandlerResult(content=None, status="toelating_geweigerd")
@@ -147,18 +142,15 @@ async def handle_beslissing(context: ActivityContext, content: dict | None) -> H
 async def duid_behandelaar_aan(context: ActivityContext, content: dict | None) -> HandlerResult:
     """
     Assigns a behandelaar based on the verantwoordelijke organisatie.
-    In production: lookup from org registry or assignment rules.
-    For POC: derives from verantwoordelijke organisatie URI.
     """
-    verantw = context.get_used_entity("oe:verantwoordelijke_organisatie")
-    org_uri = ""
-    if verantw and verantw.content:
-        org_uri = verantw.content.get("uri", "")
+    verantw: VerantwoordelijkeOrganisatie | None = context.get_typed("oe:verantwoordelijke_organisatie")
 
-    if org_uri == "https://data.vlaanderen.be/id/organisatie/oe":
-        behandelaar_uri = f"{org_uri}/behandelaar/benjamma"
+    if verantw and verantw.uri == "https://data.vlaanderen.be/id/organisatie/oe":
+        behandelaar_uri = f"{verantw.uri}/behandelaar/benjamma"
+    elif verantw:
+        behandelaar_uri = verantw.uri
     else:
-        behandelaar_uri = org_uri
+        behandelaar_uri = "https://data.vlaanderen.be/id/organisatie/onbekend"
 
     return HandlerResult(
         content={"uri": behandelaar_uri},

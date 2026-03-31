@@ -97,7 +97,7 @@ class EntityRow(Base):
     entity_id = Column(UUID_DB(), nullable=False)  # logical entity UUID
     dossier_id = Column(UUID_DB(), ForeignKey("dossiers.id"), nullable=False)
     type = Column(Text, nullable=False)
-    generated_by = Column(UUID_DB(), ForeignKey("activities.id"), nullable=False)
+    generated_by = Column(UUID_DB(), ForeignKey("activities.id"), nullable=True)
     derived_from = Column(UUID_DB(), ForeignKey("entities.id"), nullable=True)
     attributed_to = Column(Text, nullable=True)
     content = Column(JSON, nullable=True)
@@ -299,7 +299,7 @@ class Repository:
         entity_id: UUID,
         dossier_id: UUID,
         type: str,
-        generated_by: UUID,
+        generated_by: UUID | None = None,
         content: dict | None = None,
         derived_from: UUID | None = None,
         attributed_to: str | None = None,
@@ -316,6 +316,29 @@ class Repository:
         )
         self.session.add(row)
         return row
+
+    async def ensure_external_entity(self, dossier_id: UUID, uri: str) -> EntityRow:
+        """Ensure an external entity exists for this URI in this dossier. Idempotent."""
+        from sqlalchemy import select
+        import uuid as uuid_mod
+        # Deterministic UUID from URI + dossier_id so the same URI doesn't create duplicates
+        entity_id = uuid_mod.uuid5(uuid_mod.NAMESPACE_URL, f"{dossier_id}:{uri}")
+        version_id = entity_id  # external entities have one "version"
+        result = await self.session.execute(
+            select(EntityRow)
+            .where(EntityRow.id == version_id)
+        )
+        existing = result.scalar_one_or_none()
+        if existing:
+            return existing
+        return await self.create_entity(
+            version_id=version_id,
+            entity_id=entity_id,
+            dossier_id=dossier_id,
+            type="external",
+            generated_by=None,
+            content={"uri": uri},
+        )
 
     # --- Used ---
 

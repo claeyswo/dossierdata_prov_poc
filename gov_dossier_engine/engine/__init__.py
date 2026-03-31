@@ -292,13 +292,36 @@ class _PendingEntity:
 class ActivityContext:
     """Context passed to handlers and validators."""
 
-    def __init__(self, repo: Repository, dossier_id: UUID, used_entities: dict[str, EntityRow]):
+    def __init__(self, repo: Repository, dossier_id: UUID, used_entities: dict[str, EntityRow],
+                 entity_models: dict[str, Any] | None = None):
         self.repo = repo
         self.dossier_id = dossier_id
         self._used_entities = used_entities
+        self._entity_models = entity_models or {}
 
     def get_used_entity(self, entity_type: str) -> EntityRow | None:
         return self._used_entities.get(entity_type)
+
+    def get_typed(self, entity_type: str) -> Any | None:
+        """Get a used entity's content as a validated Pydantic model instance.
+        Returns None if the entity doesn't exist or has no content."""
+        entity = self._used_entities.get(entity_type)
+        if not entity or not entity.content:
+            return None
+        model_class = self._entity_models.get(entity_type)
+        if model_class:
+            return model_class(**entity.content)
+        return None
+
+    async def get_latest_typed(self, entity_type: str) -> Any | None:
+        """Get the latest entity's content as a validated Pydantic model instance."""
+        entity = await self.repo.get_latest_entity(self.dossier_id, entity_type)
+        if not entity or not entity.content:
+            return None
+        model_class = self._entity_models.get(entity_type)
+        if model_class:
+            return model_class(**entity.content)
+        return None
 
     async def has_activity(self, activity_type: str) -> bool:
         activities = await self.repo.get_activities_for_dossier(self.dossier_id)
@@ -387,7 +410,9 @@ async def execute_activity(
         entity_ref = item.get("entity", "")
 
         if is_external_uri(entity_ref):
-            used_refs.append({"entity": entity_ref, "external": True})
+            # Persist as external entity (idempotent)
+            ext_entity = await repo.ensure_external_entity(dossier_id, entity_ref)
+            used_refs.append({"entity": entity_ref, "external": True, "version_id": ext_entity.id})
             continue
 
         parsed = parse_entity_ref(entity_ref)
@@ -471,7 +496,7 @@ async def execute_activity(
         validator_name = validator_def["name"]
         validator_fn = plugin.validators.get(validator_name)
         if validator_fn:
-            ctx = ActivityContext(repo, dossier_id, resolved_entities)
+            ctx = ActivityContext(repo, dossier_id, resolved_entities, plugin.entity_models)
             result = await validator_fn(ctx)
             if result is not None and not result:
                 raise ActivityError(409, f"Validator '{validator_name}' failed")
@@ -500,7 +525,7 @@ async def execute_activity(
     if handler_name:
         handler_fn = plugin.handlers.get(handler_name)
         if handler_fn:
-            ctx = ActivityContext(repo, dossier_id, resolved_entities)
+            ctx = ActivityContext(repo, dossier_id, resolved_entities, plugin.entity_models)
             client_content = generated[0]["content"] if generated else None
             handler_result = await handler_fn(ctx, client_content)
 
@@ -702,7 +727,7 @@ async def _execute_side_effects(
 
 
         # Run handler
-        se_ctx = ActivityContext(repo, dossier_id, se_resolved)
+        se_ctx = ActivityContext(repo, dossier_id, se_resolved, plugin.entity_models)
         se_result = await se_handler_fn(se_ctx, None)
 
         # Store handler-computed status
