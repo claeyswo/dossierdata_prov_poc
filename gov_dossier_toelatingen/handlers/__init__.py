@@ -114,29 +114,42 @@ async def set_system_fields(context: ActivityContext, content: dict | None) -> H
     )
 
 
-async def neem_beslissing(context: ActivityContext, content: dict | None) -> HandlerResult:
+async def handle_beslissing(context: ActivityContext, content: dict | None) -> HandlerResult:
     """
     System activity triggered after tekenBeslissing.
     Determines the final status based on the handtekening and beslissing.
+    If onvolledig, schedules a trekAanvraagIn task with a 30-day deadline.
     """
     handtekening: Handtekening | None = context.get_typed("oe:handtekening")
     beslissing: Beslissing | None = context.get_typed("oe:beslissing")
 
     if not handtekening:
-        return HandlerResult(content=None, status="beslissing_te_tekenen")
+        return HandlerResult(status="beslissing_te_tekenen")
 
     if not handtekening.getekend:
-        return HandlerResult(content=None, status="klaar_voor_behandeling")
+        return HandlerResult(status="klaar_voor_behandeling")
 
     if beslissing:
         if beslissing.beslissing == "goedgekeurd":
-            return HandlerResult(content=None, status="toelating_verleend")
+            return HandlerResult(status="toelating_verleend")
         elif beslissing.beslissing == "onvolledig":
-            return HandlerResult(content=None, status="aanvraag_onvolledig")
+            # Schedule trekAanvraagIn in 30 days, cancelled if vervollediging happens
+            from datetime import datetime, timezone, timedelta
+            deadline = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
+            return HandlerResult(
+                status="aanvraag_onvolledig",
+                tasks=[{
+                    "kind": "scheduled_activity",
+                    "target_activity": "trekAanvraagIn",
+                    "scheduled_for": deadline,
+                    "cancel_if_activities": ["vervolledigAanvraag"],
+                    "allow_multiple": False,
+                }],
+            )
         else:
-            return HandlerResult(content=None, status="toelating_geweigerd")
+            return HandlerResult(status="toelating_geweigerd")
 
-    return HandlerResult(content=None, status="beslissing_ondertekend")
+    return HandlerResult(status="beslissing_ondertekend")
 
 
 async def duid_behandelaar_aan(context: ActivityContext, content: dict | None) -> HandlerResult:
@@ -163,6 +176,6 @@ HANDLERS = {
     "set_dossier_access": set_dossier_access,
     "set_verantwoordelijke_organisatie": set_verantwoordelijke_organisatie,
     "set_system_fields": set_system_fields,
-    "neem_beslissing": neem_beslissing,
+    "handle_beslissing": handle_beslissing,
     "duid_behandelaar_aan": duid_behandelaar_aan,
 }

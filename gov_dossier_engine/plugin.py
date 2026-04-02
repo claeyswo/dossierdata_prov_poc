@@ -7,6 +7,8 @@ Each workflow plugin provides:
 - handler functions
 - validator functions
 - task handlers
+- post_activity_hook (optional): called after each activity to update search indices
+- search_route_factory (optional): registers a workflow-specific search endpoint
 """
 
 from __future__ import annotations
@@ -26,6 +28,15 @@ class Plugin:
     handlers: dict[str, Callable] = field(default_factory=dict)  # handler_name → async function
     validators: dict[str, Callable] = field(default_factory=dict)  # validator_name → async function
     task_handlers: dict[str, Callable] = field(default_factory=dict)  # task_name → async function
+
+    # Called after each activity completes (inside the transaction).
+    # Signature: async def hook(repo, dossier_id, activity_type, status, entities) -> None
+    # Use to update Elasticsearch indices.
+    post_activity_hook: Callable | None = None
+
+    # Called during route registration. Receives (app, get_user) and should
+    # register workflow-specific search endpoints like /dossiers/{workflow_name}/...
+    search_route_factory: Callable | None = None
 
 
 class PluginRegistry:
