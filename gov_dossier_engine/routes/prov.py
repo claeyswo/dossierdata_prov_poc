@@ -314,6 +314,9 @@ def register_prov_routes(app, registry: PluginRegistry, get_user):
                     if act.type == "completeTask":
                         skipped_activity_ids.add(act.id)
                 all_entities = [e for e in all_entities if e.type != "system:task"]
+            else:
+                # When showing tasks, make sure completeTask isn't hidden by system activity filter
+                skipped_activity_ids -= {act.id for act in activities if act.type == "completeTask"}
 
             # Apply activity_view access filtering
             visible_entity_version_ids = set(e.id for e in all_entities)
@@ -515,6 +518,14 @@ def register_prov_routes(app, registry: PluginRegistry, get_user):
                 # wasAttributedTo
                 if entity.attributed_to:
                     attr_agent_id = f"agent-{entity.attributed_to}"
+                    if attr_agent_id not in node_ids:
+                        nodes.append({
+                            "id": attr_agent_id,
+                            "label": entity.attributed_to,
+                            "type": "agent",
+                            "detail": f"Agent: {entity.attributed_to}",
+                        })
+                        node_ids.add(attr_agent_id)
                     edges.append({
                         "source": attr_agent_id,
                         "target": ent_id,

@@ -166,10 +166,13 @@ async def process_task(task: EntityRow, registry, config):
                 if t.entity_id == task.entity_id:
                     current_task = t
             if not current_task or not current_task.content:
+                logger.warning(f"Task {task.id}: not found in re-fetch")
                 return
             if current_task.content.get("status") != "scheduled":
                 logger.info(f"Task {task.id}: already {current_task.content.get('status')}, skipping")
                 return
+
+            logger.info(f"Task {task.id}: processing kind={kind} function={task_content.get('function')}")
 
             # Check if cancelled by a recent activity
             if await check_cancelled(repo, current_task):
@@ -183,10 +186,15 @@ async def process_task(task: EntityRow, registry, config):
                     fn_name = task_content.get("function")
                     fn = plugin.task_handlers.get(fn_name) if fn_name else None
                     if fn:
-                        ctx = ActivityContext(repo, dossier_id, {}, plugin.entity_models)
-                        result = await fn(ctx)
+                        # Resolve all latest entities for context
+                        all_latest = await repo.get_all_latest_entities(dossier_id)
+                        resolved = {e.type: e for e in all_latest}
+                        ctx = ActivityContext(repo, dossier_id, resolved, plugin.entity_models)
+                        await fn(ctx)
+                    else:
+                        logger.warning(f"Task {task.id}: function '{fn_name}' not found")
                     await complete_task(repo, plugin, dossier_id, current_task, status="completed")
-                    logger.info(f"Task {task.id}: recorded task completed")
+                    logger.info(f"Task {task.id}: recorded task '{fn_name}' completed")
 
                 elif kind == "scheduled_activity":
                     # Type 3: execute activity in same dossier, then completeTask
@@ -283,8 +291,7 @@ async def process_task(task: EntityRow, registry, config):
                     logger.warning(f"Task {task.id}: unknown kind '{kind}'")
 
             except Exception as e:
-                logger.error(f"Task {task.id} failed: {e}")
-                # Create a failed version — in a new transaction since this one may be broken
+                logger.error(f"Task {task.id} failed: {e}", exc_info=True)
                 raise
 
 

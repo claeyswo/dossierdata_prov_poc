@@ -48,7 +48,7 @@ async def set_dossier_access(context: ActivityContext, content: dict | None) -> 
             "role": f"gemeente-toevoeger:{verantw.uri}",
             "view": ["oe:aanvraag", "oe:beslissing", "oe:handtekening", "external",
                       "oe:verantwoordelijke_organisatie", "oe:behandelaar",
-                      "oe:system_fields"],
+                      "oe:system_fields", "system:task"],
             "activity_view": "all",
         })
 
@@ -59,7 +59,7 @@ async def set_dossier_access(context: ActivityContext, content: dict | None) -> 
             "role": "behandelaar",
             "view": ["oe:aanvraag", "oe:beslissing", "oe:handtekening", "external",
                       "oe:verantwoordelijke_organisatie", "oe:behandelaar",
-                      "oe:system_fields"],
+                      "oe:system_fields", "system:task"],
             "activity_view": "all",
         })
 
@@ -68,7 +68,7 @@ async def set_dossier_access(context: ActivityContext, content: dict | None) -> 
         "role": "beheerder",
         "view": ["oe:aanvraag", "oe:beslissing", "oe:handtekening", "external",
                   "oe:verantwoordelijke_organisatie", "oe:behandelaar",
-                  "oe:system_fields", "oe:dossier_access"],
+                  "oe:system_fields", "oe:dossier_access", "system:task"],
         "activity_view": "all",
     })
 

@@ -366,6 +366,69 @@ Type 3 has no function — the worker just executes the target activity.
 
 ---
 
+## Conditional Task Queueing from Handlers
+
+Tasks defined in the YAML `tasks:` block always execute. For conditional tasks — where
+the decision depends on entity content at runtime — handlers can append tasks dynamically.
+
+`HandlerResult` accepts a `tasks` list alongside `generated` and `status`:
+
+```python
+async def neem_beslissing(context: ActivityContext, content: dict | None) -> HandlerResult:
+    beslissing = context.get_typed("oe:beslissing")
+    handtekening = context.get_typed("oe:handtekening")
+
+    if not handtekening or not handtekening.getekend:
+        return HandlerResult(status="klaar_voor_behandeling")
+
+    if beslissing and beslissing.beslissing == "onvolledig":
+        # Only schedule trekAanvraagIn when the decision is "onvolledig"
+        from datetime import datetime, timezone, timedelta
+        deadline = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
+
+        return HandlerResult(
+            status="aanvraag_onvolledig",
+            tasks=[{
+                "kind": "scheduled_activity",
+                "target_activity": "trekAanvraagIn",
+                "scheduled_for": deadline,
+                "cancel_if_activities": ["vervolledigAanvraag"],
+                "allow_multiple": False,
+            }],
+        )
+
+    if beslissing and beslissing.beslissing == "goedgekeurd":
+        return HandlerResult(status="toelating_verleend")
+
+    return HandlerResult(status="toelating_geweigerd")
+```
+
+Handler tasks are merged with YAML tasks during step 15 of activity execution.
+The engine processes them identically — creating `system:task` entities with full PROV.
+
+This enables patterns like:
+- Schedule a deadline only when a specific outcome occurs
+- Queue cross-dossier notifications only under certain conditions
+- Fire-and-forget an email only when a threshold is met
+
+Handlers can also return multiple entities alongside tasks:
+
+```python
+return HandlerResult(
+    generated=[
+        ("oe:beslissing", {"beslissing": "goedgekeurd", "datum": "..."}),
+        ("oe:handtekening", {"getekend": True}),
+    ],
+    status="toelating_verleend",
+    tasks=[{
+        "kind": "fire_and_forget",
+        "function": "send_approval_notification",
+    }],
+)
+```
+
+---
+
 ## Worker
 
 The worker processes due tasks. Runs as a separate process sharing the same DB.

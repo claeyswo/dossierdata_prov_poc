@@ -704,7 +704,13 @@ async def execute_activity(
         cancel_list = task_entity.content.get("cancel_if_activities", [])
         if activity_def["name"] in cancel_list:
             # Only cancel if task was created before this activity
-            if task_entity.created_at and task_entity.created_at < now:
+            task_created = task_entity.created_at
+            if task_created:
+                # Ensure both are comparable (SQLite returns naive datetimes)
+                if task_created.tzinfo is None:
+                    task_created = task_created.replace(tzinfo=timezone.utc)
+                if task_created >= now:
+                    continue
                 cancelled_content = dict(task_entity.content)
                 cancelled_content["status"] = "cancelled"
                 await repo.create_entity(
