@@ -145,13 +145,8 @@ activities:
       - activity: "setSystemFields"
 
     tasks:
-      - type: "notification"
-        description: "Stuur ontvangstbevestiging"
-        delay: null
-        channel: "email"
-        template: "ontvangstbevestiging"
-        to:
-          role: "oe:aanvrager"
+      - kind: "recorded"
+        function: "send_ontvangstbevestiging"
 
   - name: "bewerkAanvraag"
     label: "Bewerk aanvraag"
@@ -233,13 +228,8 @@ activities:
       - activity: "setSystemFields"
 
     tasks:
-      - type: "notification"
-        description: "Stuur ontvangstbevestiging"
-        delay: null
-        channel: "email"
-        template: "ontvangstbevestiging"
-        to:
-          role: "oe:aanvrager"
+      - kind: "recorded"
+        function: "send_ontvangstbevestiging"
 
   - name: "doeVoorstelBeslissing"
     label: "Doe voorstel beslissing"
@@ -348,10 +338,8 @@ activities:
     validators: []
     side_effects: []
     tasks:
-      - type: "custom"
-        name: "neem_beslissing_tasks"
-        description: "Taken na het nemen van de beslissing"
-        delay: null
+      - kind: "recorded"
+        function: "log_beslissing_genomen"
 
   - name: "trekAanvraagIn"
     label: "Trek aanvraag in"
@@ -450,10 +438,8 @@ activities:
       - activity: "duidBehandelaarAan"
       - activity: "setDossierAccess"
     tasks:
-      - type: "custom"
-        name: "duid_verantwoordelijke_org_tasks"
-        description: "Taken na aanduiding verantwoordelijke organisatie"
-        delay: null
+      - kind: "recorded"
+        function: "log_organisatie_aangeduid"
 
   - name: "duidBehandelaarAan"
     label: "Duid behandelaar aan"
@@ -489,13 +475,8 @@ activities:
     validators: []
     side_effects: []
     tasks:
-      - type: "notification"
-        description: "Stuur notificatie naar behandelaar"
-        delay: null
-        channel: "email"
-        template: "behandelaar_toegevoegd"
-        to:
-          role: "oe:behandelaar"
+      - kind: "recorded"
+        function: "send_behandelaar_notificatie"
 
   - name: "setSystemFields"
     label: "Stel systeemvelden in"
