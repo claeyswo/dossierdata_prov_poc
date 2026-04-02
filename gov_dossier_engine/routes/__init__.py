@@ -347,12 +347,14 @@ def register_routes(app: FastAPI, registry: PluginRegistry, get_user):
                 activities=activity_list,
             )
 
-    # --- List dossiers ---
+    # --- List dossiers (stub — use workflow-specific search endpoints) ---
 
     @app.get(
         "/dossiers",
         tags=["dossiers"],
-        summary="List dossiers",
+        summary="List dossiers (stub)",
+        description="Basic dossier listing. For production, use the workflow-specific search "
+                    "endpoints (e.g. /dossiers/toelatingen/search) which query Elasticsearch.",
     )
     async def list_dossiers(
         workflow: Optional[str] = None,
@@ -363,32 +365,29 @@ def register_routes(app: FastAPI, registry: PluginRegistry, get_user):
             from sqlalchemy import select
             from ..db.models import DossierRow
 
-            repo = Repository(session)
-
             query = select(DossierRow)
             if workflow:
                 query = query.where(DossierRow.workflow == workflow)
-            query = query.order_by(DossierRow.created_at.desc())
+            query = query.order_by(DossierRow.created_at.desc()).limit(100)
 
             result = await session.execute(query)
             dossiers = list(result.scalars().all())
 
-            # TODO: filter by dossier_access entity
-
             items = []
             for d in dossiers:
-                plugin = registry.get(d.workflow)
-                status = "unknown"
-                if plugin:
-                    status = await derive_status(repo, d.id)
                 items.append({
                     "id": str(d.id),
                     "workflow": d.workflow,
-                    "status": status,
                     "createdAt": d.created_at.isoformat() if d.created_at else None,
                 })
 
             return {"dossiers": items}
+
+    # --- Register plugin search routes ---
+
+    for plugin in registry.all_plugins():
+        if plugin.search_route_factory:
+            plugin.search_route_factory(app, get_user)
 
     # --- Entity endpoints ---
 

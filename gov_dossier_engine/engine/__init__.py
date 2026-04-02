@@ -332,11 +332,29 @@ class ActivityContext:
 
 
 class HandlerResult:
-    """Result returned by a handler function."""
+    """Result returned by a handler function.
+    
+    Supports:
+    - Single entity: HandlerResult(content={...}, status="...")
+    - Multiple entities: HandlerResult(generated=[("oe:type", {...}), ...], status="...")
+    - Tasks: HandlerResult(tasks=[{...task def...}], status="...")
+    - All combined
+    """
 
-    def __init__(self, content: dict | None = None, status: str | None = None):
-        self.content = content
+    def __init__(
+        self,
+        content: dict | None = None,
+        status: str | None = None,
+        generated: list[tuple[str, dict]] | None = None,
+        tasks: list[dict] | None = None,
+    ):
+        # Backward compat: single content → list with type=None (resolved from generates[0])
+        if content and not generated:
+            self.generated = [(None, content)]
+        else:
+            self.generated = generated or []
         self.status = status
+        self.tasks = tasks or []
 
 
 class TaskResult:
@@ -540,18 +558,23 @@ async def execute_activity(
             handler_result = await handler_fn(ctx, client_content)
 
             if isinstance(handler_result, HandlerResult):
-                if handler_result.content and not generated:
-                    generates = activity_def.get("generates", [])
-                    if generates:
-                        gen_type = generates[0]
-                        generated.append({
-                            "version_id": uuid4(),
-                            "entity_id": uuid4(),
-                            "type": gen_type,
-                            "content": handler_result.content,
-                            "derived_from": None,
-                            "ref": None,
-                        })
+                # Process handler-generated entities (only if client didn't send any)
+                if handler_result.generated and not generated:
+                    allowed_types = activity_def.get("generates", [])
+                    for gen_type, gen_content in handler_result.generated:
+                        if gen_type is None and allowed_types:
+                            gen_type = allowed_types[0]
+                        if gen_type and gen_content:
+                            # Check if this is a revision of an existing entity
+                            existing = await repo.get_latest_entity(dossier_id, gen_type)
+                            generated.append({
+                                "version_id": uuid4(),
+                                "entity_id": existing.entity_id if existing else uuid4(),
+                                "type": gen_type,
+                                "content": gen_content,
+                                "derived_from": existing.id if existing else None,
+                                "ref": None,
+                            })
 
     # 11. Persist generated entities (wasGeneratedBy only, NO used link)
     generated_response = []
@@ -606,8 +629,12 @@ async def execute_activity(
         side_effects=activity_def.get("side_effects", []),
     )
 
-    # 15. Process tasks
-    for task_def in activity_def.get("tasks", []):
+    # 15. Process tasks (YAML-defined + handler-appended)
+    all_task_defs = list(activity_def.get("tasks", []))
+    if handler_result and isinstance(handler_result, HandlerResult):
+        all_task_defs.extend(handler_result.tasks)
+
+    for task_def in all_task_defs:
         task_kind = task_def.get("kind", "recorded")
 
         if task_kind == "fire_and_forget":
@@ -691,7 +718,24 @@ async def execute_activity(
                     attributed_to="system",
                 )
 
-    # 17. Build response
+    # 17. Post-activity hook (e.g. update search indices)
+    if plugin.post_activity_hook:
+        try:
+            current_entities = await repo.get_all_latest_entities(dossier_id)
+            current_status_for_hook = await derive_status(repo, dossier_id)
+            await plugin.post_activity_hook(
+                repo=repo,
+                dossier_id=dossier_id,
+                activity_type=activity_def["name"],
+                status=current_status_for_hook,
+                entities={e.type: e for e in current_entities},
+            )
+        except Exception as e:
+            # Don't fail the activity if the hook fails
+            import logging
+            logging.getLogger("dossier.engine").warning(f"post_activity_hook failed: {e}")
+
+    # 18. Build response
     current_status = await derive_status(repo, dossier_id)
     allowed = await derive_allowed_activities(plugin, repo, dossier_id, user)
 
@@ -819,28 +863,27 @@ async def _execute_side_effects(
         if isinstance(se_result, HandlerResult) and se_result.status:
             se_activity_row.computed_status = se_result.status
 
-        if isinstance(se_result, HandlerResult) and se_result.content:
+        if isinstance(se_result, HandlerResult) and se_result.generated:
             se_generates = se_def.get("generates", [])
-            if se_generates:
-                se_gen_type = se_generates[0]
-                se_version_id = uuid4()
+            for gen_type, gen_content in se_result.generated:
+                if gen_type is None and se_generates:
+                    gen_type = se_generates[0]
+                if gen_type and gen_content:
+                    se_version_id = uuid4()
+                    existing = await repo.get_latest_entity(dossier_id, gen_type)
+                    derived_from_id = existing.id if existing else None
+                    entity_id_val = existing.entity_id if existing else uuid4()
 
-                # Check if this is a revision of an existing entity
-                existing = await repo.get_latest_entity(dossier_id, se_gen_type)
-                derived_from_id = existing.id if existing else None
-                entity_id_val = existing.entity_id if existing else uuid4()
-
-                await repo.create_entity(
-                    version_id=se_version_id,
-                    entity_id=entity_id_val,
-                    dossier_id=dossier_id,
-                    type=se_gen_type,
-                    generated_by=se_activity_id,
-                    content=se_result.content,
-                    derived_from=derived_from_id,
-                    attributed_to="system",
-                )
-                # No used link — generated entities only have wasGeneratedBy
+                    await repo.create_entity(
+                        version_id=se_version_id,
+                        entity_id=entity_id_val,
+                        dossier_id=dossier_id,
+                        type=gen_type,
+                        generated_by=se_activity_id,
+                        content=gen_content,
+                        derived_from=derived_from_id,
+                        attributed_to="system",
+                    )
 
         # Recurse into this side effect's own side effects
         nested_side_effects = se_def.get("side_effects", [])

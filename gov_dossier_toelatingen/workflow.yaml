@@ -353,6 +353,38 @@ activities:
         description: "Taken na het nemen van de beslissing"
         delay: null
 
+  - name: "trekAanvraagIn"
+    label: "Trek aanvraag in"
+    description: "Trekt de aanvraag in (wegens verlopen termijn of op verzoek)"
+    can_create_dossier: false
+
+    allowed_roles: ["oe:aanvrager", "systeem"]
+    default_role: "systeem"
+
+    authorization:
+      access: "roles"
+      roles:
+        - role: "systeemgebruiker"
+        - role: "kbo-toevoeger"
+          scope:
+            from_entity: "oe:aanvraag"
+            field: "content.aanvrager.kbo"
+        - from_entity: "oe:aanvraag"
+          field: "content.aanvrager.rrn"
+
+    requirements:
+      statuses:
+        - "aanvraag_onvolledig"
+
+    used: []
+    generates: []
+
+    status: "aanvraag_ingetrokken"
+
+    validators: []
+    side_effects: []
+    tasks: []
+
 # =====================================================================
 # System activities
 # =====================================================================
