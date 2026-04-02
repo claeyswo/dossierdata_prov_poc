@@ -326,6 +326,32 @@ activities:
         function: "find_related_dossier"
         target_activity: "ontvangMelding"
         allow_multiple: true
+
+    # --- Conditional tasks in YAML ---
+    # You can make YAML tasks conditional on entity content using the
+    # `condition` field. The engine checks the condition before creating
+    # the task entity. If the condition is not met, the task is skipped.
+    #
+    # condition:
+    #   from_entity: "oe:beslissing"       # entity type to check
+    #   field: "content.beslissing"         # dotted path to value
+    #   equals: "onvolledig"               # value to match
+    #
+    # Example: only schedule trekAanvraagIn when beslissing is onvolledig
+    #
+    # tasks:
+    #   - kind: "scheduled_activity"
+    #     target_activity: "trekAanvraagIn"
+    #     scheduled_for: "2026-05-01T00:00:00Z"
+    #     cancel_if_activities: ["vervolledigAanvraag"]
+    #     condition:
+    #       from_entity: "oe:beslissing"
+    #       field: "content.beslissing"
+    #       equals: "onvolledig"
+    #
+    # For more complex conditions (multiple fields, computed logic),
+    # use handler-appended tasks instead (see "Conditional Task Queueing
+    # from Handlers" section below).
 ```
 
 ---
@@ -647,15 +673,17 @@ Users without any matching entry get HTTP 403.
 | `PUT` | `/dossiers/{id}/activities/{id}` | Execute a generic activity |
 | `PUT` | `/dossiers/{id}/activities` | Execute batch activities atomically |
 | `GET` | `/dossiers/{id}` | Get dossier detail (filtered by access) |
-| `GET` | `/dossiers` | List dossiers (stub) |
+| `GET` | `/dossiers` | List dossiers (stub — use workflow search) |
 | `GET` | `/dossiers/{workflow}/search` | Workflow-specific search (Elasticsearch) |
 | `GET` | `/dossiers/{id}/entities/{type}` | All versions of an entity type |
 | `GET` | `/dossiers/{id}/entities/{type}/{entity_id}` | All versions of a logical entity |
 | `GET` | `/dossiers/{id}/entities/{type}/{entity_id}/{version_id}` | Single entity version |
-| `GET` | `/dossiers/{id}/prov` | PROV-JSON export (filtered) |
-| `GET` | `/dossiers/{id}/prov/graph` | Interactive timeline visualization |
+| `GET` | `/dossiers/{id}/prov` | PROV-JSON export (filtered by access) |
+| `GET` | `/dossiers/{id}/prov/graph/timeline` | Interactive timeline visualization |
+| `GET` | `/dossiers/{id}/prov/graph/columns` | Column layout visualization |
 
-Graph query parameters: `?include_system_activities=true`, `?include_tasks=true`
+Timeline query parameters: `?include_system_activities=true`, `?include_tasks=true`
+Columns query parameters: `?include_tasks=true` (default)
 
 ---
 
@@ -664,12 +692,18 @@ Graph query parameters: `?include_system_activities=true`, `?include_tasks=true`
 See `gov_dossier_toelatingen/workflow.yaml` for a complete example implementing
 a heritage permit ("toelating beschermd erfgoed") workflow with:
 
-- Client activities: dienAanvraagIn, bewerkAanvraag, vervolledigAanvraag, doeVoorstelBeslissing, tekenBeslissing, neemBeslissing
+- Client activities: dienAanvraagIn, bewerkAanvraag, vervolledigAanvraag, doeVoorstelBeslissing, tekenBeslissing, neemBeslissing, trekAanvraagIn
 - System activities: setDossierAccess, duidVerantwoordelijkeOrganisatieAan, duidBehandelaarAan, setSystemFields
+- Shared handler: `handle_beslissing` used by both tekenBeslissing and neemBeslissing
 - Scoped authorization (municipality-based roles)
 - Entity-derived authorization (RRN/KBO from aanvraag)
-- Side effect chains (dienAanvraagIn → setDossierAccess + duidVerantwoordelijkeOrganisatieAan → duidBehandelaarAan)
-- Two decision paths: direct (neemBeslissing with content) and indirect (doeVoorstelBeslissing → tekenBeslissing → neemBeslissing via side effect)
+- Side effect chains (dienAanvraagIn → duidVerantwoordelijkeOrganisatieAan → duidBehandelaarAan + setDossierAccess)
+- Two decision paths: direct (neemBeslissing) and indirect (doeVoorstelBeslissing → tekenBeslissing → handle_beslissing)
 - Four-eyes principle (behandelaar proposes, separate ondertekenaar signs or declines)
+- Conditional tasks: handler schedules trekAanvraagIn only when beslissing is onvolledig
+- Recorded tasks (type 2): send_ontvangstbevestiging, log_beslissing_genomen, etc.
+- Task cancellation: vervolledigAanvraag cancels pending trekAanvraagIn deadline
+- External entities: heritage object URIs persisted with full PROV trail
 - Post-activity search index hook (Elasticsearch stub)
 - Workflow-specific search endpoint (/dossiers/toelatingen/search)
+- Forbidden rules: dienAanvraagIn cannot be called twice

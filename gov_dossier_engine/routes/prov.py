@@ -234,7 +234,7 @@ def register_prov_routes(app, registry: PluginRegistry, get_user):
             return prov
 
     @app.get(
-        "/dossiers/{dossier_id}/prov/graph",
+        "/dossiers/{dossier_id}/prov/graph/timeline",
         tags=["prov"],
         summary="PROV graph visualization",
         description="Interactive visualization of the provenance graph.",
@@ -555,6 +555,10 @@ def register_prov_routes(app, registry: PluginRegistry, get_user):
             )
 
             return HTMLResponse(content=html)
+
+    # Import and register the columns graph
+    from .prov_columns import register_columns_graph
+    register_columns_graph(app, registry, get_user)
 
 
 def _build_graph_html(dossier_id: str, workflow: str, nodes_json: str, edges_json: str) -> str:
