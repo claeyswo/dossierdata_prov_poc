@@ -48,6 +48,8 @@ class DossierRow(Base):
 
     id = Column(UUID_DB(), primary_key=True)
     workflow = Column(Text, nullable=False)
+    cached_status = Column(Text, nullable=True)  # denormalized, updated per activity
+    eligible_activities = Column(Text, nullable=True)  # JSON list of activity names, updated per activity
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     activities = relationship("ActivityRow", back_populates="dossier", order_by="ActivityRow.started_at")
@@ -73,6 +75,7 @@ class ActivityRow(Base):
     __table_args__ = (
         Index("ix_activities_dossier_id", "dossier_id"),
         Index("ix_activities_type", "type"),
+        Index("ix_activities_dossier_type", "dossier_id", "type"),
     )
 
 
@@ -88,6 +91,10 @@ class AssociationRow(Base):
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     activity = relationship("ActivityRow", back_populates="associations")
+
+    __table_args__ = (
+        Index("ix_associations_activity_id", "activity_id"),
+    )
 
 
 class EntityRow(Base):
@@ -109,6 +116,9 @@ class EntityRow(Base):
         Index("ix_entities_dossier_id", "dossier_id"),
         Index("ix_entities_entity_id", "entity_id"),
         Index("ix_entities_type", "type"),
+        Index("ix_entities_dossier_type", "dossier_id", "type"),
+        Index("ix_entities_dossier_type_created", "dossier_id", "type", "created_at"),
+        Index("ix_entities_generated_by", "generated_by"),
     )
 
 

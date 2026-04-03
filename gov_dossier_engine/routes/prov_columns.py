@@ -242,33 +242,48 @@ def register_columns_graph(app, registry, get_user):
             entity_type_order = []
             seen_types = set()
 
+            # Build reverse lookup: entity version id → list of activity ids that used it
+            entity_used_by = {}
+            for act_id, used_list in used_by_activity.items():
+                for u in used_list:
+                    entity_used_by.setdefault(u.entity_id, []).append(act_id)
+
             for entity in all_entities:
-                if not entity.generated_by:
-                    continue
+                col_idx = None
 
-                if entity.type == "system:task":
-                    kind = task_kind_map.get(entity.entity_id, "")
+                if entity.generated_by:
+                    if entity.type == "system:task":
+                        kind = task_kind_map.get(entity.entity_id, "")
 
-                    if kind == "recorded":
-                        # Recorded tasks: only show latest version, under original creating activity
-                        latest = task_latest.get(entity.entity_id)
-                        if not latest or latest.id != entity.id:
-                            continue
-                        first = task_first.get(entity.entity_id)
-                        if first and first.generated_by:
-                            col_idx = col_for_act.get(first.generated_by, None)
+                        if kind == "recorded":
+                            latest = task_latest.get(entity.entity_id)
+                            if not latest or latest.id != entity.id:
+                                continue
+                            first = task_first.get(entity.entity_id)
+                            if first and first.generated_by:
+                                col_idx = col_for_act.get(first.generated_by, None)
+                            else:
+                                col_idx = col_for_act.get(entity.generated_by, None)
                         else:
                             col_idx = col_for_act.get(entity.generated_by, None)
                     else:
-                        # scheduled_activity, cross_dossier: show each version under its generating activity
                         col_idx = col_for_act.get(entity.generated_by, None)
+                elif entity.type == "external":
+                    # External entities without generated_by: assign to first activity that used them
+                    using_acts = entity_used_by.get(entity.id, [])
+                    for act_id in using_acts:
+                        col_idx = col_for_act.get(act_id)
+                        if col_idx is not None:
+                            break
                 else:
-                    col_idx = col_for_act.get(entity.generated_by, None)
+                    continue
 
                 if col_idx is not None and col_idx < len(top_row):
-                    # Row key: for tasks, each logical entity gets its own row
+                    # Row key: tasks and externals each get their own row per logical entity
                     if entity.type == "system:task":
                         row_key = f"task:{entity.entity_id}"
+                    elif entity.type == "external":
+                        row_key = f"external:{entity.entity_id}"
                     else:
                         row_key = entity.type
 
@@ -292,6 +307,11 @@ def register_columns_graph(app, registry, get_user):
 
                     by_side_effect = entity.generated_by in side_effect_ids
 
+                    # Track whether external entity was generated or used
+                    external_kind = ""
+                    if entity.type == "external":
+                        external_kind = "generated" if entity.generated_by else "used"
+
                     top_row[col_idx]["entities"].append({
                         "id": str(entity.id),
                         "entity_id": str(entity.entity_id),
@@ -300,14 +320,25 @@ def register_columns_graph(app, registry, get_user):
                         "row": 0,  # set below
                         "label": label,
                         "derived_from": str(entity.derived_from) if entity.derived_from else None,
-                        "generated_by": str(entity.generated_by),
+                        "generated_by": str(entity.generated_by) if entity.generated_by else "",
                         "attributed_to": entity.attributed_to or "",
                         "url": f"/dossiers/{dossier_id}/entities/{entity.type}/{entity.entity_id}/{entity.id}",
                         "is_task": entity.type == "system:task",
                         "task_status": entity.content.get("status", "") if entity.type == "system:task" and entity.content else "",
                         "task_kind": task_kind,
                         "by_side_effect": by_side_effect,
+                        "external_kind": external_kind,
                     })
+
+            # Sort entity rows: regular entities first, then externals, then tasks
+            def row_sort_key(key):
+                if key.startswith("task:"):
+                    return (2, key)
+                elif key.startswith("external:"):
+                    return (1, key)
+                else:
+                    return (0, key)
+            entity_type_order.sort(key=row_sort_key)
 
             # Set row indices
             for col in top_row:
@@ -410,8 +441,9 @@ svg {{ width: 100vw; height: 100vh; }}
     <div class="legend-item"><div class="legend-dot" style="background:#312e81;border:1px solid #818cf8"></div> Side effect</div>
     <div class="legend-item"><div class="legend-dot" style="background:#059669"></div> Entity</div>
     <div class="legend-item"><div class="legend-dot" style="background:#be185d"></div> Entity (by side effect)</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#0284c7"></div> External (used)</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#ea580c"></div> External (generated)</div>
     <div class="legend-item"><div class="legend-dot" style="background:#7c3aed"></div> Task entity</div>
-    <div class="legend-item"><div class="legend-dot" style="background:#0284c7"></div> External</div>
     <div style="margin-top:4px;border-top:1px solid #475569;padding-top:4px;">
     <div class="legend-item"><div style="width:20px;height:3px;background:#34d399"></div> wasDerivedFrom</div>
     <div class="legend-item"><div style="width:20px;height:2px;background:#60a5fa"></div> wasInformedBy</div>
@@ -610,16 +642,18 @@ columns.forEach((col, ci) => {{
         if (label.length > 20) label = label.slice(0,18)+"…";
         if (ent.task_status) label += ` (${{ent.task_status}})`;
 
-        // Color logic: task > external > side-effect-generated > normal
+        // Color logic: task > external generated > external used > side-effect-generated > normal
         let fill, stroke;
         if (ent.is_task) {{
-            fill = "#7c3aed"; stroke = "#c4b5fd";   // vivid purple
-        }} else if (ent.type === "external") {{
-            fill = "#0284c7"; stroke = "#7dd3fc";    // sky blue
+            fill = "#7c3aed"; stroke = "#c4b5fd";           // vivid purple
+        }} else if (ent.external_kind === "generated") {{
+            fill = "#ea580c"; stroke = "#fdba74";           // vibrant orange — we created this externally
+        }} else if (ent.external_kind === "used") {{
+            fill = "#0284c7"; stroke = "#7dd3fc";           // sky blue — external reference we consumed
         }} else if (ent.by_side_effect) {{
-            fill = "#be185d"; stroke = "#f9a8d4";    // pink/rose for side-effect entities
+            fill = "#be185d"; stroke = "#f9a8d4";           // pink/rose for side-effect entities
         }} else {{
-            fill = "#059669"; stroke = "#6ee7b7";    // emerald green
+            fill = "#059669"; stroke = "#6ee7b7";           // emerald green
         }}
 
         const eg = g.append("g")

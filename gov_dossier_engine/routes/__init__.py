@@ -17,7 +17,10 @@ from typing import Any, Optional
 from ..plugin import Plugin, PluginRegistry
 from ..auth import User, POCAuthMiddleware
 from ..db import get_session_factory, Repository
-from ..engine import execute_activity, derive_status, derive_allowed_activities, ActivityError
+from ..engine import (
+    execute_activity, derive_status, derive_allowed_activities,
+    compute_eligible_activities, filter_by_user_auth, ActivityError,
+)
 
 
 # =====================================================================
@@ -274,8 +277,23 @@ def register_routes(app: FastAPI, registry: PluginRegistry, get_user):
             access_entry = await check_dossier_access(repo, dossier_id, user)
             visible_prefixes, activity_view_mode = get_visibility_from_entry(access_entry)
 
-            status = await derive_status(repo, dossier_id)
-            allowed = await derive_allowed_activities(plugin, repo, dossier_id, user)
+            # Use cached status and eligible activities if available
+            import json as _json
+
+            if dossier.cached_status is not None:
+                status = dossier.cached_status
+            else:
+                status = await derive_status(repo, dossier_id)
+
+            if dossier.eligible_activities is not None:
+                try:
+                    eligible = _json.loads(dossier.eligible_activities)
+                except (ValueError, TypeError):
+                    eligible = await compute_eligible_activities(plugin, repo, dossier_id)
+            else:
+                eligible = await compute_eligible_activities(plugin, repo, dossier_id)
+
+            allowed = await filter_by_user_auth(plugin, eligible, user, repo, dossier_id)
 
             # Get current entities — filtered by visible prefixes
             entities = await repo.get_all_latest_entities(dossier_id)

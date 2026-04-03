@@ -134,6 +134,16 @@ async def complete_task(
         attributed_to="system",
     )
 
+    # Update cached status and eligible activities on dossier row
+    from .engine import derive_status, compute_eligible_activities
+    import json as _json
+    current_status = await derive_status(repo, dossier_id)
+    eligible = await compute_eligible_activities(plugin, repo, dossier_id)
+    dossier = await repo.get_dossier(dossier_id)
+    if dossier:
+        dossier.cached_status = current_status
+        dossier.eligible_activities = _json.dumps(eligible)
+
     return complete_activity_id
 
 
