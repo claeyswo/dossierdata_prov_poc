@@ -168,17 +168,23 @@ async def validate_workflow_rules(
     activity_def: dict,
     repo: Repository,
     dossier_id: UUID,
+    known_status: str | None = None,
+    known_activity_types: set[str] | None = None,
 ) -> tuple[bool, str | None]:
     """
     Check requirements and forbidden rules.
     Returns (valid, error_message).
+    Pass known_status and known_activity_types to avoid redundant queries.
     """
     requirements = activity_def.get("requirements", {})
     forbidden = activity_def.get("forbidden", {})
 
-    # Get activity history
-    activities = await repo.get_activities_for_dossier(dossier_id)
-    completed_types = {a.type for a in activities}
+    # Get activity history (use cached if provided)
+    if known_activity_types is not None:
+        completed_types = known_activity_types
+    else:
+        activities = await repo.get_activities_for_dossier(dossier_id)
+        completed_types = {a.type for a in activities}
 
     # Check required activities
     for req_activity in requirements.get("activities", []):
@@ -194,10 +200,11 @@ async def validate_workflow_rules(
     req_statuses = requirements.get("statuses", [])
     forb_statuses = forbidden.get("statuses", [])
 
-    # Cache status if needed by either check
-    current_status = None
-    if (req_statuses and any(s for s in req_statuses)) or \
-       (forb_statuses and any(s for s in forb_statuses)):
+    current_status = known_status
+    if current_status is None and (
+        (req_statuses and any(s for s in req_statuses)) or
+        (forb_statuses and any(s for s in forb_statuses))
+    ):
         current_status = await derive_status(repo, dossier_id)
 
     if req_statuses and any(s for s in req_statuses):
@@ -242,36 +249,66 @@ async def derive_status(
     return "nieuw"
 
 
+async def compute_eligible_activities(
+    plugin: Plugin,
+    repo: Repository,
+    dossier_id: UUID,
+    known_status: str | None = None,
+) -> list[str]:
+    """Compute which activities are structurally allowed (workflow rules only, no user check).
+    This is expensive but cacheable on the dossier row."""
+    # Query once, pass to all validate calls
+    activities = await repo.get_activities_for_dossier(dossier_id)
+    activity_types = {a.type for a in activities}
+    status = known_status or await derive_status(repo, dossier_id)
+
+    eligible = []
+    for act_def in plugin.workflow.get("activities", []):
+        if act_def.get("client_callable") is False:
+            continue
+        valid, _ = await validate_workflow_rules(
+            act_def, repo, dossier_id,
+            known_status=status,
+            known_activity_types=activity_types,
+        )
+        if valid:
+            eligible.append(act_def["name"])
+    return eligible
+
+
+async def filter_by_user_auth(
+    plugin: Plugin,
+    eligible: list[str],
+    user: User,
+    repo: Repository,
+    dossier_id: UUID,
+) -> list[dict]:
+    """Filter eligible activities by user authorization. Cheap per-request operation."""
+    allowed = []
+    act_def_map = {a["name"]: a for a in plugin.workflow.get("activities", [])}
+    for act_name in eligible:
+        act_def = act_def_map.get(act_name)
+        if not act_def:
+            continue
+        authorized, _ = await authorize_activity(plugin, act_def, user, repo, dossier_id)
+        if authorized:
+            allowed.append({
+                "type": act_def["name"],
+                "label": act_def.get("label", act_def["name"]),
+            })
+    return allowed
+
+
 async def derive_allowed_activities(
     plugin: Plugin,
     repo: Repository,
     dossier_id: UUID,
     user: User,
 ) -> list[dict]:
-    """Determine which activities are currently allowed for this user."""
-    allowed = []
-
-    for act_def in plugin.workflow.get("activities", []):
-        # Skip activities not callable by clients
-        if act_def.get("client_callable") is False:
-            continue
-
-        # Check workflow rules
-        valid, _ = await validate_workflow_rules(act_def, repo, dossier_id)
-        if not valid:
-            continue
-
-        # Check authorization
-        authorized, _ = await authorize_activity(plugin, act_def, user, repo, dossier_id)
-        if not authorized:
-            continue
-
-        allowed.append({
-            "type": act_def["name"],
-            "label": act_def.get("label", act_def["name"]),
-        })
-
-    return allowed
+    """Determine which activities are currently allowed for this user.
+    Combines eligible check + user auth. Use when cache is not available."""
+    eligible = await compute_eligible_activities(plugin, repo, dossier_id)
+    return await filter_by_user_auth(plugin, eligible, user, repo, dossier_id)
 
 
 # =====================================================================
@@ -377,6 +414,7 @@ async def execute_activity(
     generated_items: list[dict] | None = None,
     workflow_name: str | None = None,
     informed_by: str | None = None,
+    skip_cache: bool = False,
 ) -> dict:
     """
     Execute an activity.
@@ -472,12 +510,18 @@ async def execute_activity(
 
     # 6. Process generated items (new entities from client)
     generated = []
+    generated_externals = []  # external URIs generated by this activity
     allowed_types = activity_def.get("generates", [])
 
     for item in generated_items:
         entity_ref = item.get("entity", "")
         content = item.get("content")
         derived_from = item.get("derivedFrom")
+
+        # Check if this is an external URI being generated
+        if is_external_uri(entity_ref):
+            generated_externals.append(entity_ref)
+            continue
 
         if not content:
             raise ActivityError(422, f"Generated item must have content: {entity_ref}")
@@ -562,6 +606,10 @@ async def execute_activity(
                 if handler_result.generated and not generated:
                     allowed_types = activity_def.get("generates", [])
                     for gen_type, gen_content in handler_result.generated:
+                        # Handler can generate external entities
+                        if gen_type == "external" and isinstance(gen_content, dict) and "uri" in gen_content:
+                            generated_externals.append(gen_content["uri"])
+                            continue
                         if gen_type is None and allowed_types:
                             gen_type = allowed_types[0]
                         if gen_type and gen_content:
@@ -594,6 +642,26 @@ async def execute_activity(
             "entity": gen.get("ref") or f"{gen['type']}/{gen['entity_id']}@{gen['version_id']}",
             "type": gen["type"],
             "content": gen["content"],
+        })
+
+    # 11b. Persist generated external entities (wasGeneratedBy link)
+    for ext_uri in generated_externals:
+        import uuid as uuid_mod
+        ext_entity_id = uuid_mod.uuid5(uuid_mod.NAMESPACE_URL, f"{dossier_id}:{ext_uri}")
+        ext_version_id = uuid4()
+        await repo.create_entity(
+            version_id=ext_version_id,
+            entity_id=ext_entity_id,
+            dossier_id=dossier_id,
+            type="external",
+            generated_by=activity_id,
+            content={"uri": ext_uri},
+            attributed_to=user.id,
+        )
+        generated_response.append({
+            "entity": ext_uri,
+            "type": "external",
+            "content": {"uri": ext_uri},
         })
 
     # 12. Create used links (references only — no overlap with generated)
@@ -724,26 +792,40 @@ async def execute_activity(
                     attributed_to="system",
                 )
 
-    # 17. Post-activity hook (e.g. update search indices)
-    if plugin.post_activity_hook:
-        try:
-            current_entities = await repo.get_all_latest_entities(dossier_id)
-            current_status_for_hook = await derive_status(repo, dossier_id)
-            await plugin.post_activity_hook(
-                repo=repo,
-                dossier_id=dossier_id,
-                activity_type=activity_def["name"],
-                status=current_status_for_hook,
-                entities={e.type: e for e in current_entities},
-            )
-        except Exception as e:
-            # Don't fail the activity if the hook fails
-            import logging
-            logging.getLogger("dossier.engine").warning(f"post_activity_hook failed: {e}")
+    if not skip_cache:
+        # 17. Compute status once (shared by hook, cache, and response)
+        current_status = await derive_status(repo, dossier_id)
 
-    # 18. Build response
-    current_status = await derive_status(repo, dossier_id)
-    allowed = await derive_allowed_activities(plugin, repo, dossier_id, user)
+        # 18. Post-activity hook (e.g. update search indices)
+        if plugin.post_activity_hook:
+            try:
+                current_entities = await repo.get_all_latest_entities(dossier_id)
+                await plugin.post_activity_hook(
+                    repo=repo,
+                    dossier_id=dossier_id,
+                    activity_type=activity_def["name"],
+                    status=current_status,
+                    entities={e.type: e for e in current_entities},
+                )
+            except Exception as e:
+                import logging
+                logging.getLogger("dossier.engine").warning(f"post_activity_hook failed: {e}")
+
+        # 19. Cache status and eligible activities on dossier row
+        eligible = await compute_eligible_activities(plugin, repo, dossier_id, known_status=current_status)
+
+        dossier = await repo.get_dossier(dossier_id)
+        if dossier:
+            import json as _json
+            dossier.cached_status = current_status
+            dossier.eligible_activities = _json.dumps(eligible)
+
+        # 20. Build response (user-specific filtering is cheap)
+        allowed = await filter_by_user_auth(plugin, eligible, user, repo, dossier_id)
+    else:
+        # Fast path for bulk operations: use computed_status from activity row
+        current_status = activity_row.computed_status or status if isinstance(status, str) else "unknown"
+        allowed = []
 
     return {
         "activity": {
