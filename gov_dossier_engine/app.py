@@ -35,13 +35,14 @@ def load_config_and_registry(config_path: str = "config.yaml") -> tuple[dict, Pl
 
     registry = PluginRegistry()
 
-    from .entities import TaskEntity, COMPLETE_TASK_ACTIVITY_DEF
+    from .entities import TaskEntity, SystemNote, SYSTEM_ACTION_DEF
 
     for plugin_module_name in config.get("plugins", []):
         module = importlib.import_module(plugin_module_name)
         plugin = module.create_plugin()
         plugin.entity_models["system:task"] = TaskEntity
-        plugin.workflow.setdefault("activities", []).append(COMPLETE_TASK_ACTIVITY_DEF)
+        plugin.entity_models["system:note"] = SystemNote
+        plugin.workflow.setdefault("activities", []).append(SYSTEM_ACTION_DEF)
         registry.register(plugin)
 
     return config, registry
@@ -83,7 +84,8 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
         await create_tables()
 
     # Register routes
-    register_routes(app, registry, auth_middleware)
-    register_prov_routes(app, registry, auth_middleware)
+    global_access = config.get("global_access", [])
+    register_routes(app, registry, auth_middleware, global_access)
+    register_prov_routes(app, registry, auth_middleware, global_access)
 
     return app

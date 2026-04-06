@@ -115,7 +115,7 @@ class DossierDetailResponse(BaseModel):
 # Route Registration
 # =====================================================================
 
-def register_routes(app: FastAPI, registry: PluginRegistry, get_user):
+def register_routes(app: FastAPI, registry: PluginRegistry, get_user, global_access: list[dict] | None = None):
     """Register all routes — generic endpoints + per-workflow typed wrappers."""
 
     # --- Generic activity endpoint ---
@@ -274,7 +274,7 @@ def register_routes(app: FastAPI, registry: PluginRegistry, get_user):
                 raise HTTPException(500, detail=f"Plugin not found for workflow: {dossier.workflow}")
 
             # Check dossier_access
-            access_entry = await check_dossier_access(repo, dossier_id, user)
+            access_entry = await check_dossier_access(repo, dossier_id, user, global_access)
             visible_prefixes, activity_view_mode = get_visibility_from_entry(access_entry)
 
             # Use cached status and eligible activities if available
@@ -429,7 +429,7 @@ def register_routes(app: FastAPI, registry: PluginRegistry, get_user):
                 raise HTTPException(404, detail="Dossier not found")
 
             # Check dossier_access
-            access_entry = await check_dossier_access(repo, dossier_id, user)
+            access_entry = await check_dossier_access(repo, dossier_id, user, global_access)
             visible_types, _ = get_visibility_from_entry(access_entry)
             if visible_types is not None and entity_type not in visible_types:
                 raise HTTPException(403, detail=f"No access to entity type '{entity_type}'")
@@ -476,7 +476,7 @@ def register_routes(app: FastAPI, registry: PluginRegistry, get_user):
                 raise HTTPException(404, detail="Dossier not found")
 
             # Check dossier_access
-            access_entry = await check_dossier_access(repo, dossier_id, user)
+            access_entry = await check_dossier_access(repo, dossier_id, user, global_access)
             visible_types, _ = get_visibility_from_entry(access_entry)
             if visible_types is not None and entity_type not in visible_types:
                 raise HTTPException(403, detail=f"No access to entity type '{entity_type}'")
@@ -526,7 +526,7 @@ def register_routes(app: FastAPI, registry: PluginRegistry, get_user):
                 raise HTTPException(404, detail="Dossier not found")
 
             # Check dossier_access
-            access_entry = await check_dossier_access(repo, dossier_id, user)
+            access_entry = await check_dossier_access(repo, dossier_id, user, global_access)
             visible_types, _ = get_visibility_from_entry(access_entry)
             if visible_types is not None and entity_type not in visible_types:
                 raise HTTPException(403, detail=f"No access to entity type '{entity_type}'")

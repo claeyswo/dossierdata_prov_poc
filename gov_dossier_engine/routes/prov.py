@@ -25,7 +25,7 @@ from sqlalchemy import select
 router = APIRouter(tags=["prov"])
 
 
-def register_prov_routes(app, registry: PluginRegistry, get_user):
+def register_prov_routes(app, registry: PluginRegistry, get_user, global_access: list[dict] | None = None):
     """Register PROV export and visualization routes."""
 
     @app.get(
@@ -50,7 +50,7 @@ def register_prov_routes(app, registry: PluginRegistry, get_user):
             prefix = "oe"
 
             # Check access + determine visibility
-            access_entry = await check_dossier_access(repo, dossier_id, user)
+            access_entry = await check_dossier_access(repo, dossier_id, user, global_access)
             visible_types, activity_view_mode = get_visibility_from_entry(access_entry)
 
             # Load all data
@@ -257,7 +257,7 @@ def register_prov_routes(app, registry: PluginRegistry, get_user):
             plugin = registry.get(dossier.workflow)
 
             # Check access + determine visibility
-            access_entry = await check_dossier_access(repo, dossier_id, user)
+            access_entry = await check_dossier_access(repo, dossier_id, user, global_access)
             visible_types, activity_view_mode = get_visibility_from_entry(access_entry)
 
             # Load all data
@@ -311,12 +311,12 @@ def register_prov_routes(app, registry: PluginRegistry, get_user):
             # Skip completeTask activities and system:task entities unless include_tasks
             if not include_tasks:
                 for act in activities:
-                    if act.type == "completeTask":
+                    if act.type == "systemAction":
                         skipped_activity_ids.add(act.id)
                 all_entities = [e for e in all_entities if e.type != "system:task"]
             else:
                 # When showing tasks, make sure completeTask isn't hidden by system activity filter
-                skipped_activity_ids -= {act.id for act in activities if act.type == "completeTask"}
+                skipped_activity_ids -= {act.id for act in activities if act.type == "systemAction"}
 
             # Apply activity_view access filtering
             visible_entity_version_ids = set(e.id for e in all_entities)
@@ -558,7 +558,7 @@ def register_prov_routes(app, registry: PluginRegistry, get_user):
 
     # Import and register the columns graph
     from .prov_columns import register_columns_graph
-    register_columns_graph(app, registry, get_user)
+    register_columns_graph(app, registry, get_user, global_access)
 
 
 def _build_graph_html(dossier_id: str, workflow: str, nodes_json: str, edges_json: str) -> str:

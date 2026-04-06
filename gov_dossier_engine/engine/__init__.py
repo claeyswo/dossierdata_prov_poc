@@ -532,7 +532,7 @@ async def execute_activity(
 
         entity_type = parsed["prefix"]
 
-        if entity_type not in allowed_types:
+        if allowed_types and entity_type not in allowed_types:
             raise ActivityError(422, f"Activity cannot generate entity type '{entity_type}'")
 
         model_class = plugin.entity_models.get(entity_type)

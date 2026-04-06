@@ -35,20 +35,32 @@ class TaskEntity(BaseModel):
     error: Optional[str] = None         # error message if failed
 
 
-# completeTask activity definition — injected into every workflow by the engine
-COMPLETE_TASK_ACTIVITY_DEF = {
-    "name": "completeTask",
-    "label": "Voltooi taak",
-    "description": "System activity that marks a task as completed",
+# systemAction — generic system activity for migrations, task completions, corrections, etc.
+# Replaces completeTask. Accepts any entity type in generates.
+# The purpose is conveyed via a system:note entity generated alongside.
+SYSTEM_ACTION_DEF = {
+    "name": "systemAction",
+    "label": "Systeemactie",
+    "description": "Generic system activity. Used for data migrations, task completions, corrections, and other administrative operations.",
     "can_create_dossier": False,
-    "client_callable": False,
+    "client_callable": True,  # callable via API, but only by systeemgebruiker role
     "default_role": "systeem",
     "allowed_roles": ["systeem"],
     "authorization": {"access": "roles", "roles": [{"role": "systeemgebruiker"}]},
     "used": [],
-    "generates": ["system:task"],
+    "generates": [],  # accepts any entity type — no restriction
     "status": None,
     "validators": [],
     "side_effects": [],
     "tasks": [],
 }
+
+# Keep backward compat reference
+COMPLETE_TASK_ACTIVITY_DEF = SYSTEM_ACTION_DEF
+
+
+class SystemNote(BaseModel):
+    """Content model for system:note entities — describes why a systemAction was performed."""
+    text: str
+    ticket: Optional[str] = None
+    migration_id: Optional[str] = None
