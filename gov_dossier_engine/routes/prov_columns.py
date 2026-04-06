@@ -3,7 +3,7 @@ PROV Graph — Column Layout
 
 Three bands:
 - Top: client activities + scheduled activities + cross-dossier dummies
-- Middle: side effects (completeTask always here)
+- Middle: side effects (systemAction always here)
 - Bottom: entities in per-type rows with derivation arrows
 
 Features:
@@ -31,7 +31,7 @@ from ..auth import User
 from .access import check_dossier_access, get_visibility_from_entry
 
 
-def register_columns_graph(app, registry, get_user):
+def register_columns_graph(app, registry, get_user, global_access=None):
 
     @app.get(
         "/dossiers/{dossier_id}/prov/graph/columns",
@@ -53,7 +53,7 @@ def register_columns_graph(app, registry, get_user):
                 raise HTTPException(404, detail="Dossier not found")
 
             plugin = registry.get(dossier.workflow)
-            access_entry = await check_dossier_access(repo, dossier_id, user)
+            access_entry = await check_dossier_access(repo, dossier_id, user, global_access)
             visible_types, _ = get_visibility_from_entry(access_entry)
 
             activities = await repo.get_activities_for_dossier(dossier_id)
@@ -86,7 +86,7 @@ def register_columns_graph(app, registry, get_user):
                         system_activity_types.add(act_def["name"])
 
             if not include_tasks:
-                activities = [a for a in activities if a.type != "completeTask"]
+                activities = [a for a in activities if a.type != "systemAction"]
                 all_entities = [e for e in all_entities if e.type != "system:task"]
 
             activity_by_id = {a.id: a for a in activities}
@@ -110,7 +110,7 @@ def register_columns_graph(app, registry, get_user):
                     if current.id in visited:
                         break
                     visited.add(current.id)
-                    if current.type not in system_activity_types and current.type != "completeTask":
+                    if current.type not in system_activity_types and current.type != "systemAction":
                         return current
                     parent = resolve_parent(current)
                     if parent:
@@ -137,18 +137,32 @@ def register_columns_graph(app, registry, get_user):
 
             # Collect cross-dossier URIs to insert as dummies
             cross_dossier_before = {}  # col_idx → uri (informed_by from another dossier)
-            cross_dossier_after = {}   # col_idx → uri (completeTask informed by remote)
+            cross_dossier_after = {}   # col_idx → uri (systemAction informed by remote)
 
-            # First pass: client + scheduled activities
+            # Find systemAction activities that generated task entities (task completions)
+            task_completion_ids = set()
+            for e in all_entities:
+                if e.type == "system:task" and e.generated_by:
+                    task_completion_ids.add(e.generated_by)
+
+            # First pass: client + scheduled + standalone systemAction activities
             for act in activities:
-                is_client = act.type not in system_activity_types and act.type != "completeTask"
+                is_client = act.type not in system_activity_types and act.type != "systemAction"
                 is_scheduled = act.id in scheduled_ids
-                if is_client or is_scheduled:
+                is_standalone_system = (act.type == "systemAction" and act.id not in task_completion_ids)
+
+                if is_client or is_scheduled or is_standalone_system:
                     col_idx = len(top_row)
+                    if is_scheduled:
+                        kind = "scheduled"
+                    elif is_standalone_system:
+                        kind = "system"
+                    else:
+                        kind = "client"
                     top_row.append({
                         "id": str(act.id),
                         "type": act.type,
-                        "kind": "scheduled" if is_scheduled else "client",
+                        "kind": kind,
                         "time": act.started_at.isoformat() if act.started_at else "",
                         "informed_by": str(act.informed_by) if act.informed_by else None,
                         "agents": list(set(a.agent_name or a.agent_id for a in assoc_by_activity.get(act.id, []))),
@@ -161,9 +175,9 @@ def register_columns_graph(app, registry, get_user):
                     if act.informed_by and str(act.informed_by).startswith("urn:"):
                         cross_dossier_before[col_idx] = str(act.informed_by)
 
-            # Check completeTask for cross-dossier informed_by
+            # Check systemAction for cross-dossier informed_by
             for act in activities:
-                if act.type == "completeTask" and act.informed_by and str(act.informed_by).startswith("urn:"):
+                if act.type == "systemAction" and act.informed_by and str(act.informed_by).startswith("urn:"):
                     root = find_root(act)
                     col_idx = col_for_act.get(root.id)
                     if col_idx is not None:
@@ -207,8 +221,8 @@ def register_columns_graph(app, registry, get_user):
             for act in activities:
                 if act.id in col_for_act:
                     continue
-                # Skip completeTask with no informed_by (recorded task completions — no visual value)
-                if act.type == "completeTask" and not (act.informed_by and str(act.informed_by).strip()):
+                # Skip systemAction with no informed_by (recorded task completions — no visual value)
+                if act.type == "systemAction" and not (act.informed_by and str(act.informed_by).strip()):
                     col_for_act[act.id] = -1  # track but don't render
                     side_effect_ids.add(act.id)
                     continue
@@ -437,6 +451,7 @@ svg {{ width: 100vw; height: 100vh; }}
 <div id="legend">
     <div class="legend-item"><div class="legend-dot" style="background:#2563eb"></div> Client activity</div>
     <div class="legend-item"><div class="legend-dot" style="background:#9333ea"></div> Scheduled activity</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#0891b2"></div> System action</div>
     <div class="legend-item"><div class="legend-dot" style="background:#6b7280;border:1px dashed #9ca3af"></div> Cross-dossier</div>
     <div class="legend-item"><div class="legend-dot" style="background:#312e81;border:1px solid #818cf8"></div> Side effect</div>
     <div class="legend-item"><div class="legend-dot" style="background:#059669"></div> Entity</div>
@@ -462,7 +477,7 @@ const activityUsed = {activity_used_json};
 const derivations = {derivations_json};
 const informedEdges = {informed_edges_json};
 
-const COL_W = 160, COL_GAP = 30, M = {{ t: 60, l: 50 }};
+const COL_W = 160, COL_GAP = 30, M = {{ t: 70, l: 50 }};
 const ACT_H = 32, SE_H = 22, ENT_H = 24, GAP = 4;
 
 const svg = d3.select("#graph");
@@ -483,7 +498,7 @@ const tip = d3.select("#tooltip");
 // Compute layout
 const maxSE = Math.max(1, ...columns.map(c => c.side_effects.length));
 const BAND1_Y = M.t;
-const BAND1_H = ACT_H + 40;
+const BAND1_H = ACT_H + 50;
 const BAND2_Y = BAND1_Y + BAND1_H;
 const BAND2_H = maxSE * (SE_H + GAP) + 20;
 const BAND3_Y = BAND2_Y + BAND2_H;
@@ -523,8 +538,8 @@ columns.forEach((col, ci) => {{
 
     // --- Band 1: activity ---
     const actY = BAND1_Y + 18;
-    const colors = {{ client:"#2563eb", scheduled:"#9333ea", cross_dossier:"#6b7280" }};
-    const strokes = {{ client:"#60a5fa", scheduled:"#c084fc", cross_dossier:"#9ca3af" }};
+    const colors = {{ client:"#2563eb", scheduled:"#9333ea", cross_dossier:"#6b7280", system:"#0891b2" }};
+    const strokes = {{ client:"#60a5fa", scheduled:"#c084fc", cross_dossier:"#9ca3af", system:"#67e8f9" }};
     const fill = colors[col.kind] || "#2563eb";
     const strokeCol = strokes[col.kind] || "#60a5fa";
     const isDashed = col.kind === "cross_dossier";
@@ -536,19 +551,23 @@ columns.forEach((col, ci) => {{
     ag.append("text").attr("x",COL_W/2).attr("y",ACT_H/2+4).attr("text-anchor","middle").attr("fill","#f1f5f9").attr("font-size","10px").attr("font-weight","600")
         .text(col.type ? (col.type.length > 20 ? col.type.slice(0,18)+"…" : col.type) : "?");
 
+    // Agent name — prominent, above the activity
     if (col.agents.length > 0) {{
-        ag.append("text").attr("x",COL_W/2).attr("y",ACT_H+13).attr("text-anchor","middle").attr("fill","#fbbf24").attr("font-size","8px").attr("font-style","italic")
+        g.append("text")
+            .attr("x", x + COL_W / 2).attr("y", actY - 8)
+            .attr("text-anchor","middle").attr("fill","#fbbf24").attr("font-size","11px").attr("font-weight","600")
             .text(col.agents.join(", "));
     }}
+    // Time — small, below the activity
     if (col.time) {{
         const d = new Date(col.time);
-        ag.append("text").attr("x",COL_W/2).attr("y",-4).attr("text-anchor","middle").attr("fill","#94a3b8").attr("font-size","8px")
+        ag.append("text").attr("x",COL_W/2).attr("y",ACT_H+12).attr("text-anchor","middle").attr("fill","#64748b").attr("font-size","8px")
             .text(d.toLocaleString("nl-BE",{{hour:"2-digit",minute:"2-digit",day:"2-digit",month:"2-digit"}}));
     }}
 
     actPos[col.id || col.uri] = {{ x, y: actY, w: COL_W, h: ACT_H }};
 
-    // Hover: highlight used + generated, draw used arrows
+    // Hover: highlight used + generated, draw arrows
     ag.on("mouseover", (event) => {{
         const usedIds = [...(activityUsed[col.id] || [])];
         col.side_effects.forEach(se => {{
@@ -561,53 +580,75 @@ columns.forEach((col, ci) => {{
         g.selectAll(".deriv-arrow").classed("dim", true);
         ag.classed("dim", false).classed("highlight", true);
 
-        // Highlight generated entities
-        const myEntIds = new Set(col.entities.map(e => e.id));
+        // Separate generated entities (in this column) from used entities (may be in other columns)
+        const genEntIds = new Set(col.entities.filter(e => e.generated_by).map(e => e.id));
         const usedSet = new Set(usedIds);
 
         allGroups.forEach(gr => {{
             const eid = gr.attr("data-eid");
-            if (eid && (myEntIds.has(eid) || usedSet.has(eid))) {{
+            if (eid && (genEntIds.has(eid) || usedSet.has(eid))) {{
                 gr.classed("dim", false).classed("highlight", true);
             }}
         }});
 
-        // Draw temporary "used" arrows from activity to used entities
         const actCx = x + COL_W / 2;
-        const actCy = actY + ACT_H;
-        usedSet.forEach(uid => {{
-            const pos = entPos[uid];
-            if (pos) {{
-                const tx = pos.x + pos.w / 2;
-                const ty = pos.y;
-                g.append("path")
-                    .attr("class", "hover-used-arrow")
-                    .attr("d", `M${{actCx}},${{actCy}} C${{actCx}},${{(actCy+ty)/2}} ${{tx}},${{(actCy+ty)/2}} ${{tx}},${{ty}}`)
-                    .attr("fill", "none").attr("stroke", "#f59e0b").attr("stroke-width", 1.5)
-                    .attr("stroke-opacity", 0.7).attr("stroke-dasharray", "4,3")
-                    .attr("marker-end", "url(#arr2)");
-            }}
+        const actBottom = actY + ACT_H;
+        const actTop = actY;
+
+        // Collect all arrow targets to spread them
+        const usedArr = [];
+        usedSet.forEach(uid => {{ const pos = entPos[uid]; if (pos) usedArr.push({{ id: uid, pos }}); }});
+        const genArr = [];
+        genEntIds.forEach(eid => {{ const pos = entPos[eid]; if (pos) genArr.push({{ id: eid, pos }}); }});
+
+        // Sort by horizontal distance to activity center for consistent spread
+        usedArr.sort((a, b) => a.pos.x - b.pos.x);
+        genArr.sort((a, b) => a.pos.x - b.pos.x);
+
+        // "Used" arrows: from entity UP to activity
+        const usedSpread = COL_W * 0.6;
+        usedArr.forEach((item, i) => {{
+            const n = usedArr.length;
+            const startOffset = n > 1 ? (i / (n - 1) - 0.5) * usedSpread : 0;
+            const ax = actCx + startOffset;
+            const ex = item.pos.x + item.pos.w / 2;
+            const ey = item.pos.y;
+            const dx = Math.abs(ex - ax);
+            const curveSpread = Math.min(dx * 0.4, 60) * (i % 2 === 0 ? 1 : -1);
+            const mid1y = ey - (ey - actBottom) * 0.3;
+            const mid2y = actBottom + (ey - actBottom) * 0.3;
+            g.append("path")
+                .attr("class", "hover-used-arrow")
+                .attr("d", `M${{ex}},${{ey}} C${{ex + curveSpread}},${{mid1y}} ${{ax - curveSpread}},${{mid2y}} ${{ax}},${{actBottom}}`)
+                .attr("fill", "none").attr("stroke", "#f59e0b").attr("stroke-width", 1.5)
+                .attr("stroke-opacity", 0.7).attr("stroke-dasharray", "4,3")
+                .attr("marker-end", "url(#arr2)");
         }});
 
-        // Draw temporary "generated" arrows from activity to generated entities
-        myEntIds.forEach(eid => {{
-            const pos = entPos[eid];
-            if (pos) {{
-                const tx = pos.x + pos.w / 2;
-                const ty = pos.y;
-                g.append("path")
-                    .attr("class", "hover-gen-arrow")
-                    .attr("d", `M${{actCx}},${{actCy}} C${{actCx}},${{(actCy+ty)/2}} ${{tx}},${{(actCy+ty)/2}} ${{tx}},${{ty}}`)
-                    .attr("fill", "none").attr("stroke", "#a78bfa").attr("stroke-width", 1.5)
-                    .attr("stroke-opacity", 0.5).attr("stroke-dasharray", "2,2");
-            }}
+        // "Generated" arrows: from activity DOWN to entity
+        const genSpread = COL_W * 0.6;
+        genArr.forEach((item, i) => {{
+            const n = genArr.length;
+            const startOffset = n > 1 ? (i / (n - 1) - 0.5) * genSpread : 0;
+            const ax = actCx + startOffset;
+            const ex = item.pos.x + item.pos.w / 2;
+            const ey = item.pos.y;
+            const dx = Math.abs(ex - ax);
+            const curveSpread = Math.min(dx * 0.4, 60) * (i % 2 === 0 ? 1 : -1);
+            const mid1y = actBottom + (ey - actBottom) * 0.3;
+            const mid2y = ey - (ey - actBottom) * 0.3;
+            g.append("path")
+                .attr("class", "hover-gen-arrow")
+                .attr("d", `M${{ax}},${{actBottom}} C${{ax + curveSpread}},${{mid1y}} ${{ex - curveSpread}},${{mid2y}} ${{ex}},${{ey}}`)
+                .attr("fill", "none").attr("stroke", "#a78bfa").attr("stroke-width", 1.5)
+                .attr("stroke-opacity", 0.5).attr("stroke-dasharray", "2,2");
         }});
 
         let detail = `${{col.kind}}: ${{col.type || col.uri}}`;
         if (col.id) detail += `\\nID: ${{col.id}}`;
         if (col.informed_by) detail += `\\nInformed by: ${{col.informed_by}}`;
-        if (usedIds.length > 0) detail += `\\n\\nUsed ${{usedSet.size}} entities`;
-        if (myEntIds.size > 0) detail += `\\nGenerated ${{myEntIds.size}} entities`;
+        if (usedSet.size > 0) detail += `\\n\\nUsed ${{usedSet.size}} entities`;
+        if (genEntIds.size > 0) detail += `\\nGenerated ${{genEntIds.size}} entities`;
         tip.style("opacity",1).html(detail);
     }})
     .on("mousemove", (event) => tip.style("left",(event.clientX+12)+"px").style("top",(event.clientY-8)+"px"))
