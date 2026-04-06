@@ -146,6 +146,8 @@ activities:
 
     tasks:
       - kind: "recorded"
+        function: "move_bijlagen_to_permanent"
+      - kind: "recorded"
         function: "send_ontvangstbevestiging"
 
   - name: "bewerkAanvraag"
@@ -184,7 +186,9 @@ activities:
       - activity: "duidVerantwoordelijkeOrganisatieAan"
       - activity: "setSystemFields"
 
-    tasks: []
+    tasks:
+      - kind: "recorded"
+        function: "move_bijlagen_to_permanent"
 
   - name: "vervolledigAanvraag"
     label: "Vervolledig aanvraag"
@@ -228,6 +232,8 @@ activities:
       - activity: "setSystemFields"
 
     tasks:
+      - kind: "recorded"
+        function: "move_bijlagen_to_permanent"
       - kind: "recorded"
         function: "send_ontvangstbevestiging"
 

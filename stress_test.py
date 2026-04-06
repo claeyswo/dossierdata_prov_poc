@@ -75,6 +75,29 @@ def make_d2_flow(dossier_idx: int) -> list[dict]:
 
     steps = []
 
+    # Pre-generate synthetic file ids for this dossier. The stress test does
+    # not actually upload files to the File Service — the read benchmark only
+    # measures Pydantic hydration + the FileId-walker + HMAC signing, none of
+    # which touch the File Service. The values just need to be opaque strings
+    # so the walker treats them as file ids.
+    aanvraag_bijlage_fids = [str(uuid4()), str(uuid4())]  # 2 bijlagen per aanvraag
+    brief_fids = [str(uuid4()) for _ in range(3)]
+
+    bijlagen_content = [
+        {
+            "file_id": aanvraag_bijlage_fids[0],
+            "filename": "detailplan.pdf",
+            "content_type": "application/pdf",
+            "size": 102400,
+        },
+        {
+            "file_id": aanvraag_bijlage_fids[1],
+            "filename": "fotos.zip",
+            "content_type": "application/zip",
+            "size": 512000,
+        },
+    ]
+
     # Step 1: dienAanvraagIn
     steps.append({
         "path": f"/dossiers/{did}/activities/a0{dossier_idx:06d}-0001-0000-0000-000000000001/dienAanvraagIn",
@@ -90,6 +113,7 @@ def make_d2_flow(dossier_idx: int) -> list[dict]:
                     "aanvrager": aanvrager,
                     "gemeente": gemeente,
                     "object": obj_uri,
+                    "bijlagen": bijlagen_content,
                 }
             }]
         }
@@ -106,7 +130,7 @@ def make_d2_flow(dossier_idx: int) -> list[dict]:
                     "beslissing": "onvolledig",
                     "datum": datetime.now(timezone.utc).isoformat(),
                     "object": obj_uri,
-                    "brief": f"https://dms.example.com/brieven/brief-{dossier_idx}-001",
+                    "brief": brief_fids[0],
                 }
             }]
         }
@@ -139,6 +163,7 @@ def make_d2_flow(dossier_idx: int) -> list[dict]:
                     "aanvrager": aanvrager,
                     "gemeente": gemeente,
                     "object": obj_uri,
+                    "bijlagen": bijlagen_content,
                 }
             }]
         }
@@ -159,6 +184,7 @@ def make_d2_flow(dossier_idx: int) -> list[dict]:
                     "aanvrager": aanvrager,
                     "gemeente": gemeente,
                     "object": obj_uri,
+                    "bijlagen": bijlagen_content,
                 }
             }]
         }
@@ -176,7 +202,7 @@ def make_d2_flow(dossier_idx: int) -> list[dict]:
                     "beslissing": "goedgekeurd",
                     "datum": datetime.now(timezone.utc).isoformat(),
                     "object": obj_uri,
-                    "brief": f"https://dms.example.com/brieven/brief-{dossier_idx}-002",
+                    "brief": brief_fids[1],
                 }
             }]
         }
@@ -207,7 +233,7 @@ def make_d2_flow(dossier_idx: int) -> list[dict]:
                     "beslissing": "goedgekeurd",
                     "datum": datetime.now(timezone.utc).isoformat(),
                     "object": obj_uri,
-                    "brief": f"https://dms.example.com/brieven/brief-{dossier_idx}-003",
+                    "brief": brief_fids[2],
                 }
             }]
         }
