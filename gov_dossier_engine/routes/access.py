@@ -30,7 +30,7 @@ async def check_dossier_access(
             if entry_role and entry_role in user.roles:
                 return entry
 
-    access_entity = await repo.get_latest_entity(dossier_id, "oe:dossier_access")
+    access_entity = await repo.get_singleton_entity(dossier_id, "oe:dossier_access")
     if not access_entity or not access_entity.content:
         return None  # no access entity = no restrictions
 

@@ -131,6 +131,28 @@ class UsedRow(Base):
     activity = relationship("ActivityRow", back_populates="used_entities")
 
 
+class RelationRow(Base):
+    """Generic activity→entity relation under a named type.
+
+    Used for PROV-style annotations beyond `used` and `wasGeneratedBy` — e.g.
+    `oe:neemtAkteVan` ("takes note of") for explicitly acknowledging newer
+    entity versions the activity chose not to act on. Plugins can register
+    their own relation types; the engine stores and returns them uniformly
+    but delegates validation to plugin-registered validators."""
+    __tablename__ = "activity_relations"
+
+    activity_id = Column(UUID_DB(), ForeignKey("activities.id"), primary_key=True)
+    entity_id = Column(UUID_DB(), ForeignKey("entities.id"), primary_key=True)
+    relation_type = Column(Text, primary_key=True, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        Index("ix_relations_activity", "activity_id"),
+        Index("ix_relations_entity", "entity_id"),
+        Index("ix_relations_type", "relation_type"),
+    )
+
+
 class TaskRow(Base):
     __tablename__ = "tasks"
 
@@ -242,12 +264,36 @@ class Repository:
     async def get_entity(self, version_id: UUID) -> Optional[EntityRow]:
         return await self.session.get(EntityRow, version_id)
 
-    async def get_latest_entity(self, dossier_id: UUID, entity_type: str) -> Optional[EntityRow]:
+    async def get_singleton_entity(
+        self, dossier_id: UUID, entity_type: str
+    ) -> Optional[EntityRow]:
+        """Return the latest (most recently created) entity of `entity_type`
+        in the dossier. Intended for singleton-cardinality types — callers
+        expecting a unique entity per type per dossier.
+
+        NOTE: this method does NOT enforce the singleton invariant itself;
+        cardinality enforcement happens at the engine layer via
+        `plugin.cardinality_of(entity_type)`. See phase 1b."""
         from sqlalchemy import select
         result = await self.session.execute(
             select(EntityRow)
             .where(EntityRow.dossier_id == dossier_id)
             .where(EntityRow.type == entity_type)
+            .order_by(EntityRow.created_at.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
+    async def get_latest_entity_by_id(
+        self, dossier_id: UUID, entity_id: UUID
+    ) -> Optional[EntityRow]:
+        """Return the newest version row for a specific logical entity_id,
+        or None if no versions of this entity exist in the dossier."""
+        from sqlalchemy import select
+        result = await self.session.execute(
+            select(EntityRow)
+            .where(EntityRow.dossier_id == dossier_id)
+            .where(EntityRow.entity_id == entity_id)
             .order_by(EntityRow.created_at.desc())
             .limit(1)
         )
@@ -276,6 +322,37 @@ class Repository:
         from sqlalchemy import select
         result = await self.session.execute(
             select(EntityRow)
+            .where(EntityRow.dossier_id == dossier_id)
+            .where(EntityRow.type == entity_type)
+            .order_by(EntityRow.created_at)
+        )
+        return list(result.scalars().all())
+
+    async def get_entities_by_type_latest(
+        self, dossier_id: UUID, entity_type: str
+    ) -> list[EntityRow]:
+        """Return the latest version of each distinct logical entity of this
+        type in the dossier. For singleton types the list has at most one
+        element. For multi-cardinality types, one element per entity_id."""
+        from sqlalchemy import select, func
+        # Subquery: max(created_at) per entity_id for this type
+        subq = (
+            select(
+                EntityRow.entity_id,
+                func.max(EntityRow.created_at).label("max_created"),
+            )
+            .where(EntityRow.dossier_id == dossier_id)
+            .where(EntityRow.type == entity_type)
+            .group_by(EntityRow.entity_id)
+            .subquery()
+        )
+        result = await self.session.execute(
+            select(EntityRow)
+            .join(
+                subq,
+                (EntityRow.entity_id == subq.c.entity_id)
+                & (EntityRow.created_at == subq.c.max_created),
+            )
             .where(EntityRow.dossier_id == dossier_id)
             .where(EntityRow.type == entity_type)
             .order_by(EntityRow.created_at)
@@ -363,6 +440,35 @@ class Repository:
             select(UsedRow.entity_id).where(UsedRow.activity_id == activity_id)
         )
         return {row[0] for row in result.all()}
+
+    # --- Relations (generic activity→entity edges beyond used/generated) ---
+
+    async def create_relation(
+        self,
+        activity_id: UUID,
+        entity_version_id: UUID,
+        relation_type: str,
+    ):
+        """Record an activity→entity relation under a named type. Idempotent
+        at the (activity, entity, type) level: inserting the same triple
+        twice is a no-op (caller should avoid it but we don't enforce it
+        here beyond the PK constraint)."""
+        row = RelationRow(
+            activity_id=activity_id,
+            entity_id=entity_version_id,
+            relation_type=relation_type,
+        )
+        self.session.add(row)
+
+    async def get_relations_for_activity(
+        self, activity_id: UUID
+    ) -> list[RelationRow]:
+        """Return every relation row attached to this activity."""
+        from sqlalchemy import select
+        result = await self.session.execute(
+            select(RelationRow).where(RelationRow.activity_id == activity_id)
+        )
+        return list(result.scalars().all())
 
     # --- Agent ---
 

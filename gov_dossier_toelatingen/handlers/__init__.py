@@ -52,9 +52,32 @@ async def set_dossier_access(context: ActivityContext, content: dict | None) -> 
             "activity_view": "all",
         })
 
-    # Behandelaar gets access
-    behandelaar = await context.get_latest_entity("oe:behandelaar")
-    if behandelaar:
+    # Behandelaar gets access — oe:behandelaar is cardinality=multiple, so
+    # we iterate all behandelaar entities currently on the dossier and grant
+    # each one its own access entry. Previously this singleton-looked-up
+    # the "latest" one which was incorrect for multi-cardinality types.
+    # Dedupe by URI so repeated handler invocations that each create a new
+    # behandelaar entity (phase 3 will formalize revisions) don't cause
+    # duplicate access entries.
+    behandelaars = await context.get_entities_latest("oe:behandelaar")
+    seen_uris: set[str] = set()
+    for behandelaar_row in behandelaars:
+        uri = (behandelaar_row.content or {}).get("uri")
+        if not uri or uri in seen_uris:
+            continue
+        seen_uris.add(uri)
+        access_entries.append({
+            "role": f"behandelaar:{uri}",
+            "view": ["oe:aanvraag", "oe:beslissing", "oe:handtekening", "external",
+                      "oe:verantwoordelijke_organisatie", "oe:behandelaar",
+                      "oe:system_fields", "system:task"],
+            "activity_view": "all",
+        })
+
+    # Back-compat: also emit a generic "behandelaar" role so access rules
+    # that match by bare role-name (not by behandelaar URI) keep working.
+    # Remove once all downstream consumers match by URI.
+    if behandelaars:
         access_entries.append({
             "role": "behandelaar",
             "view": ["oe:aanvraag", "oe:beslissing", "oe:handtekening", "external",

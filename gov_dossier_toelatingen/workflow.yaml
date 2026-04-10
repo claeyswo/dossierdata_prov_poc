@@ -108,6 +108,19 @@ authorization:
   create_dossier:
     access: "authenticated"
 
+# Workflow-wide PROV-extension relations. Any activity in this workflow may
+# emit these on its request body unless it overrides the list with its own
+# `relations:` block. Each entry declares a relation type and the plugin
+# must register a validator under that name (or accept pure-annotation
+# semantics if no validator is registered).
+relations:
+  - type: "oe:neemtAkteVan"
+    description: >
+      Acknowledges that the client is aware of a newer version of an entity
+      it used, and has chosen to proceed with the older version anyway. The
+      engine rejects an activity whose `used` block references a stale
+      entity version unless every intervening newer version is listed here.
+
 activities:
 
   - name: "dienAanvraagIn"

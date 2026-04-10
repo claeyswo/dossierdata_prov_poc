@@ -29,6 +29,17 @@ class Plugin:
     validators: dict[str, Callable] = field(default_factory=dict)  # validator_name → async function
     task_handlers: dict[str, Callable] = field(default_factory=dict)  # task_name → async function
 
+    # Validators for custom PROV-extension relations (e.g. oe:neemtAkteVan).
+    # Keyed by relation type string. Each validator receives the full
+    # activity context (resolved used rows, pending generated items, the
+    # relation entries of its type) and raises ActivityError to reject the
+    # request. Returning normally means "accepted". The engine imposes no
+    # semantics on the return value — validators own their own failure
+    # conditions and payload shapes. Signature:
+    #   async def validator(*, plugin, repo, dossier_id, activity_def,
+    #                       entries, used_rows_by_ref, generated_items) -> None
+    relation_validators: dict[str, Callable] = field(default_factory=dict)
+
     # Called after each activity completes (inside the transaction).
     # Signature: async def hook(repo, dossier_id, activity_type, status, entities) -> None
     # Use to update Elasticsearch indices.
@@ -37,6 +48,33 @@ class Plugin:
     # Called during route registration. Receives (app, get_user) and should
     # register workflow-specific search endpoints like /dossiers/{workflow_name}/...
     search_route_factory: Callable | None = None
+
+    # Defaults for engine-provided types. system:task and system:note are
+    # multi-cardinality (many per dossier); oe:dossier_access is a singleton.
+    # These are overlaid by plugin workflow declarations if present.
+    _ENGINE_CARDINALITIES: dict = field(
+        default_factory=lambda: {
+            "system:task": "multiple",
+            "system:note": "multiple",
+            "oe:dossier_access": "single",
+            "external": "multiple",
+        },
+        repr=False,
+    )
+
+    def cardinality_of(self, entity_type: str) -> str:
+        """Return the declared cardinality of an entity type: 'single' or
+        'multiple'. Checks the workflow's `entity_types` block first, then
+        falls back to engine defaults for system/external types, then
+        defaults to 'single' for anything unknown."""
+        for et in self.workflow.get("entity_types", []):
+            if et.get("type") == entity_type:
+                c = et.get("cardinality", "single")
+                return c if c in ("single", "multiple") else "single"
+        return self._ENGINE_CARDINALITIES.get(entity_type, "single")
+
+    def is_singleton(self, entity_type: str) -> bool:
+        return self.cardinality_of(entity_type) == "single"
 
 
 class PluginRegistry:
