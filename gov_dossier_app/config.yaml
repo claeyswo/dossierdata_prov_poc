@@ -9,6 +9,11 @@ plugins:
 auth:
   mode: "poc"
 
+file_service:
+  signing_key: "poc-signing-key-change-in-production"
+  url: "http://localhost:8001"
+  storage_root: "./file_storage"
+
 # Global access rules — apply to ALL dossiers regardless of workflow.
 # Same format as dossier_access entries.
 # Use "view": [] with activity_view: "all" to see all activities but no entity content.
