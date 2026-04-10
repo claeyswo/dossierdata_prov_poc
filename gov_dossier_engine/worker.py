@@ -239,7 +239,7 @@ async def process_task(task: EntityRow, registry, config):
                         used_items=[],
                         generated_items=[],
                         informed_by=str(current_task.generated_by) if current_task.generated_by else None,
-                    )
+                    caller="system",)
                     await repo.session.flush()
 
                     await complete_task(
@@ -297,7 +297,7 @@ async def process_task(task: EntityRow, registry, config):
                         used_items=[{"entity": source_uri}],
                         generated_items=generated_items,
                         informed_by=informed_by_uri,
-                    )
+                    caller="system",)
                     await repo.session.flush()
 
                     # completeTask in source dossier, informed by the activity in target dossier

@@ -110,6 +110,9 @@ curl -s -X PUT "$BASE_URL/dossiers/d1000000-0000-0000-0000-000000000001/activiti
   -H "Content-Type: application/json" \
   -H "X-POC-User: marie.brugge" \
   -d "{
+    \"used\": [
+      {\"entity\": \"oe:aanvraag/e1000000-0000-0000-0000-000000000001@f1000000-0000-0000-0000-000000000001\"}
+    ],
     \"generated\": [
       {
         \"entity\": \"oe:beslissing/e1000000-0000-0000-0000-000000000002@f1000000-0000-0000-0000-000000000002\",
@@ -182,6 +185,9 @@ curl -s -X PUT "$BASE_URL/dossiers/d1000000-0000-0000-0000-000000000001/activiti
   -H "Content-Type: application/json" \
   -H "X-POC-User: marie.brugge" \
   -d "{
+    \"used\": [
+      {\"entity\": \"oe:aanvraag/e1000000-0000-0000-0000-000000000001@f1000000-0000-0000-0000-000000000004\"}
+    ],
     \"generated\": [
       {
         \"entity\": \"oe:beslissing/e1000000-0000-0000-0000-000000000002@f1000000-0000-0000-0000-000000000005\",
@@ -249,6 +255,9 @@ curl -s -X PUT "$BASE_URL/dossiers/d2000000-0000-0000-0000-000000000001/activiti
   -H "Content-Type: application/json" \
   -H "X-POC-User: benjamma" \
   -d "{
+    \"used\": [
+      {\"entity\": \"oe:aanvraag/e2000000-0000-0000-0000-000000000001@f2000000-0000-0000-0000-000000000001\"}
+    ],
     \"generated\": [
       {
         \"entity\": \"oe:beslissing/e2000000-0000-0000-0000-000000000002@f2000000-0000-0000-0000-000000000002\",
@@ -268,6 +277,9 @@ curl -s -X PUT "$BASE_URL/dossiers/d2000000-0000-0000-0000-000000000001/activiti
   -H "Content-Type: application/json" \
   -H "X-POC-User: sophie.tekent" \
   -d '{
+    "used": [
+      {"entity": "oe:beslissing/e2000000-0000-0000-0000-000000000002@f2000000-0000-0000-0000-000000000002"}
+    ],
     "generated": [
       {
         "entity": "oe:handtekening/e2000000-0000-0000-0000-000000000003@f2000000-0000-0000-0000-000000000003",
@@ -336,6 +348,9 @@ curl -s -X PUT "$BASE_URL/dossiers/d2000000-0000-0000-0000-000000000001/activiti
   -H "Content-Type: application/json" \
   -H "X-POC-User: benjamma" \
   -d "{
+    \"used\": [
+      {\"entity\": \"oe:aanvraag/e2000000-0000-0000-0000-000000000001@f2000000-0000-0000-0000-000000000005\"}
+    ],
     \"generated\": [
       {
         \"entity\": \"oe:beslissing/e2000000-0000-0000-0000-000000000002@f2000000-0000-0000-0000-000000000006\",
@@ -356,6 +371,9 @@ curl -s -X PUT "$BASE_URL/dossiers/d2000000-0000-0000-0000-000000000001/activiti
   -H "Content-Type: application/json" \
   -H "X-POC-User: sophie.tekent" \
   -d '{
+    "used": [
+      {"entity": "oe:beslissing/e2000000-0000-0000-0000-000000000002@f2000000-0000-0000-0000-000000000006"}
+    ],
     "generated": [
       {
         "entity": "oe:handtekening/e2000000-0000-0000-0000-000000000003@f2000000-0000-0000-0000-000000000007",
@@ -377,6 +395,9 @@ curl -s -X PUT "$BASE_URL/dossiers/d2000000-0000-0000-0000-000000000001/activiti
   -H "Content-Type: application/json" \
   -H "X-POC-User: benjamma" \
   -d "{
+    \"used\": [
+      {\"entity\": \"oe:aanvraag/e2000000-0000-0000-0000-000000000001@f2000000-0000-0000-0000-000000000005\"}
+    ],
     \"generated\": [
       {
         \"entity\": \"oe:beslissing/e2000000-0000-0000-0000-000000000002@f2000000-0000-0000-0000-000000000008\",
@@ -397,6 +418,9 @@ curl -s -X PUT "$BASE_URL/dossiers/d2000000-0000-0000-0000-000000000001/activiti
   -H "Content-Type: application/json" \
   -H "X-POC-User: sophie.tekent" \
   -d '{
+    "used": [
+      {"entity": "oe:beslissing/e2000000-0000-0000-0000-000000000002@f2000000-0000-0000-0000-000000000008"}
+    ],
     "generated": [
       {
         "entity": "oe:handtekening/e2000000-0000-0000-0000-000000000003@f2000000-0000-0000-0000-000000000009",
@@ -483,6 +507,9 @@ curl -s -X PUT "$BASE_URL/dossiers/d3000000-0000-0000-0000-000000000001/activiti
       {
         \"activity_id\": \"a3000000-0000-0000-0000-000000000003\",
         \"type\": \"doeVoorstelBeslissing\",
+        \"used\": [
+          {\"entity\": \"oe:aanvraag/e3000000-0000-0000-0000-000000000001@f3000000-0000-0000-0000-000000000002\"}
+        ],
         \"generated\": [
           {
             \"entity\": \"oe:beslissing/e3000000-0000-0000-0000-000000000002@f3000000-0000-0000-0000-000000000003\",

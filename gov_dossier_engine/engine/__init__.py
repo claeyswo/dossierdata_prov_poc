@@ -464,23 +464,42 @@ class HandlerResult:
     
     Supports:
     - Single entity: HandlerResult(content={...}, status="...")
-    - Multiple entities: HandlerResult(generated=[("oe:type", {...}), ...], status="...")
+    - Multiple entities: HandlerResult(generated=[...], status="...")
     - Tasks: HandlerResult(tasks=[{...task def...}], status="...")
     - All combined
+
+    `generated` items can be either:
+    - Tuples: (type, content) — legacy shape, engine auto-fills entity_id
+      and derived_from for singletons. Multi-cardinality types get a fresh
+      entity_id with no derivation.
+    - Dicts: {"type": ..., "content": ..., "entity_id": ..., "derived_from": ...}
+      — explicit shape for handlers that need to specify which entity they're
+      revising (required for multi-cardinality types). `entity_id` and
+      `derived_from` are optional and auto-filled when omitted (same rules
+      as tuples).
     """
 
     def __init__(
         self,
         content: dict | None = None,
         status: str | None = None,
-        generated: list[tuple[str, dict]] | None = None,
+        generated: list | None = None,
         tasks: list[dict] | None = None,
     ):
         # Backward compat: single content → list with type=None (resolved from generates[0])
         if content and not generated:
-            self.generated = [(None, content)]
+            self.generated = [{"type": None, "content": content}]
         else:
-            self.generated = generated or []
+            # Normalize tuples to dicts.
+            normalized = []
+            for item in (generated or []):
+                if isinstance(item, dict):
+                    normalized.append(item)
+                elif isinstance(item, (tuple, list)) and len(item) == 2:
+                    normalized.append({"type": item[0], "content": item[1]})
+                else:
+                    raise ValueError(f"Invalid HandlerResult.generated item: {item}")
+            self.generated = normalized
         self.status = status
         self.tasks = tasks or []
 
@@ -507,6 +526,7 @@ async def execute_activity(
     informed_by: str | None = None,
     skip_cache: bool = False,
     relation_items: list[dict] | None = None,
+    caller: str = "client",
 ) -> dict:
     """
     Execute an activity.
@@ -516,6 +536,8 @@ async def execute_activity(
     relation_items: generic activity→entity relations beyond used/generated,
         used for plugin-defined PROV extensions like `oe:neemtAkteVan`.
         Each item is a dict `{"entity": ref, "type": relation_type}`.
+    caller: "client" (API call) or "system" (worker/scheduled task).
+        Auto-resolve of used entities only runs for system callers.
     """
     if generated_items is None:
         generated_items = []
@@ -599,22 +621,25 @@ async def execute_activity(
         resolved_entities[entity_type] = existing_entity
         used_rows_by_ref[entity_ref] = existing_entity
 
-    # Auto-resolve missing used entities
-    for used_def in activity_def.get("used", []):
-        if used_def.get("external"):
-            continue
-        etype = used_def["type"]
-        auto = used_def.get("auto_resolve")
-        if auto == "latest" and etype not in resolved_entities:
-            entity = await lookup_singleton(plugin, repo, dossier_id, etype)
-            if entity:
-                resolved_entities[etype] = entity
-                used_refs.append({
-                    "entity": f"{etype}/{entity.entity_id}@{entity.id}",
-                    "version_id": entity.id,
-                    "type": etype,
-                    "auto_resolved": True,
-                })
+    # Auto-resolve missing used entities. Only allowed for system callers
+    # (worker, side effects). Client callers must supply all used references
+    # explicitly so there is no ambiguity about which version they acted on.
+    if caller == "system":
+        for used_def in activity_def.get("used", []):
+            if used_def.get("external"):
+                continue
+            etype = used_def["type"]
+            auto = used_def.get("auto_resolve")
+            if auto == "latest" and etype not in resolved_entities:
+                entity = await lookup_singleton(plugin, repo, dossier_id, etype)
+                if entity:
+                    resolved_entities[etype] = entity
+                    used_refs.append({
+                        "entity": f"{etype}/{entity.entity_id}@{entity.id}",
+                        "version_id": entity.id,
+                        "type": etype,
+                        "auto_resolved": True,
+                    })
 
     # 6. Process generated items (new entities from client)
     generated = []
@@ -873,7 +898,10 @@ async def execute_activity(
                 # Process handler-generated entities (only if client didn't send any)
                 if handler_result.generated and not generated:
                     allowed_types = activity_def.get("generates", [])
-                    for gen_type, gen_content in handler_result.generated:
+                    for gen_item in handler_result.generated:
+                        gen_type = gen_item.get("type")
+                        gen_content = gen_item.get("content")
+
                         # Handler can generate external entities
                         if gen_type == "external" and isinstance(gen_content, dict) and "uri" in gen_content:
                             generated_externals.append(gen_content["uri"])
@@ -881,18 +909,24 @@ async def execute_activity(
                         if gen_type is None and allowed_types:
                             gen_type = allowed_types[0]
                         if gen_type and gen_content:
-                            # Check if this is a revision of an existing entity.
-                            # Singleton types auto-revise; multi-cardinality types
-                            # create a fresh entity every time (handlers that want
-                            # to revise a specific instance must do so explicitly
-                            # — phase 3 will formalize this).
-                            if plugin.is_singleton(gen_type):
+                            # If the handler explicitly specified entity_id
+                            # and derived_from, use them directly. Otherwise
+                            # auto-fill: singletons auto-revise the existing
+                            # entity; multi-cardinality creates a fresh one.
+                            explicit_entity_id = gen_item.get("entity_id")
+                            explicit_derived_from = gen_item.get("derived_from")
+
+                            if explicit_entity_id is not None:
+                                entity_id_val = UUID(str(explicit_entity_id))
+                                derived_from_id = UUID(str(explicit_derived_from)) if explicit_derived_from else None
+                            elif plugin.is_singleton(gen_type):
                                 existing = await lookup_singleton(plugin, repo, dossier_id, gen_type)
                                 entity_id_val = existing.entity_id if existing else uuid4()
                                 derived_from_id = existing.id if existing else None
                             else:
                                 entity_id_val = uuid4()
                                 derived_from_id = None
+
                             generated.append({
                                 "version_id": uuid4(),
                                 "entity_id": entity_id_val,
@@ -1244,16 +1278,21 @@ async def _execute_side_effects(
 
         if isinstance(se_result, HandlerResult) and se_result.generated:
             se_generates = se_def.get("generates", [])
-            for gen_type, gen_content in se_result.generated:
+            for gen_item in se_result.generated:
+                gen_type = gen_item.get("type")
+                gen_content = gen_item.get("content")
+
                 if gen_type is None and se_generates:
                     gen_type = se_generates[0]
                 if gen_type and gen_content:
                     se_version_id = uuid4()
-                    # Singleton types auto-revise the existing one (if any).
-                    # Multi-cardinality types create a fresh entity every time —
-                    # handlers that want to revise a specific instance of a
-                    # multi-cardinality type must do so explicitly (phase 3).
-                    if plugin.is_singleton(gen_type):
+                    explicit_entity_id = gen_item.get("entity_id")
+                    explicit_derived_from = gen_item.get("derived_from")
+
+                    if explicit_entity_id is not None:
+                        entity_id_val = UUID(str(explicit_entity_id))
+                        derived_from_id = UUID(str(explicit_derived_from)) if explicit_derived_from else None
+                    elif plugin.is_singleton(gen_type):
                         existing = await lookup_singleton(plugin, repo, dossier_id, gen_type)
                         derived_from_id = existing.id if existing else None
                         entity_id_val = existing.entity_id if existing else uuid4()
