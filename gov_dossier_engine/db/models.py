@@ -118,6 +118,7 @@ class EntityRow(Base):
         Index("ix_entities_type", "type"),
         Index("ix_entities_dossier_type", "dossier_id", "type"),
         Index("ix_entities_dossier_type_created", "dossier_id", "type", "created_at"),
+        Index("ix_entities_dossier_entity", "dossier_id", "entity_id"),
         Index("ix_entities_generated_by", "generated_by"),
     )
 
@@ -189,16 +190,39 @@ class Repository:
 
     def __init__(self, session: Session):
         self.session = session
+        # Session-scoped cache: agents that have already been ensured in this
+        # session. Lets `ensure_agent` short-circuit after the first call per
+        # agent_id, avoiding redundant SELECT+UPDATE pairs. Cleared when the
+        # session ends (next request gets a fresh Repository).
+        self._ensured_agents: set[str] = set()
+        # Session-scoped cache of activities per dossier. `derive_status`,
+        # `validate_workflow_rules`, `compute_eligible_activities`, and the
+        # post-activity hook all call `get_activities_for_dossier` within a
+        # single `execute_activity` — without this cache they each issue a
+        # separate SELECT. The cache is invalidated in-place when
+        # `create_activity` adds a new row for the same dossier, so it stays
+        # consistent with the session's view. Keyed by dossier_id.
+        self._activities_cache: dict[UUID, list] = {}
+        # Session-scoped cache of dossier rows. Avoids redundant `SELECT
+        # FROM dossiers WHERE id = ?` when the same dossier is fetched by
+        # multiple code paths in a single request.
+        self._dossier_cache: dict[UUID, Optional["DossierRow"]] = {}
 
     # --- Dossier ---
 
     async def get_dossier(self, dossier_id: UUID) -> Optional[DossierRow]:
+        if dossier_id in self._dossier_cache:
+            return self._dossier_cache[dossier_id]
         result = await self.session.get(DossierRow, dossier_id)
+        self._dossier_cache[dossier_id] = result
         return result
 
     async def create_dossier(self, dossier_id: UUID, workflow: str) -> DossierRow:
         row = DossierRow(id=dossier_id, workflow=workflow)
         self.session.add(row)
+        # Cache the newly-created row so a subsequent get_dossier in the
+        # same session hits the cache instead of issuing a SELECT.
+        self._dossier_cache[dossier_id] = row
         return row
 
     # --- Activity ---
@@ -207,13 +231,18 @@ class Repository:
         return await self.session.get(ActivityRow, activity_id)
 
     async def get_activities_for_dossier(self, dossier_id: UUID) -> list[ActivityRow]:
+        cached = self._activities_cache.get(dossier_id)
+        if cached is not None:
+            return cached
         from sqlalchemy import select
         result = await self.session.execute(
             select(ActivityRow)
             .where(ActivityRow.dossier_id == dossier_id)
             .order_by(ActivityRow.started_at)
         )
-        return list(result.scalars().all())
+        rows = list(result.scalars().all())
+        self._activities_cache[dossier_id] = rows
+        return rows
 
     async def create_activity(
         self,
@@ -235,6 +264,12 @@ class Repository:
             computed_status=computed_status,
         )
         self.session.add(row)
+        # Keep the activities cache consistent with the session's view.
+        # Append-only: insertion order matches started_at order for
+        # activities created within a single request.
+        cached = self._activities_cache.get(dossier_id)
+        if cached is not None:
+            cached.append(row)
         return row
 
     # --- Association ---
@@ -497,14 +532,25 @@ class Repository:
     # --- Agent ---
 
     async def ensure_agent(self, agent_id: str, agent_type: str, name: str | None, properties: dict | None):
+        # Fast path: already ensured this session, nothing to do. This is
+        # safe because agents are effectively immutable for the purposes of
+        # a single activity execution — name/properties changes are rare
+        # and not functional.
+        if agent_id in self._ensured_agents:
+            return
         existing = await self.session.get(AgentRow, agent_id)
         if existing:
-            existing.name = name
-            existing.properties = properties
-            existing.updated_at = datetime.now(timezone.utc)
+            # Only write if something actually changed. Bumping `updated_at`
+            # on every call was pure overhead — the field has no semantic
+            # meaning for the engine.
+            if existing.name != name or existing.properties != properties:
+                existing.name = name
+                existing.properties = properties
+                existing.updated_at = datetime.now(timezone.utc)
         else:
             row = AgentRow(id=agent_id, type=agent_type, name=name, properties=properties)
             self.session.add(row)
+        self._ensured_agents.add(agent_id)
 
     # --- Task ---
 

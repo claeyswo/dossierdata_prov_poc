@@ -117,35 +117,53 @@ async def resolve_from_trigger(
     are found at any level, return None — the caller must disambiguate
     (typically by raising an error).
 
-    Returns the EntityRow or None if no unambiguous match is found."""
-    # Check generated first (post-trigger state wins).
+    Returns the EntityRow or None if no unambiguous match is found.
+
+    NOTE: this function does two queries on every call (generated + used).
+    If you're calling it many times for the same trigger (e.g. multiple
+    side effects all resolving from the same trigger activity), use
+    `resolve_from_prefetched` after fetching the trigger's generated and
+    used lists once."""
     generated = await repo.get_entities_generated_by_activity(trigger_activity_id)
-    gen_of_type = [e for e in generated if e.type == entity_type]
+    used = await repo.get_used_entities_for_activity(trigger_activity_id)
+    return await resolve_from_prefetched(
+        repo, dossier_id, generated, used, entity_type,
+    )
+
+
+async def resolve_from_prefetched(
+    repo: Repository,
+    dossier_id: UUID,
+    trigger_generated: list[EntityRow],
+    trigger_used: list[EntityRow],
+    entity_type: str,
+) -> EntityRow | None:
+    """Same resolution logic as `resolve_from_trigger`, but the caller has
+    already fetched the trigger's generated and used entity lists. Use this
+    when resolving multiple types from the same trigger to avoid redundant
+    queries.
+
+    The only DB query this performs is a single `get_latest_entity_by_id`
+    in the rare case where the type is found in `used` but not in
+    `generated` (to handle the case where a sibling activity in the same
+    transaction may have revised the entity)."""
+    gen_of_type = [e for e in trigger_generated if e.type == entity_type]
     if gen_of_type:
-        # Distinct entity_ids? If multiple, ambiguous.
         entity_ids = {e.entity_id for e in gen_of_type}
         if len(entity_ids) == 1:
-            # Return the newest version (last in created_at order).
             return gen_of_type[-1]
-        return None  # ambiguous: multiple entity_ids of the same type
+        return None
 
-    # Check used (pre-trigger inputs).
-    used = await repo.get_used_entities_for_activity(trigger_activity_id)
-    used_of_type = [e for e in used if e.type == entity_type]
+    used_of_type = [e for e in trigger_used if e.type == entity_type]
     if used_of_type:
         entity_ids = {e.entity_id for e in used_of_type}
         if len(entity_ids) == 1:
-            # The trigger used one specific entity of this type. But the
-            # trigger may have generated a newer version of it — in which
-            # case the generated check above would have caught it. Since
-            # we're here, the trigger didn't revise this entity. Return
-            # the latest version of this entity_id in the dossier (there
-            # may have been revisions by OTHER activities in the same
-            # transaction, e.g. batch).
-            return await repo.get_latest_entity_by_id(dossier_id, used_of_type[0].entity_id)
-        return None  # ambiguous
+            return await repo.get_latest_entity_by_id(
+                dossier_id, used_of_type[0].entity_id,
+            )
+        return None
 
-    return None  # type not in trigger's scope at all
+    return None
 
 
 # =====================================================================
@@ -704,6 +722,17 @@ async def execute_activity(
             except (ValueError, AttributeError):
                 pass  # cross-dossier URI or other non-UUID reference
 
+        # Prefetch trigger scope once if there's anything to auto-resolve.
+        # This avoids 2 queries per used entry that needs auto-resolve.
+        trigger_generated_rows: list[EntityRow] = []
+        trigger_used_rows: list[EntityRow] = []
+        if trigger_id is not None and any(
+            ud.get("auto_resolve") == "latest" and not ud.get("external")
+            for ud in activity_def.get("used", [])
+        ):
+            trigger_generated_rows = await repo.get_entities_generated_by_activity(trigger_id)
+            trigger_used_rows = await repo.get_used_entities_for_activity(trigger_id)
+
         for used_def in activity_def.get("used", []):
             if used_def.get("external"):
                 continue
@@ -712,11 +741,10 @@ async def execute_activity(
             if auto == "latest" and etype not in resolved_entities:
                 entity = None
 
-                # Try trigger scope first (works for both singletons and
-                # multi-cardinality types).
+                # Try trigger scope first using prefetched lists.
                 if trigger_id is not None:
-                    entity = await resolve_from_trigger(
-                        repo, trigger_id, dossier_id, etype,
+                    entity = await resolve_from_prefetched(
+                        repo, dossier_id, trigger_generated_rows, trigger_used_rows, etype,
                     )
 
                 # Anchor fallback: if this is a worker-executed scheduled
@@ -1203,10 +1231,15 @@ async def execute_activity(
             # each other only if they target the same activity AND share the
             # same anchor (None == None matches global-scope tasks).
             if not task_content.allow_multiple and task_content.target_activity:
-                existing_tasks = await repo.get_entities_by_type_latest(
-                    dossier_id, "system:task",
-                )
-                for existing in existing_tasks:
+                # Flat query + Python dedup (see cancel loop below for the
+                # same pattern — avoids an expensive GROUP BY subquery).
+                sup_rows = await repo.get_entities_by_type(dossier_id, "system:task")
+                sup_latest: dict[UUID, EntityRow] = {}
+                for row in sup_rows:
+                    e = sup_latest.get(row.entity_id)
+                    if e is None or row.created_at > e.created_at:
+                        sup_latest[row.entity_id] = row
+                for existing in sup_latest.values():
                     if not existing.content:
                         continue
                     if existing.content.get("status") != "scheduled":
@@ -1248,7 +1281,16 @@ async def execute_activity(
     # entity's state has actually advanced, not when someone merely
     # consulted it. None-anchored tasks (no anchor declared) are treated
     # as global-scope — they cancel whenever the target activity runs.
-    all_task_entities = await repo.get_entities_by_type_latest(dossier_id, "system:task")
+    # Use flat index-backed query and dedupe in Python — much faster
+    # than the _latest variant's GROUP BY subquery. The keep-latest pass
+    # is O(n) over a small list.
+    all_task_rows = await repo.get_entities_by_type(dossier_id, "system:task")
+    latest_by_eid: dict[UUID, EntityRow] = {}
+    for row in all_task_rows:
+        existing = latest_by_eid.get(row.entity_id)
+        if existing is None or row.created_at > existing.created_at:
+            latest_by_eid[row.entity_id] = row
+    all_task_entities = list(latest_by_eid.values())
     # The canceling activity's generated entity_ids (fresh set for this loop).
     this_activity_generated_ids: set[UUID] = {g["entity_id"] for g in generated}
     for task_entity in all_task_entities:
@@ -1383,20 +1425,38 @@ async def _execute_side_effects(
     if depth >= max_depth:
         return  # safety limit
 
+    if not side_effects:
+        return  # nothing to do — skip the agent ensure and prefetch
+
     await repo.ensure_agent("system", "systeem", "Systeem", {})
+
+    # Prefetch the trigger activity's generated and used entities ONCE for
+    # the whole side-effects pass. Every side effect inside this call uses
+    # the same trigger, so we'd otherwise redundantly query these for each
+    # auto-resolved used entry. Two queries here instead of 2N queries.
+    trigger_generated = await repo.get_entities_generated_by_activity(trigger_activity_id)
+    trigger_used = await repo.get_used_entities_for_activity(trigger_activity_id)
 
     for side_effect in side_effects:
         se_activity_name = side_effect.get("activity")
         if not se_activity_name:
             continue
 
-        # Check condition
+        # Check condition. First try the prefetched trigger scope (no DB
+        # hit), then fall back to a singleton lookup for types not in the
+        # trigger's scope.
         condition = side_effect.get("condition")
         if condition:
             cond_entity_type = condition.get("entity_type")
             cond_field = condition.get("field")
             cond_expected = condition.get("value")
-            cond_entity = await lookup_singleton(plugin, repo, dossier_id, cond_entity_type)
+            cond_entity = await resolve_from_prefetched(
+                repo, dossier_id, trigger_generated, trigger_used, cond_entity_type,
+            )
+            if cond_entity is None and plugin.is_singleton(cond_entity_type):
+                cond_entity = await lookup_singleton(
+                    plugin, repo, dossier_id, cond_entity_type,
+                )
             if not cond_entity or _resolve_field(cond_entity.content, cond_field) != cond_expected:
                 continue
 
@@ -1448,9 +1508,9 @@ async def _execute_side_effects(
                 continue
             se_type = se_used_def["type"]
             if se_used_def.get("auto_resolve") == "latest":
-                # Try trigger scope first.
-                se_entity = await resolve_from_trigger(
-                    repo, trigger_activity_id, dossier_id, se_type,
+                # Try trigger scope first using the prefetched lists.
+                se_entity = await resolve_from_prefetched(
+                    repo, dossier_id, trigger_generated, trigger_used, se_type,
                 )
                 if se_entity is None and plugin.is_singleton(se_type):
                     # Fallback: dossier-wide singleton (e.g. a system entity
