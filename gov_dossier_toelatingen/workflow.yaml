@@ -67,6 +67,9 @@ entity_types:
     cardinality: "single"
     revisable: true
     model: "gov_dossier_toelatingen.entities.Aanvraag"
+    schemas:
+      v1: "gov_dossier_toelatingen.entities.Aanvraag"
+      v2: "gov_dossier_toelatingen.entities.AanvraagV2"
 
   - type: "oe:beslissing"
     description: "Beslissing over een toelating"

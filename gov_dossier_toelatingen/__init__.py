@@ -17,18 +17,12 @@ import logging
 import os
 import yaml
 
-from gov_dossier_engine.plugin import Plugin
-from gov_dossier_engine.entities import DossierAccess
-
-from .entities import (
-    Aanvraag,
-    AanvraagV2,
-    Beslissing,
-    Handtekening,
-    VerantwoordelijkeOrganisatie,
-    Behandelaar,
-    SystemFields,
+from gov_dossier_engine.plugin import (
+    Plugin,
+    build_entity_registries_from_workflow,
+    validate_workflow_version_references,
 )
+
 from .handlers import HANDLERS
 from .validators import VALIDATORS
 from .relation_validators import RELATION_VALIDATORS
@@ -116,31 +110,23 @@ def register_search_routes(app, get_user):
 
 
 def create_plugin() -> Plugin:
-    """Create and return the toelatingen plugin."""
+    """Create and return the toelatingen plugin.
+
+    Entity model and versioned schema registries are built from the
+    workflow YAML's `entity_types` block — each entry declares its
+    `model` (default/unversioned) and optional `schemas` mapping
+    version strings to fully-qualified Pydantic class paths. This is
+    the single source of truth for the versioning picture; the engine
+    cross-checks every activity's `new_version` / `allowed_versions`
+    against it at load time.
+    """
 
     workflow_path = os.path.join(os.path.dirname(__file__), "workflow.yaml")
     with open(workflow_path) as f:
         workflow = yaml.safe_load(f)
 
-    entity_models = {
-        "oe:aanvraag": Aanvraag,
-        "oe:beslissing": Beslissing,
-        "oe:handtekening": Handtekening,
-        "oe:verantwoordelijke_organisatie": VerantwoordelijkeOrganisatie,
-        "oe:behandelaar": Behandelaar,
-        "oe:system_fields": SystemFields,
-        "oe:dossier_access": DossierAccess,
-    }
-
-    # Versioned schema registry: (entity_type, version) → Pydantic model.
-    # Activities opt into versioning by declaring `entities.<type>.new_version`
-    # or `allowed_versions` in workflow.yaml; activities without such a block
-    # take the legacy path (validates against entity_models[type], stamps
-    # schema_version=NULL on fresh rows, inherits parent version on revision).
-    entity_schemas = {
-        ("oe:aanvraag", "v1"): Aanvraag,
-        ("oe:aanvraag", "v2"): AanvraagV2,
-    }
+    entity_models, entity_schemas = build_entity_registries_from_workflow(workflow)
+    validate_workflow_version_references(workflow, entity_schemas)
 
     return Plugin(
         name=workflow["name"],

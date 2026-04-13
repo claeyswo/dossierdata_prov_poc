@@ -795,22 +795,9 @@ def _build_activity_description(act_def: dict, plugin: Plugin) -> str:
             # Add entity schema if it's a content-bearing type
             if not u.get("external") and accept in ("new", "any"):
                 entity_type = u.get("type", "")
-                ecfg = (act_def.get("entities") or {}).get(entity_type) or {}
-                doc_version = ecfg.get("new_version") or (
-                    (ecfg.get("allowed_versions") or [None])[-1]
+                desc += _format_entity_schemas_for_doc(
+                    plugin, act_def, entity_type, context="used"
                 )
-                model_class = plugin.resolve_schema(entity_type, doc_version)
-                if model_class:
-                    try:
-                        schema = model_class.model_json_schema()
-                        import json
-                        label = f"`{entity_type}`"
-                        if doc_version:
-                            label += f" @ `{doc_version}`"
-                        desc += f"\n**Content schema ({label}):**\n"
-                        desc += f"```json\n{json.dumps(schema, indent=2)}\n```\n"
-                    except Exception:
-                        pass
         desc += "\n"
 
     # Generates with schemas
@@ -819,26 +806,83 @@ def _build_activity_description(act_def: dict, plugin: Plugin) -> str:
         desc += "### Generates\n"
         for g in generates:
             desc += f"\n#### `{g}`\n"
-            ecfg = (act_def.get("entities") or {}).get(g) or {}
-            doc_version = ecfg.get("new_version") or (
-                (ecfg.get("allowed_versions") or [None])[-1]
+            desc += _format_entity_schemas_for_doc(
+                plugin, act_def, g, context="generates"
             )
-            model_class = plugin.resolve_schema(g, doc_version)
-            if model_class:
-                try:
-                    schema = model_class.model_json_schema()
-                    import json
-                    label = "**Content schema"
-                    if doc_version:
-                        label += f" (@ `{doc_version}`)"
-                    label += ":**"
-                    desc += f"\n{label}\n"
-                    desc += f"```json\n{json.dumps(schema, indent=2)}\n```\n"
-                except Exception:
-                    pass
         desc += "\n"
 
     return desc
+
+
+def _format_entity_schemas_for_doc(plugin, act_def, entity_type: str, context: str) -> str:
+    """Render the schema section(s) for a content-bearing entity type on an
+    activity, for inclusion in the OpenAPI summary.
+
+    For activities that declare version discipline via `entities.<type>`:
+      * `new_version` → "When creating a fresh entity: version X"
+      * `allowed_versions` → "When revising an existing entity: accepts X, Y"
+      * Each distinct version emits its own JSON schema block, labeled.
+
+    For legacy activities (no `entities` block), emits a single unlabeled
+    schema block from `entity_models[type]` — identical to pre-versioning
+    behavior.
+    """
+    import json
+
+    ecfg = (act_def.get("entities") or {}).get(entity_type) or {}
+    new_version = ecfg.get("new_version")
+    allowed_versions = list(ecfg.get("allowed_versions") or [])
+
+    # Legacy path — no version discipline declared for this type on this activity.
+    if not ecfg:
+        model_class = plugin.resolve_schema(entity_type, None)
+        if not model_class:
+            return ""
+        try:
+            schema = model_class.model_json_schema()
+        except Exception:
+            return ""
+        out = f"\n**Content schema (`{entity_type}`):**\n"
+        out += f"```json\n{json.dumps(schema, indent=2)}\n```\n"
+        return out
+
+    # Versioned path — enumerate.
+    out = ""
+
+    if context == "generates" and new_version:
+        out += (
+            f"\n**Fresh entities are stamped as version `{new_version}`.** "
+            f"The engine inherits the parent's stored version on revisions "
+            f"(sticky).\n"
+        )
+    if allowed_versions:
+        pretty = ", ".join(f"`{v}`" for v in allowed_versions)
+        out += (
+            f"\n**This activity accepts existing entities at version(s): "
+            f"{pretty}.** Revisions of entities at other versions are "
+            f"rejected with `422 unsupported_schema_version`.\n"
+        )
+
+    # Collect every version we need to render a schema for (deduped, ordered).
+    versions_to_render: list[str] = []
+    seen: set[str] = set()
+    for v in ([new_version] if new_version else []) + allowed_versions:
+        if v and v not in seen:
+            versions_to_render.append(v)
+            seen.add(v)
+
+    for v in versions_to_render:
+        model_class = plugin.resolve_schema(entity_type, v)
+        if not model_class:
+            continue
+        try:
+            schema = model_class.model_json_schema()
+        except Exception:
+            continue
+        out += f"\n**Schema `{entity_type}` @ `{v}`:**\n"
+        out += f"```json\n{json.dumps(schema, indent=2)}\n```\n"
+
+    return out
 
 
 from .access import check_dossier_access, get_visibility_from_entry
