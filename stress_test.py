@@ -124,6 +124,7 @@ def make_d2_flow(dossier_idx: int) -> list[dict]:
         "path": f"/dossiers/{did}/activities/a0{dossier_idx:06d}-0002-0000-0000-000000000001/doeVoorstelBeslissing",
         "user": behandelaar,
         "body": {
+            "used": [{"entity": f"oe:aanvraag/{eid_aanvraag}@{v[0]}"}],
             "generated": [{
                 "entity": f"oe:beslissing/{eid_beslissing}@{v[1]}",
                 "content": {
@@ -141,6 +142,7 @@ def make_d2_flow(dossier_idx: int) -> list[dict]:
         "path": f"/dossiers/{did}/activities/a0{dossier_idx:06d}-0003-0000-0000-000000000001/tekenBeslissing",
         "user": "sophie.tekent",
         "body": {
+            "used": [{"entity": f"oe:beslissing/{eid_beslissing}@{v[1]}"}],
             "generated": [{
                 "entity": f"oe:handtekening/{eid_handtekening}@{v[2]}",
                 "content": {"getekend": True}
@@ -195,6 +197,7 @@ def make_d2_flow(dossier_idx: int) -> list[dict]:
         "path": f"/dossiers/{did}/activities/a0{dossier_idx:06d}-0006-0000-0000-000000000001/doeVoorstelBeslissing",
         "user": behandelaar,
         "body": {
+            "used": [{"entity": f"oe:aanvraag/{eid_aanvraag}@{v[4]}"}],
             "generated": [{
                 "entity": f"oe:beslissing/{eid_beslissing}@{v[5]}",
                 "derivedFrom": f"oe:beslissing/{eid_beslissing}@{v[1]}",
@@ -213,6 +216,7 @@ def make_d2_flow(dossier_idx: int) -> list[dict]:
         "path": f"/dossiers/{did}/activities/a0{dossier_idx:06d}-0007-0000-0000-000000000001/tekenBeslissing",
         "user": "sophie.tekent",
         "body": {
+            "used": [{"entity": f"oe:beslissing/{eid_beslissing}@{v[5]}"}],
             "generated": [{
                 "entity": f"oe:handtekening/{eid_handtekening}@{v[6]}",
                 "derivedFrom": f"oe:handtekening/{eid_handtekening}@{v[2]}",
@@ -226,6 +230,7 @@ def make_d2_flow(dossier_idx: int) -> list[dict]:
         "path": f"/dossiers/{did}/activities/a0{dossier_idx:06d}-0008-0000-0000-000000000001/doeVoorstelBeslissing",
         "user": behandelaar,
         "body": {
+            "used": [{"entity": f"oe:aanvraag/{eid_aanvraag}@{v[4]}"}],
             "generated": [{
                 "entity": f"oe:beslissing/{eid_beslissing}@{v[7]}",
                 "derivedFrom": f"oe:beslissing/{eid_beslissing}@{v[5]}",
@@ -244,6 +249,7 @@ def make_d2_flow(dossier_idx: int) -> list[dict]:
         "path": f"/dossiers/{did}/activities/a0{dossier_idx:06d}-0009-0000-0000-000000000001/tekenBeslissing",
         "user": "sophie.tekent",
         "body": {
+            "used": [{"entity": f"oe:beslissing/{eid_beslissing}@{v[7]}"}],
             "generated": [{
                 "entity": f"oe:handtekening/{eid_handtekening}@{v[8]}",
                 "derivedFrom": f"oe:handtekening/{eid_handtekening}@{v[6]}",

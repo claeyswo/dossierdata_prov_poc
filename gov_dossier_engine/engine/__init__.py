@@ -579,6 +579,8 @@ async def execute_activity(
     skip_cache: bool = False,
     relation_items: list[dict] | None = None,
     caller: str = "client",
+    anchor_entity_id: UUID | None = None,
+    anchor_type: str | None = None,
 ) -> dict:
     """
     Execute an activity.
@@ -590,6 +592,12 @@ async def execute_activity(
         Each item is a dict `{"entity": ref, "type": relation_type}`.
     caller: "client" (API call) or "system" (worker/scheduled task).
         Auto-resolve of used entities only runs for system callers.
+    anchor_entity_id / anchor_type: set by the worker when executing a
+        scheduled task. If the activity's used block needs an entity of
+        type `anchor_type` and `resolve_from_trigger` can't find it,
+        the engine falls back to `get_latest_entity_by_id(anchor_entity_id)`.
+        Ensures scheduled tasks can locate their anchored entity even when
+        it wasn't touched by the informing activity.
     """
     if generated_items is None:
         generated_items = []
@@ -711,8 +719,17 @@ async def execute_activity(
                         repo, trigger_id, dossier_id, etype,
                     )
 
-                # Fallback: dossier-wide singleton lookup for types not
-                # in the trigger's scope.
+                # Anchor fallback: if this is a worker-executed scheduled
+                # task, the task's anchor may resolve the needed type even
+                # when the informing activity didn't touch it. Only use
+                # the anchor if its type matches what we need.
+                if entity is None and anchor_entity_id is not None and anchor_type == etype:
+                    entity = await repo.get_latest_entity_by_id(
+                        dossier_id, anchor_entity_id,
+                    )
+
+                # Last fallback: dossier-wide singleton lookup for types
+                # that are singleton-cardinality.
                 if entity is None and plugin.is_singleton(etype):
                     entity = await lookup_singleton(
                         plugin, repo, dossier_id, etype,
@@ -1105,6 +1122,22 @@ async def execute_activity(
     )
 
     # 15. Process tasks (YAML-defined + handler-appended)
+    #
+    # Tasks may declare an `anchor_type` in YAML (or the handler may supply
+    # an explicit `anchor_entity_id` in HandlerResult.tasks). The anchor is
+    # the specific entity this task is scoped to — used for:
+    #   * cancel matching (only cancel if the canceling activity generated
+    #     a version of the anchored entity)
+    #   * supersede matching (only supersede existing tasks with the same
+    #     anchor entity_id)
+    #   * allow_multiple semantics (one task per anchor, not per dossier)
+    #   * worker auto-resolve fallback (the task's own used block can
+    #     resolve the anchored entity by entity_id at execution time)
+    #
+    # Resolution order at schedule time:
+    #   1. Handler override (HandlerResult.tasks[].anchor_entity_id)
+    #   2. Engine auto-fill via resolve_from_trigger (this activity's scope)
+    #   3. None (global scope — matches None-anchored tasks only)
     all_task_defs = list(activity_def.get("tasks", []))
     if handler_result and isinstance(handler_result, HandlerResult):
         all_task_defs.extend(handler_result.tasks)
@@ -1126,6 +1159,33 @@ async def execute_activity(
         else:
             # Types 2, 3, 4: create system:task entity
             from ..entities import TaskEntity
+
+            # Resolve anchor. Order: handler override → engine auto-fill.
+            anchor_type = task_def.get("anchor_type")
+            anchor_entity_id: UUID | None = None
+            handler_anchor = task_def.get("anchor_entity_id")
+            if handler_anchor is not None:
+                anchor_entity_id = UUID(str(handler_anchor))
+            elif anchor_type:
+                # Auto-fill: look at what THIS activity generated/used.
+                anchor_row = await resolve_from_trigger(
+                    repo, activity_id, dossier_id, anchor_type,
+                )
+                if anchor_row is not None:
+                    anchor_entity_id = anchor_row.entity_id
+                # If still None, the handler must provide it explicitly.
+                # Fail loudly rather than storing a task with no anchor when
+                # one was declared.
+                if anchor_entity_id is None:
+                    raise ActivityError(
+                        500,
+                        f"Cannot resolve anchor for task "
+                        f"{task_def.get('target_activity') or task_def.get('function')}: "
+                        f"activity '{activity_def['name']}' did not touch any "
+                        f"entity of type '{anchor_type}'. The handler must "
+                        f"supply anchor_entity_id explicitly.",
+                    )
+
             task_content = TaskEntity(
                 kind=task_kind,
                 function=task_def.get("function"),
@@ -1135,28 +1195,39 @@ async def execute_activity(
                 allow_multiple=task_def.get("allow_multiple", False),
                 result_activity_id=str(uuid4()),
                 status="scheduled",
+                anchor_entity_id=str(anchor_entity_id) if anchor_entity_id else None,
+                anchor_type=anchor_type,
             )
 
-            # Check for existing scheduled tasks with same target_activity
+            # Supersession: scoped by anchor_entity_id. Two tasks supersede
+            # each other only if they target the same activity AND share the
+            # same anchor (None == None matches global-scope tasks).
             if not task_content.allow_multiple and task_content.target_activity:
-                existing_tasks = await repo.get_entities_by_type(dossier_id, "system:task")
+                existing_tasks = await repo.get_entities_by_type_latest(
+                    dossier_id, "system:task",
+                )
                 for existing in existing_tasks:
-                    if existing.content and \
-                       existing.content.get("target_activity") == task_content.target_activity and \
-                       existing.content.get("status") == "scheduled":
-                        # Supersede old task
-                        superseded_content = dict(existing.content)
-                        superseded_content["status"] = "superseded"
-                        await repo.create_entity(
-                            version_id=uuid4(),
-                            entity_id=existing.entity_id,
-                            dossier_id=dossier_id,
-                            type="system:task",
-                            generated_by=activity_id,
-                            content=superseded_content,
-                            derived_from=existing.id,
-                            attributed_to="system",
-                        )
+                    if not existing.content:
+                        continue
+                    if existing.content.get("status") != "scheduled":
+                        continue
+                    if existing.content.get("target_activity") != task_content.target_activity:
+                        continue
+                    if existing.content.get("anchor_entity_id") != task_content.anchor_entity_id:
+                        continue
+                    # Same target, same anchor → supersede.
+                    superseded_content = dict(existing.content)
+                    superseded_content["status"] = "superseded"
+                    await repo.create_entity(
+                        version_id=uuid4(),
+                        entity_id=existing.entity_id,
+                        dossier_id=dossier_id,
+                        type="system:task",
+                        generated_by=activity_id,
+                        content=superseded_content,
+                        derived_from=existing.id,
+                        attributed_to="system",
+                    )
 
             # Create the task entity
             await repo.create_entity(
@@ -1169,35 +1240,58 @@ async def execute_activity(
                 attributed_to="system",
             )
 
-    # 16. Cancel tasks that list this activity type in cancel_if_activities
-    all_task_entities = await repo.get_entities_by_type(dossier_id, "system:task")
+    # 16. Cancel tasks that list this activity type in cancel_if_activities.
+    #
+    # Scoped by anchor: a cancel fires only if the canceling activity
+    # **generated** a new version of the task's anchored entity. Using
+    # generated-only (not generated+used) ensures we cancel when the
+    # entity's state has actually advanced, not when someone merely
+    # consulted it. None-anchored tasks (no anchor declared) are treated
+    # as global-scope — they cancel whenever the target activity runs.
+    all_task_entities = await repo.get_entities_by_type_latest(dossier_id, "system:task")
+    # The canceling activity's generated entity_ids (fresh set for this loop).
+    this_activity_generated_ids: set[UUID] = {g["entity_id"] for g in generated}
     for task_entity in all_task_entities:
         if not task_entity.content:
             continue
         if task_entity.content.get("status") != "scheduled":
             continue
         cancel_list = task_entity.content.get("cancel_if_activities", [])
-        if activity_def["name"] in cancel_list:
-            # Only cancel if task was created before this activity
-            task_created = task_entity.created_at
-            if task_created:
-                # Ensure both are comparable (SQLite returns naive datetimes)
-                if task_created.tzinfo is None:
-                    task_created = task_created.replace(tzinfo=timezone.utc)
-                if task_created >= now:
-                    continue
-                cancelled_content = dict(task_entity.content)
-                cancelled_content["status"] = "cancelled"
-                await repo.create_entity(
-                    version_id=uuid4(),
-                    entity_id=task_entity.entity_id,
-                    dossier_id=dossier_id,
-                    type="system:task",
-                    generated_by=activity_id,
-                    content=cancelled_content,
-                    derived_from=task_entity.id,
-                    attributed_to="system",
-                )
+        if activity_def["name"] not in cancel_list:
+            continue
+
+        # Anchor scope check: if the task is anchored, the canceling
+        # activity must have generated a version of that specific entity.
+        task_anchor_id_str = task_entity.content.get("anchor_entity_id")
+        if task_anchor_id_str is not None:
+            try:
+                task_anchor_id = UUID(task_anchor_id_str)
+            except (ValueError, TypeError):
+                continue  # malformed anchor — skip
+            if task_anchor_id not in this_activity_generated_ids:
+                continue  # canceling activity didn't advance this entity
+
+        # Only cancel if task was created before this activity.
+        task_created = task_entity.created_at
+        if task_created is None:
+            continue
+        if task_created.tzinfo is None:
+            task_created = task_created.replace(tzinfo=timezone.utc)
+        if task_created >= now:
+            continue
+
+        cancelled_content = dict(task_entity.content)
+        cancelled_content["status"] = "cancelled"
+        await repo.create_entity(
+            version_id=uuid4(),
+            entity_id=task_entity.entity_id,
+            dossier_id=dossier_id,
+            type="system:task",
+            generated_by=activity_id,
+            content=cancelled_content,
+            derived_from=task_entity.id,
+            attributed_to="system",
+        )
 
     if not skip_cache:
         # 17. Compute status once (shared by hook, cache, and response)

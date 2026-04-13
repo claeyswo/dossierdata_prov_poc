@@ -34,6 +34,15 @@ class TaskEntity(BaseModel):
     result: Optional[str] = None        # URI or result data after completion
     error: Optional[str] = None         # error message if failed
 
+    # Anchor: the specific entity this task is scoped to, used for cancel,
+    # supersede, and allow_multiple matching. Stored as strings so the Pydantic
+    # model is JSON-round-trippable through SQLite. `anchor_type` records the
+    # entity type the anchor is bound to, so worker-executed scheduled tasks
+    # can use it as an auto-resolve fallback for multi-cardinality used types
+    # that match the anchor's type.
+    anchor_entity_id: Optional[str] = None
+    anchor_type: Optional[str] = None
+
 
 # systemAction — generic system activity for migrations, task completions, corrections, etc.
 # Replaces completeTask. Accepts any entity type in generates.

@@ -157,3 +157,89 @@ async def trace_ancestry(
         seen.values(),
         key=lambda e: (-depth[e.id], e.created_at),
     )
+
+
+async def find_related_entity(
+    repo: Repository,
+    dossier_id: UUID,
+    start_entity: EntityRow,
+    target_type: str,
+    *,
+    max_hops: int = 10,
+) -> Optional[EntityRow]:
+    """Find an entity of `target_type` that is related to `start_entity` by
+    walking backwards through the activity graph.
+
+    Unlike `trace_chain` and `trace_ancestry` (which walk the derivation
+    graph through `derived_from` and `used`), this walker traverses the
+    **activity** graph: starting from the activity that generated
+    `start_entity`, inspect what that activity touched (generated + used).
+    If the target type appears there unambiguously, return it. Otherwise,
+    expand to the activities that generated the used entities, and to the
+    activity that informed this one. Repeat up to `max_hops` levels.
+
+    This is the right tool when you need to answer "given that I have a
+    beslissing, what aanvraag was it made about?" even though the beslissing
+    is not derived from the aanvraag — the relationship runs through the
+    doeVoorstelBeslissing activity that used the aanvraag and generated the
+    beslissing.
+
+    Returns the EntityRow (latest version of the matching entity_id) if a
+    unique match is found. Returns None if:
+    * the start entity is a root (no generating activity to walk from)
+    * no match is found within max_hops
+    * at any visited activity, multiple distinct entities of `target_type`
+      are present (ambiguous — the caller must disambiguate)
+
+    The trivial case where `start_entity.type == target_type` returns the
+    start entity itself without walking.
+    """
+    if start_entity.type == target_type:
+        return start_entity
+
+    if start_entity.generated_by is None:
+        # External or root entity — no activity to walk from.
+        return None
+
+    visited_activities: set[UUID] = set()
+    frontier: list[UUID] = [start_entity.generated_by]
+
+    for _ in range(max_hops):
+        if not frontier:
+            return None
+
+        next_frontier: list[UUID] = []
+        for activity_id in frontier:
+            if activity_id in visited_activities:
+                continue
+            visited_activities.add(activity_id)
+
+            # What did this activity touch? generated + used.
+            generated = await repo.get_entities_generated_by_activity(activity_id)
+            used = await repo.get_used_entities_for_activity(activity_id)
+            all_touched = generated + used
+
+            # Target type present at this activity?
+            candidates = [e for e in all_touched if e.type == target_type]
+            if candidates:
+                entity_ids = {e.entity_id for e in candidates}
+                if len(entity_ids) == 1:
+                    # Return the current latest version of this entity_id.
+                    return await repo.get_latest_entity_by_id(
+                        dossier_id, candidates[0].entity_id,
+                    )
+                return None  # ambiguous at this activity
+
+            # No match here — expand frontier backwards.
+            # (a) Through each used entity's generating activity.
+            for used_entity in used:
+                if used_entity.generated_by is not None:
+                    next_frontier.append(used_entity.generated_by)
+            # (b) Through the informed_by chain.
+            activity_row = await repo.get_activity(activity_id)
+            if activity_row is not None and activity_row.informed_by is not None:
+                next_frontier.append(activity_row.informed_by)
+
+        frontier = next_frontier
+
+    return None

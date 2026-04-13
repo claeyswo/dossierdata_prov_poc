@@ -228,6 +228,13 @@ async def process_task(task: EntityRow, registry, config):
                     if not act_def:
                         raise ValueError(f"Activity definition not found: {target_activity_type}")
 
+                    # Extract anchor from task content so the engine's
+                    # auto-resolve can fall back to it when the informing
+                    # activity's scope doesn't cover all needed types.
+                    task_anchor_id_str = task_content.get("anchor_entity_id")
+                    task_anchor_type = task_content.get("anchor_type")
+                    task_anchor_id = UUID(task_anchor_id_str) if task_anchor_id_str else None
+
                     await execute_activity(
                         plugin=plugin,
                         activity_def=act_def,
@@ -239,7 +246,10 @@ async def process_task(task: EntityRow, registry, config):
                         used_items=[],
                         generated_items=[],
                         informed_by=str(current_task.generated_by) if current_task.generated_by else None,
-                    caller="system",)
+                        caller="system",
+                        anchor_entity_id=task_anchor_id,
+                        anchor_type=task_anchor_type,
+                    )
                     await repo.session.flush()
 
                     await complete_task(

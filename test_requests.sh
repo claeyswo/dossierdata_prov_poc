@@ -1018,3 +1018,39 @@ print('  OK: 422 relations cannot reference external URIs')
 echo ""
 
 echo "D6 summary: all stale_used_reference + oe:neemtAkteVan checks passed"
+echo ""
+echo ""
+
+# ============================================================================
+# DOSSIER 7: anchor mechanism verification
+# ============================================================================
+# Reuses D2 state from earlier. Verifies that:
+# 1. The trekAanvraagIn task scheduled during D2 has anchor_entity_id set
+# 2. The anchor_type is oe:aanvraag
+# 3. The task got cancelled (status=cancelled) after vervolledigAanvraag ran
+# ============================================================================
+
+echo "============================================"
+echo "DOSSIER 7: anchor mechanism (reuses D2)"
+echo "============================================"
+echo ""
+
+echo "--- D7 Check: D2's trekAanvraagIn task has correct anchor + was cancelled ---"
+curl -s "$BASE_URL/dossiers/d2000000-0000-0000-0000-000000000001" \
+  -H "X-POC-User: claeyswo" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+ents = d.get('currentEntities', [])
+task_entities = [e for e in ents if e.get('type') == 'system:task' and (e.get('content') or {}).get('target_activity') == 'trekAanvraagIn']
+assert len(task_entities) >= 1, f'expected at least 1 trekAanvraagIn task, got {len(task_entities)}'
+task = task_entities[0]
+c = task['content']
+assert c.get('anchor_type') == 'oe:aanvraag', f'expected anchor_type=oe:aanvraag, got {c.get(\"anchor_type\")}'
+assert c.get('anchor_entity_id'), f'expected anchor_entity_id to be set, got {c.get(\"anchor_entity_id\")}'
+assert c.get('anchor_entity_id').startswith('e2000000'), f'expected anchor to be D2 aanvraag, got {c.get(\"anchor_entity_id\")}'
+assert c.get('status') == 'cancelled', f'expected status=cancelled (cancelled by vervolledigAanvraag), got {c.get(\"status\")}'
+print(f'  OK: trekAanvraagIn task correctly anchored to aanvraag {c[\"anchor_entity_id\"][:8]}... and cancelled by vervolledigAanvraag')
+"
+echo ""
+
+echo "D7 summary: anchor mechanism verified end-to-end"
