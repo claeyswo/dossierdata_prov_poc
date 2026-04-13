@@ -108,6 +108,7 @@ class EntityRow(Base):
     derived_from = Column(UUID_DB(), ForeignKey("entities.id"), nullable=True)
     attributed_to = Column(Text, nullable=True)
     content = Column(JSON, nullable=True)
+    schema_version = Column(Text, nullable=True)  # e.g. "v1", "v2"; NULL = unversioned/legacy
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     dossier = relationship("DossierRow", back_populates="entities")
@@ -425,6 +426,7 @@ class Repository:
         content: dict | None = None,
         derived_from: UUID | None = None,
         attributed_to: str | None = None,
+        schema_version: str | None = None,
     ) -> EntityRow:
         row = EntityRow(
             id=version_id,
@@ -435,6 +437,7 @@ class Repository:
             content=content,
             derived_from=derived_from,
             attributed_to=attributed_to,
+            schema_version=schema_version,
         )
         self.session.add(row)
         return row

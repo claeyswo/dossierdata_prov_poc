@@ -22,6 +22,7 @@ from gov_dossier_engine.entities import DossierAccess
 
 from .entities import (
     Aanvraag,
+    AanvraagV2,
     Beslissing,
     Handtekening,
     VerantwoordelijkeOrganisatie,
@@ -131,10 +132,21 @@ def create_plugin() -> Plugin:
         "oe:dossier_access": DossierAccess,
     }
 
+    # Versioned schema registry: (entity_type, version) → Pydantic model.
+    # Activities opt into versioning by declaring `entities.<type>.new_version`
+    # or `allowed_versions` in workflow.yaml; activities without such a block
+    # take the legacy path (validates against entity_models[type], stamps
+    # schema_version=NULL on fresh rows, inherits parent version on revision).
+    entity_schemas = {
+        ("oe:aanvraag", "v1"): Aanvraag,
+        ("oe:aanvraag", "v2"): AanvraagV2,
+    }
+
     return Plugin(
         name=workflow["name"],
         workflow=workflow,
         entity_models=entity_models,
+        entity_schemas=entity_schemas,
         handlers=HANDLERS,
         validators=VALIDATORS,
         relation_validators=RELATION_VALIDATORS,

@@ -24,7 +24,15 @@ class Plugin:
 
     name: str  # workflow name, e.g. "toelatingen"
     workflow: dict  # parsed workflow YAML
-    entity_models: dict[str, type[BaseModel]]  # entity_type_name → Pydantic model
+    entity_models: dict[str, type[BaseModel]]  # entity_type_name → Pydantic model (legacy/default)
+
+    # Versioned schemas: (entity_type, schema_version) → Pydantic model.
+    # Optional. When an entity row has a non-NULL schema_version, the engine
+    # routes lookups through this registry first. NULL schema_version always
+    # falls back to entity_models (legacy path). Plugins that don't version
+    # anything can leave this empty.
+    entity_schemas: dict[tuple[str, str], type[BaseModel]] = field(default_factory=dict)
+
     handlers: dict[str, Callable] = field(default_factory=dict)  # handler_name → async function
     validators: dict[str, Callable] = field(default_factory=dict)  # validator_name → async function
     task_handlers: dict[str, Callable] = field(default_factory=dict)  # task_name → async function
@@ -75,6 +83,28 @@ class Plugin:
 
     def is_singleton(self, entity_type: str) -> bool:
         return self.cardinality_of(entity_type) == "single"
+
+    def resolve_schema(
+        self, entity_type: str, schema_version: str | None
+    ) -> type[BaseModel] | None:
+        """Resolve the Pydantic model class for an entity of a given type
+        and schema version.
+
+        Resolution rules:
+        - If `schema_version` is set, look it up in `entity_schemas`. If not
+          found there, fall back to `entity_models[entity_type]` — this keeps
+          the legacy path available when a plugin introduces versioning for
+          some types but not others.
+        - If `schema_version` is None (legacy/unversioned row, or a plugin
+          that doesn't version this type), use `entity_models[entity_type]`.
+        - Returns None if nothing matches, in which case callers should skip
+          content validation / typed access.
+        """
+        if schema_version is not None:
+            model = self.entity_schemas.get((entity_type, schema_version))
+            if model is not None:
+                return model
+        return self.entity_models.get(entity_type)
 
 
 class PluginRegistry:

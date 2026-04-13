@@ -1054,3 +1054,174 @@ print(f'  OK: trekAanvraagIn task correctly anchored to aanvraag {c[\"anchor_ent
 echo ""
 
 echo "D7 summary: anchor mechanism verified end-to-end"
+
+# ============================================================================
+# DOSSIER 8: entity schema versioning
+# ============================================================================
+# Verifies:
+#   1. testDienAanvraagInV2 stamps schema_version=v2 on a fresh aanvraag and
+#      round-trips the v2-only 'classificatie' field.
+#   2. A legacy (non-versioned) bewerkAanvraag on that v2 row keeps
+#      schema_version=v2 (sticky, rule A) — relaxed legacy interop.
+#   3. testBewerkAanvraagV2Only against D1's legacy (NULL-version) aanvraag
+#      returns 422 unsupported_schema_version with stored_version=null.
+# ============================================================================
+
+echo "============================================"
+echo "DOSSIER 8: entity schema versioning"
+echo "============================================"
+echo ""
+
+D8_BIJLAGE_FID=$(upload_file "jan.aanvrager" "D8 v2 bijlage" "d8.pdf")
+
+echo "--- D8 Step 1: testDienAanvraagInV2 (creates v2 aanvraag) ---"
+D8_STEP1=$(curl -s -X PUT "$BASE_URL/dossiers/d8000000-0000-0000-0000-000000000001/activities/a8000000-0000-0000-0000-000000000001/testDienAanvraagInV2" \
+  -H "Content-Type: application/json" \
+  -H "X-POC-User: jan.aanvrager" \
+  -d "{
+    \"workflow\": \"toelatingen\",
+    \"used\": [{ \"entity\": \"https://id.erfgoed.net/erfgoedobjecten/10008\" }],
+    \"generated\": [
+      {
+        \"entity\": \"oe:aanvraag/e8000000-0000-0000-0000-000000000001@f8000000-0000-0000-0000-000000000001\",
+        \"content\": {
+          \"onderwerp\": \"D8: v2 test aanvraag\",
+          \"handeling\": \"renovatie\",
+          \"aanvrager\": { \"rrn\": \"85010100123\" },
+          \"gemeente\": \"Brugge\",
+          \"object\": \"https://id.erfgoed.net/erfgoedobjecten/10008\",
+          \"bijlagen\": [{ \"file_id\": \"$D8_BIJLAGE_FID\", \"filename\": \"d8.pdf\" }],
+          \"classificatie\": \"beschermd_monument\",
+          \"urgentie\": \"hoog\"
+        }
+      }
+    ]
+  }")
+echo "$D8_STEP1" | python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+gen = r.get('generated', [])
+assert len(gen) == 1, f'expected 1 generated entity, got {len(gen)}: {r}'
+g = gen[0]
+assert g.get('schemaVersion') == 'v2', f'expected schemaVersion=v2 in response, got {g.get(\"schemaVersion\")}: {r}'
+c = g.get('content', {})
+assert c.get('classificatie') == 'beschermd_monument', f'classificatie not roundtripped: {c}'
+assert c.get('urgentie') == 'hoog', f'urgentie not roundtripped: {c}'
+print('  OK: testDienAanvraagInV2 created aanvraag with schema_version=v2 and v2-only fields')
+"
+echo ""
+
+echo "--- D8 Step 2: GET dossier — verify schemaVersion exposed on read ---"
+curl -s "$BASE_URL/dossiers/d8000000-0000-0000-0000-000000000001" \
+  -H "X-POC-User: claeyswo" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+ent = [e for e in d.get('currentEntities', []) if e.get('type') == 'oe:aanvraag']
+assert len(ent) == 1, f'expected 1 oe:aanvraag, got {len(ent)}'
+e = ent[0]
+assert e.get('schemaVersion') == 'v2', f'expected schemaVersion=v2 on read, got {e.get(\"schemaVersion\")}'
+c = e.get('content', {})
+assert c.get('classificatie') == 'beschermd_monument', f'classificatie missing on read: {c}'
+print('  OK: GET response exposes schemaVersion=v2 and v2 fields')
+"
+echo ""
+
+echo "--- D8 Step 3: legacy bewerkAanvraag on v2 row — sticky version (relaxed) ---"
+D8_STEP3_CODE=$(curl -s -o /tmp/d8_step3.json -w "%{http_code}" \
+  -X PUT "$BASE_URL/dossiers/d8000000-0000-0000-0000-000000000001/activities/a8000000-0000-0000-0000-000000000002/bewerkAanvraag" \
+  -H "Content-Type: application/json" \
+  -H "X-POC-User: benjamma" \
+  -d "{
+    \"workflow\": \"toelatingen\",
+    \"used\": [
+      { \"entity\": \"oe:aanvraag/e8000000-0000-0000-0000-000000000001@f8000000-0000-0000-0000-000000000001\" },
+      { \"entity\": \"https://id.erfgoed.net/erfgoedobjecten/10008\" }
+    ],
+    \"generated\": [
+      {
+        \"entity\": \"oe:aanvraag/e8000000-0000-0000-0000-000000000001@f8000000-0000-0000-0000-000000000002\",
+        \"derivedFrom\": \"oe:aanvraag/e8000000-0000-0000-0000-000000000001@f8000000-0000-0000-0000-000000000001\",
+        \"content\": {
+          \"onderwerp\": \"D8: v2 test aanvraag — bewerkt door legacy handler\",
+          \"handeling\": \"renovatie\",
+          \"aanvrager\": { \"rrn\": \"85010100123\" },
+          \"gemeente\": \"Brugge\",
+          \"object\": \"https://id.erfgoed.net/erfgoedobjecten/10008\",
+          \"bijlagen\": []
+        }
+      }
+    ]
+  }")
+python3 -c "
+import json
+code = '$D8_STEP3_CODE'
+assert code == '200', f'expected 200, got {code}'
+r = json.load(open('/tmp/d8_step3.json'))
+g = r['generated'][0]
+assert g.get('schemaVersion') == 'v2', f'sticky version broken: expected v2, got {g.get(\"schemaVersion\")}'
+print('  OK: legacy bewerkAanvraag on v2 row inherited schema_version=v2 (sticky)')
+"
+echo ""
+
+echo "--- D8 Step 4: testBewerkAanvraagV2Only on D1 legacy aanvraag (expect 422) ---"
+# D1 currently has ended up in toelating_verleend after D1 Step 4 revised the
+# aanvraag to version f1000000-...-000000000004. We need derivedFrom pointing
+# at the latest. Get it from the API.
+D1_LATEST=$(curl -s "$BASE_URL/dossiers/d1000000-0000-0000-0000-000000000001" \
+  -H "X-POC-User: claeyswo" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+for e in d.get('currentEntities', []):
+    if e.get('type') == 'oe:aanvraag':
+        print(f\"{e['entityId']}@{e['versionId']}\")
+        break
+")
+echo "  D1 latest aanvraag: $D1_LATEST"
+D8_STEP4_CODE=$(curl -s -o /tmp/d8_step4.json -w "%{http_code}" \
+  -X PUT "$BASE_URL/dossiers/d1000000-0000-0000-0000-000000000001/activities/a8000000-0000-0000-0000-000000000099/testBewerkAanvraagV2Only" \
+  -H "Content-Type: application/json" \
+  -H "X-POC-User: benjamma" \
+  -d "{
+    \"workflow\": \"toelatingen\",
+    \"used\": [
+      { \"entity\": \"oe:aanvraag/$D1_LATEST\" },
+      { \"entity\": \"https://id.erfgoed.net/erfgoedobjecten/10001\" }
+    ],
+    \"generated\": [
+      {
+        \"entity\": \"oe:aanvraag/e1000000-0000-0000-0000-000000000001@f1000000-0000-0000-0000-000000000099\",
+        \"derivedFrom\": \"oe:aanvraag/$D1_LATEST\",
+        \"content\": {
+          \"onderwerp\": \"should never persist\",
+          \"handeling\": \"renovatie\",
+          \"aanvrager\": { \"rrn\": \"85010100123\" },
+          \"gemeente\": \"Brugge\",
+          \"object\": \"https://id.erfgoed.net/erfgoedobjecten/10001\",
+          \"bijlagen\": []
+        }
+      }
+    ]
+  }")
+python3 -c "
+import json
+code = '$D8_STEP4_CODE'
+assert code == '422', f'expected 422, got {code}: {open(\"/tmp/d8_step4.json\").read()}'
+r = json.load(open('/tmp/d8_step4.json'))
+# Payload shape: ActivityError.payload is forwarded via _activity_error_to_http;
+# it lands under 'detail' for FastAPI HTTPExceptions. Check the payload marker.
+detail = r.get('detail', {})
+if isinstance(detail, dict):
+    err = detail.get('error')
+    stored = detail.get('stored_version')
+else:
+    # May be nested further — find 'unsupported_schema_version' anywhere
+    blob = json.dumps(r)
+    assert 'unsupported_schema_version' in blob, f'error marker not in response: {blob}'
+    err = 'unsupported_schema_version'
+    stored = None
+assert err == 'unsupported_schema_version', f'expected error=unsupported_schema_version, got {err}: {r}'
+print('  OK: 422 unsupported_schema_version when revising legacy (NULL-version) row')
+"
+echo ""
+
+echo "D8 summary: entity schema versioning verified end-to-end"

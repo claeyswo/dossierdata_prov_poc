@@ -523,3 +523,76 @@ activities:
     validators: []
     side_effects: []
     tasks: []
+
+  # -----------------------------------------------------------------------
+  # Test-only activities for schema versioning (D8 in test_requests.sh).
+  # These exercise the entity_schemas / new_version / allowed_versions
+  # mechanism without touching real workflow activities.
+  # -----------------------------------------------------------------------
+
+  - name: "testDienAanvraagInV2"
+    label: "TEST: Dien aanvraag in (v2 schema)"
+    description: "Test-only: creates a v2 aanvraag (with classificatie/urgentie)"
+    can_create_dossier: true
+
+    allowed_roles: ["oe:aanvrager"]
+    default_role: "oe:aanvrager"
+
+    authorization:
+      access: "authenticated"
+
+    forbidden:
+      activities:
+        - "dienAanvraagIn"
+        - "testDienAanvraagInV2"
+
+    used:
+      - type: "object"
+        external: true
+        required: true
+        description: "URI van het beschermd erfgoed object"
+
+    generates:
+      - "oe:aanvraag"
+
+    entities:
+      oe:aanvraag:
+        new_version: "v2"
+
+    status: "ingediend"
+    validators: []
+    side_effects:
+      - activity: "duidVerantwoordelijkeOrganisatieAan"
+      - activity: "setSystemFields"
+    tasks: []
+
+  - name: "testBewerkAanvraagV2Only"
+    label: "TEST: Bewerk aanvraag (v2-only)"
+    description: "Test-only: revises an aanvraag but only accepts v2"
+    can_create_dossier: false
+
+    allowed_roles: ["oe:behandelaar"]
+    default_role: "oe:behandelaar"
+
+    authorization:
+      access: "roles"
+      roles:
+        - role: "behandelaar"
+
+    used:
+      - type: "object"
+        external: true
+        required: true
+        description: "URI van het beschermd erfgoed object"
+
+    generates:
+      - "oe:aanvraag"
+
+    entities:
+      oe:aanvraag:
+        allowed_versions: ["v2"]
+
+    status: null
+    validators: []
+    side_effects: []
+    tasks: []

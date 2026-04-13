@@ -113,6 +113,7 @@ class GeneratedResponse(BaseModel):
     entity: str
     type: str
     content: Optional[dict[str, Any]] = None
+    schemaVersion: Optional[str] = None
 
 
 class DossierResponse(BaseModel):
@@ -367,16 +368,19 @@ def register_routes(app: FastAPI, registry: PluginRegistry, get_user, global_acc
 
             for e in entities:
                 if visible_prefixes is None or e.type in visible_prefixes:
-                    model_class = plugin.entity_models.get(e.type)
+                    model_class = plugin.resolve_schema(e.type, e.schema_version)
                     content = inject_download_urls(model_class, e.content, sign) if e.content else e.content
 
-                    current_entities.append({
+                    entity_out = {
                         "type": e.type,
                         "entityId": str(e.entity_id),
                         "versionId": str(e.id),
                         "content": content,
                         "createdAt": e.created_at.isoformat() if e.created_at else None,
-                    })
+                    }
+                    if e.schema_version is not None:
+                        entity_out["schemaVersion"] = e.schema_version
+                    current_entities.append(entity_out)
                     visible_entity_version_ids.add(e.id)
 
             # Get activity history — filtered by activity_view_mode
@@ -791,12 +795,19 @@ def _build_activity_description(act_def: dict, plugin: Plugin) -> str:
             # Add entity schema if it's a content-bearing type
             if not u.get("external") and accept in ("new", "any"):
                 entity_type = u.get("type", "")
-                model_class = plugin.entity_models.get(entity_type)
+                ecfg = (act_def.get("entities") or {}).get(entity_type) or {}
+                doc_version = ecfg.get("new_version") or (
+                    (ecfg.get("allowed_versions") or [None])[-1]
+                )
+                model_class = plugin.resolve_schema(entity_type, doc_version)
                 if model_class:
                     try:
                         schema = model_class.model_json_schema()
                         import json
-                        desc += f"\n**Content schema (`{entity_type}`):**\n"
+                        label = f"`{entity_type}`"
+                        if doc_version:
+                            label += f" @ `{doc_version}`"
+                        desc += f"\n**Content schema ({label}):**\n"
                         desc += f"```json\n{json.dumps(schema, indent=2)}\n```\n"
                     except Exception:
                         pass
@@ -808,12 +819,20 @@ def _build_activity_description(act_def: dict, plugin: Plugin) -> str:
         desc += "### Generates\n"
         for g in generates:
             desc += f"\n#### `{g}`\n"
-            model_class = plugin.entity_models.get(g)
+            ecfg = (act_def.get("entities") or {}).get(g) or {}
+            doc_version = ecfg.get("new_version") or (
+                (ecfg.get("allowed_versions") or [None])[-1]
+            )
+            model_class = plugin.resolve_schema(g, doc_version)
             if model_class:
                 try:
                     schema = model_class.model_json_schema()
                     import json
-                    desc += f"\n**Content schema:**\n"
+                    label = "**Content schema"
+                    if doc_version:
+                        label += f" (@ `{doc_version}`)"
+                    label += ":**"
+                    desc += f"\n{label}\n"
                     desc += f"```json\n{json.dumps(schema, indent=2)}\n```\n"
                 except Exception:
                     pass

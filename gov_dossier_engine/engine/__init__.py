@@ -441,12 +441,13 @@ async def derive_allowed_activities(
 class _PendingEntity:
     """Lightweight stand-in for an entity that hasn't been persisted yet.
     Quacks like EntityRow for handler context."""
-    def __init__(self, content, entity_id, id, attributed_to):
+    def __init__(self, content, entity_id, id, attributed_to, schema_version=None):
         self.content = content
         self.entity_id = entity_id
         self.id = id
         self.attributed_to = attributed_to
         self.created_at = None
+        self.schema_version = schema_version
 
 
 class ActivityContext:
@@ -476,11 +477,19 @@ class ActivityContext:
 
     def get_typed(self, entity_type: str) -> Any | None:
         """Get a used entity's content as a validated Pydantic model instance.
-        Returns None if the entity doesn't exist or has no content."""
+        Returns None if the entity doesn't exist or has no content.
+
+        Routes via plugin.resolve_schema so the returned model matches the
+        row's stored schema_version (rule 3: store-version-wins). Legacy
+        unversioned rows (schema_version=NULL) fall back to entity_models.
+        """
         entity = self._used_entities.get(entity_type)
         if not entity or not entity.content:
             return None
-        model_class = self._entity_models.get(entity_type)
+        if self._plugin is not None:
+            model_class = self._plugin.resolve_schema(entity_type, entity.schema_version)
+        else:
+            model_class = self._entity_models.get(entity_type)
         if model_class:
             return model_class(**entity.content)
         return None
@@ -500,7 +509,10 @@ class ActivityContext:
         entity = await self.repo.get_singleton_entity(self.dossier_id, entity_type)
         if not entity or not entity.content:
             return None
-        model_class = self._entity_models.get(entity_type)
+        if self._plugin is not None:
+            model_class = self._plugin.resolve_schema(entity_type, entity.schema_version)
+        else:
+            model_class = self._entity_models.get(entity_type)
         if model_class:
             return model_class(**entity.content)
         return None
@@ -580,6 +592,82 @@ class TaskResult:
     def __init__(self, target_dossier_id: str, content: dict | None = None):
         self.target_dossier_id = target_dossier_id
         self.content = content
+
+
+def _resolve_schema_version_for_generated(
+    activity_def: dict,
+    entity_type: str,
+    parent_row: "EntityRow | None",
+) -> str | None:
+    """Resolve the schema_version to stamp on a generated entity row.
+
+    Reads the activity's `entities` block for per-type version config:
+
+        entities:
+          oe:aanvraag:
+            new_version: v2          # required when creating fresh
+            allowed_versions: [v1, v2]  # required when revising (optional per-activity)
+
+    Rules (see README "Entity schema versioning"):
+      * If the activity declares no `entities` block for this type at all →
+        legacy/unversioned. Return None. The new row inherits the parent's
+        sticky schema_version (rule A) via the caller, OR is stamped NULL
+        if fresh. Content validates against plugin.entity_models[type].
+      * Fresh entity (parent_row is None):
+          - If `new_version` declared → return it.
+          - If `new_version` missing → 500 misconfiguration (strict).
+      * Revision (parent_row is not None):
+          - If `allowed_versions` declared and parent.schema_version not in
+            it → 422 unsupported_schema_version.
+          - Return parent.schema_version (sticky, rule A).
+
+    Raises ActivityError on misuse.
+    """
+    entities_cfg = activity_def.get("entities") or {}
+    ecfg = entities_cfg.get(entity_type)
+    if not ecfg:
+        # Legacy path: this activity does not declare version discipline
+        # for this type. If revising, inherit the parent's sticky version;
+        # if fresh, stamp NULL.
+        if parent_row is not None:
+            return parent_row.schema_version
+        return None
+
+    if parent_row is None:
+        new_version = ecfg.get("new_version")
+        if not new_version:
+            raise ActivityError(
+                500,
+                f"Activity '{activity_def.get('name')}' declares versioning "
+                f"for '{entity_type}' but has no 'new_version' — cannot "
+                f"create a fresh entity of a versioned type without one",
+                payload={
+                    "error": "missing_new_version_declaration",
+                    "activity": activity_def.get("name"),
+                    "entity_type": entity_type,
+                },
+            )
+        return new_version
+
+    # Revision path.
+    stored = parent_row.schema_version  # may be None for legacy rows
+    allowed = ecfg.get("allowed_versions")
+    if allowed is not None:
+        if stored not in allowed:
+            raise ActivityError(
+                422,
+                f"Activity '{activity_def.get('name')}' cannot revise "
+                f"'{entity_type}' entity with schema_version={stored!r}; "
+                f"allowed versions are {allowed}",
+                payload={
+                    "error": "unsupported_schema_version",
+                    "activity": activity_def.get("name"),
+                    "entity_type": entity_type,
+                    "stored_version": stored,
+                    "allowed_versions": allowed,
+                },
+            )
+    return stored  # sticky — revisions inherit parent's version
 
 
 async def execute_activity(
@@ -886,7 +974,15 @@ async def execute_activity(
 
         # -----------------------------------------------------------------
 
-        model_class = plugin.entity_models.get(entity_type)
+        # Schema version resolution (relaxed legacy mode).
+        # For activities that declare an `entities` block, validate against
+        # the resolved versioned schema. For activities with no declaration,
+        # fall back to plugin.entity_models (legacy) and let the new row
+        # inherit the parent's sticky schema_version via the resolver.
+        new_schema_version = _resolve_schema_version_for_generated(
+            activity_def, entity_type, latest_existing
+        )
+        model_class = plugin.resolve_schema(entity_type, new_schema_version)
         if model_class:
             try:
                 model_class(**content)
@@ -900,6 +996,7 @@ async def execute_activity(
             "content": content,
             "derived_from": UUID(derived_from.split("@")[1]) if derived_from else None,
             "ref": entity_ref,
+            "schema_version": new_schema_version,
         })
 
         # Make available to handlers
@@ -908,6 +1005,7 @@ async def execute_activity(
             entity_id=parsed["id"],
             id=parsed["version"],
             attributed_to=user.id,
+            schema_version=new_schema_version,
         )
 
     # 6b. Process relations (generic PROV-extension edges beyond used/generated)
@@ -1079,13 +1177,17 @@ async def execute_activity(
             content=gen["content"],
             derived_from=gen.get("derived_from"),
             attributed_to=user.id,
+            schema_version=gen.get("schema_version"),
         )
 
-        generated_response.append({
+        response_item = {
             "entity": gen.get("ref") or f"{gen['type']}/{gen['entity_id']}@{gen['version_id']}",
             "type": gen["type"],
             "content": gen["content"],
-        })
+        }
+        if gen.get("schema_version") is not None:
+            response_item["schemaVersion"] = gen["schema_version"]
+        generated_response.append(response_item)
 
     # 11b. Persist generated external entities (wasGeneratedBy link)
     for ext_uri in generated_externals:
@@ -1555,6 +1657,17 @@ async def _execute_side_effects(
                         derived_from_id = None
                         entity_id_val = uuid4()
 
+                    # Resolve parent row (if any) to stamp schema_version
+                    # correctly. Revisions inherit the parent's sticky
+                    # version; fresh entities use the side-effect activity's
+                    # `entities.<type>.new_version` declaration.
+                    se_parent_row = None
+                    if derived_from_id is not None:
+                        se_parent_row = await repo.get_entity(derived_from_id)
+                    se_schema_version = _resolve_schema_version_for_generated(
+                        se_def, gen_type, se_parent_row
+                    )
+
                     await repo.create_entity(
                         version_id=se_version_id,
                         entity_id=entity_id_val,
@@ -1564,6 +1677,7 @@ async def _execute_side_effects(
                         content=gen_content,
                         derived_from=derived_from_id,
                         attributed_to="system",
+                        schema_version=se_schema_version,
                     )
 
         # Recurse into this side effect's own side effects
