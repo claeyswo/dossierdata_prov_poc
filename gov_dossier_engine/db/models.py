@@ -108,6 +108,8 @@ class EntityRow(Base):
     derived_from = Column(UUID_DB(), ForeignKey("entities.id"), nullable=True)
     attributed_to = Column(Text, nullable=True)
     content = Column(JSON, nullable=True)
+    schema_version = Column(Text, nullable=True)  # e.g. "v1", "v2"; NULL = unversioned/legacy
+    tombstoned_by = Column(UUID_DB(), ForeignKey("activities.id"), nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     dossier = relationship("DossierRow", back_populates="entities")
@@ -425,6 +427,7 @@ class Repository:
         content: dict | None = None,
         derived_from: UUID | None = None,
         attributed_to: str | None = None,
+        schema_version: str | None = None,
     ) -> EntityRow:
         row = EntityRow(
             id=version_id,
@@ -435,6 +438,7 @@ class Repository:
             content=content,
             derived_from=derived_from,
             attributed_to=attributed_to,
+            schema_version=schema_version,
         )
         self.session.add(row)
         return row
@@ -460,6 +464,24 @@ class Repository:
             type="external",
             generated_by=None,
             content={"uri": uri},
+        )
+
+    async def tombstone_entity_versions(
+        self, version_ids: list[UUID], tombstone_activity_id: UUID
+    ) -> None:
+        """Mark the given entity versions as tombstoned: set content=NULL
+        and stamp tombstoned_by with the activity that performed the
+        deletion. Per the deletion-scope decision (option a), only the
+        content blob is nulled — the row itself, derivation edges,
+        used/relations references, schema_version, and all PROV linkage
+        survive intact. The audit skeleton stays whole; the data is gone."""
+        if not version_ids:
+            return
+        from sqlalchemy import update
+        await self.session.execute(
+            update(EntityRow)
+            .where(EntityRow.id.in_(version_ids))
+            .values(content=None, tombstoned_by=tombstone_activity_id)
         )
 
     # --- Used ---

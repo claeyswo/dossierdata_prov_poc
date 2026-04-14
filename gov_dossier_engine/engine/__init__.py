@@ -56,12 +56,18 @@ class CardinalityError(Exception):
 
 
 def _allowed_relation_types_for_activity(plugin: Plugin, activity_def: dict) -> set[str]:
-    """Return the set of relation types this activity may carry.
+    """Return the set of relation types this activity may carry on its
+    request body (the permission gate / "what may be sent").
 
     The workflow-level `relations:` block and the activity-level `relations:`
-    block are unioned — both contribute allowed types. Validators registered
-    for any of these types will always be invoked when this activity runs,
-    regardless of whether the client actually sent entries for them."""
+    block are unioned — both contribute permitted types.
+
+    Note that this is distinct from validator-firing. Under the activity-
+    level opt-in dispatch contract, a relation validator runs only for
+    types listed in the activity's OWN `relations:` block, not for types
+    inherited from the workflow-wide allowed-set. Workflow-level
+    declarations permit a type to be sent system-wide; activity-level
+    declarations enable validator enforcement for that specific activity."""
     workflow = {e.get("type") for e in plugin.workflow.get("relations", []) if e.get("type")}
     activity = {e.get("type") for e in activity_def.get("relations", []) if e.get("type")}
     return workflow | activity
@@ -441,12 +447,13 @@ async def derive_allowed_activities(
 class _PendingEntity:
     """Lightweight stand-in for an entity that hasn't been persisted yet.
     Quacks like EntityRow for handler context."""
-    def __init__(self, content, entity_id, id, attributed_to):
+    def __init__(self, content, entity_id, id, attributed_to, schema_version=None):
         self.content = content
         self.entity_id = entity_id
         self.id = id
         self.attributed_to = attributed_to
         self.created_at = None
+        self.schema_version = schema_version
 
 
 class ActivityContext:
@@ -476,11 +483,19 @@ class ActivityContext:
 
     def get_typed(self, entity_type: str) -> Any | None:
         """Get a used entity's content as a validated Pydantic model instance.
-        Returns None if the entity doesn't exist or has no content."""
+        Returns None if the entity doesn't exist or has no content.
+
+        Routes via plugin.resolve_schema so the returned model matches the
+        row's stored schema_version (rule 3: store-version-wins). Legacy
+        unversioned rows (schema_version=NULL) fall back to entity_models.
+        """
         entity = self._used_entities.get(entity_type)
         if not entity or not entity.content:
             return None
-        model_class = self._entity_models.get(entity_type)
+        if self._plugin is not None:
+            model_class = self._plugin.resolve_schema(entity_type, entity.schema_version)
+        else:
+            model_class = self._entity_models.get(entity_type)
         if model_class:
             return model_class(**entity.content)
         return None
@@ -500,7 +515,10 @@ class ActivityContext:
         entity = await self.repo.get_singleton_entity(self.dossier_id, entity_type)
         if not entity or not entity.content:
             return None
-        model_class = self._entity_models.get(entity_type)
+        if self._plugin is not None:
+            model_class = self._plugin.resolve_schema(entity_type, entity.schema_version)
+        else:
+            model_class = self._entity_models.get(entity_type)
         if model_class:
             return model_class(**entity.content)
         return None
@@ -580,6 +598,212 @@ class TaskResult:
     def __init__(self, target_dossier_id: str, content: dict | None = None):
         self.target_dossier_id = target_dossier_id
         self.content = content
+
+
+def _resolve_schema_version_for_generated(
+    activity_def: dict,
+    entity_type: str,
+    parent_row: "EntityRow | None",
+) -> str | None:
+    """Resolve the schema_version to stamp on a generated entity row.
+
+    Reads the activity's `entities` block for per-type version config:
+
+        entities:
+          oe:aanvraag:
+            new_version: v2          # required when creating fresh
+            allowed_versions: [v1, v2]  # required when revising (optional per-activity)
+
+    Rules (see README "Entity schema versioning"):
+      * If the activity declares no `entities` block for this type at all →
+        legacy/unversioned. Return None. The new row inherits the parent's
+        sticky schema_version (rule A) via the caller, OR is stamped NULL
+        if fresh. Content validates against plugin.entity_models[type].
+      * Fresh entity (parent_row is None):
+          - If `new_version` declared → return it.
+          - If `new_version` missing → 500 misconfiguration (strict).
+      * Revision (parent_row is not None):
+          - If `allowed_versions` declared and parent.schema_version not in
+            it → 422 unsupported_schema_version.
+          - Return parent.schema_version (sticky, rule A).
+
+    Raises ActivityError on misuse.
+    """
+    entities_cfg = activity_def.get("entities") or {}
+    ecfg = entities_cfg.get(entity_type)
+    if not ecfg:
+        # Legacy path: this activity does not declare version discipline
+        # for this type. If revising, inherit the parent's sticky version;
+        # if fresh, stamp NULL.
+        if parent_row is not None:
+            return parent_row.schema_version
+        return None
+
+    if parent_row is None:
+        new_version = ecfg.get("new_version")
+        if not new_version:
+            raise ActivityError(
+                500,
+                f"Activity '{activity_def.get('name')}' declares versioning "
+                f"for '{entity_type}' but has no 'new_version' — cannot "
+                f"create a fresh entity of a versioned type without one",
+                payload={
+                    "error": "missing_new_version_declaration",
+                    "activity": activity_def.get("name"),
+                    "entity_type": entity_type,
+                },
+            )
+        return new_version
+
+    # Revision path.
+    stored = parent_row.schema_version  # may be None for legacy rows
+    allowed = ecfg.get("allowed_versions")
+    if allowed is not None:
+        if stored not in allowed:
+            raise ActivityError(
+                422,
+                f"Activity '{activity_def.get('name')}' cannot revise "
+                f"'{entity_type}' entity with schema_version={stored!r}; "
+                f"allowed versions are {allowed}",
+                payload={
+                    "error": "unsupported_schema_version",
+                    "activity": activity_def.get("name"),
+                    "entity_type": entity_type,
+                    "stored_version": stored,
+                    "allowed_versions": allowed,
+                },
+            )
+    return stored  # sticky — revisions inherit parent's version
+
+
+def _validate_tombstone_activity(
+    used_rows: dict[str, "EntityRow"],
+    used_refs: list[dict],
+    generated: list[dict],
+) -> tuple[list["UUID"], dict]:
+    """Validate a tombstone activity's shape and return:
+      - the list of version_ids to tombstone (from `used`)
+      - the generated replacement dict (the non-system:note generated item)
+
+    Tombstone shape rules:
+      1. `used` is non-empty and every entry refers to the same logical
+         entity_id and the same entity_type (one tombstone, one entity).
+      2. None of the used versions are already tombstoned.
+      3. `generated` contains exactly one entity revision matching the
+         tombstoned entity (same entity_id, same type) — the replacement.
+      4. `generated` contains at least one `system:note` (the reason).
+      5. No other generated items (no surprise extras).
+
+    Raises ActivityError(422) with structured payloads on every failure
+    so the operator gets actionable diagnostics.
+    """
+    from uuid import UUID as _UUID
+
+    if not used_rows or not used_refs:
+        raise ActivityError(
+            422,
+            "Tombstone activity must list at least one version in the used block",
+            payload={"error": "tombstone_no_used"},
+        )
+
+    # Collect all used rows that are real entity versions (skip externals).
+    used_entity_rows = []
+    for ref_dict in used_refs:
+        if "version_id" not in ref_dict:
+            continue
+        # Find the corresponding row from used_rows_by_ref
+        ref = ref_dict.get("ref") or ref_dict.get("entity")
+        row = used_rows.get(ref)
+        if row is None:
+            # Look up via version_id as fallback
+            for r in used_rows.values():
+                if r.id == ref_dict["version_id"]:
+                    row = r
+                    break
+        if row is not None:
+            used_entity_rows.append(row)
+
+    if not used_entity_rows:
+        raise ActivityError(
+            422,
+            "Tombstone activity must reference real entity versions in used (no externals)",
+            payload={"error": "tombstone_no_used_entities"},
+        )
+
+    # Rule 1: all used rows must share entity_id and type.
+    target_entity_ids = {row.entity_id for row in used_entity_rows}
+    target_types = {row.type for row in used_entity_rows}
+    if len(target_entity_ids) != 1 or len(target_types) != 1:
+        raise ActivityError(
+            422,
+            f"Tombstone may only target a single logical entity; got "
+            f"entity_ids={sorted(str(e) for e in target_entity_ids)}, "
+            f"types={sorted(target_types)}",
+            payload={
+                "error": "tombstone_multi_entity",
+                "entity_ids": sorted(str(e) for e in target_entity_ids),
+                "types": sorted(target_types),
+            },
+        )
+    target_entity_id = next(iter(target_entity_ids))
+    target_type = next(iter(target_types))
+
+    # Rule 2 (intentional non-rule): re-tombstoning IS allowed. Human
+    # error during a first redaction may leave residual content in the
+    # replacement that itself needs to be redacted, so the operator must
+    # be able to run another tombstone over a previously-tombstoned
+    # entity. The new tombstone simply nulls the rows again (no-op for
+    # already-NULL content) and overwrites `tombstoned_by` with the new
+    # activity id, which becomes the most recent auditable record of who
+    # killed this entity last.
+
+    # Rule 3 + 4 + 5: generated shape.
+    replacements = [
+        g for g in generated
+        if g["type"] == target_type and g["entity_id"] == target_entity_id
+    ]
+    notes = [g for g in generated if g["type"] == "system:note"]
+    others = [
+        g for g in generated
+        if g["type"] != "system:note"
+        and not (g["type"] == target_type and g["entity_id"] == target_entity_id)
+    ]
+
+    if len(replacements) != 1:
+        raise ActivityError(
+            422,
+            f"Tombstone must generate exactly one replacement of "
+            f"{target_type}/{target_entity_id}; got {len(replacements)}",
+            payload={
+                "error": "tombstone_replacement_count",
+                "expected": 1,
+                "got": len(replacements),
+                "target_type": target_type,
+                "target_entity_id": str(target_entity_id),
+            },
+        )
+    if len(notes) < 1:
+        raise ActivityError(
+            422,
+            "Tombstone must generate at least one system:note carrying the redaction reason",
+            payload={"error": "tombstone_missing_reason_note"},
+        )
+    if others:
+        raise ActivityError(
+            422,
+            f"Tombstone activity may only generate the replacement entity "
+            f"and system:note(s); unexpected entries: "
+            f"{[g['type'] for g in others]}",
+            payload={
+                "error": "tombstone_unexpected_generated",
+                "unexpected_types": [g["type"] for g in others],
+            },
+        )
+
+    # All used rows are eligible for deletion. Return their version ids
+    # and the replacement dict.
+    version_ids_to_kill = [row.id for row in used_entity_rows]
+    return version_ids_to_kill, replacements[0]
 
 
 async def execute_activity(
@@ -886,7 +1110,15 @@ async def execute_activity(
 
         # -----------------------------------------------------------------
 
-        model_class = plugin.entity_models.get(entity_type)
+        # Schema version resolution (relaxed legacy mode).
+        # For activities that declare an `entities` block, validate against
+        # the resolved versioned schema. For activities with no declaration,
+        # fall back to plugin.entity_models (legacy) and let the new row
+        # inherit the parent's sticky schema_version via the resolver.
+        new_schema_version = _resolve_schema_version_for_generated(
+            activity_def, entity_type, latest_existing
+        )
+        model_class = plugin.resolve_schema(entity_type, new_schema_version)
         if model_class:
             try:
                 model_class(**content)
@@ -900,6 +1132,7 @@ async def execute_activity(
             "content": content,
             "derived_from": UUID(derived_from.split("@")[1]) if derived_from else None,
             "ref": entity_ref,
+            "schema_version": new_schema_version,
         })
 
         # Make available to handlers
@@ -908,6 +1141,7 @@ async def execute_activity(
             entity_id=parsed["id"],
             id=parsed["version"],
             attributed_to=user.id,
+            schema_version=new_schema_version,
         )
 
     # 6b. Process relations (generic PROV-extension edges beyond used/generated)
@@ -965,10 +1199,46 @@ async def execute_activity(
             "ref": rel_ref,
         })
 
-    # Per-type validator dispatch. Every allowed relation type that has a
-    # registered validator runs, regardless of whether the client sent any
-    # entries for it. The declaration is the gate; the validator is the brain.
-    for rel_type in allowed_relation_types:
+    # Per-type validator dispatch.
+    #
+    # Workflow-level `relations:` declares which relation types are
+    # PERMITTED in this workflow (the allowed-set / "what may be sent").
+    # Activity-level `relations:` declares which relation types this
+    # specific activity OPTS IN to (the validator-firing set / "what
+    # discipline applies here"). A relation validator runs only for
+    # types listed in the activity's own `relations:` block — not for
+    # types it merely inherits from the workflow-wide allowed-set.
+    #
+    # This means: a workflow can permit `oe:neemtAkteVan` system-wide,
+    # but only the activities that actually depend on staleness checking
+    # (e.g. `bewerkAanvraag`, `tekenBeslissing`) need to enable it. System
+    # activities, side effects, and one-off built-ins like `tombstone` are
+    # untouched by default.
+    activity_level_relation_types: set[str] = set()
+    for r in activity_def.get("relations", []) or []:
+        if isinstance(r, dict):
+            t = r.get("type")
+        else:
+            t = r
+        if t:
+            activity_level_relation_types.add(t)
+
+    for rel_type in activity_level_relation_types:
+        if rel_type not in allowed_relation_types:
+            # Activity opted into a type that isn't permitted workflow-wide.
+            # Treat as misconfiguration — fail loudly at request time so
+            # the operator notices.
+            raise ActivityError(
+                500,
+                f"Activity {activity_def.get('name')!r} opts into relation "
+                f"type {rel_type!r} which is not in the workflow's allowed "
+                f"relation set {sorted(allowed_relation_types)}",
+                payload={
+                    "error": "relation_type_not_permitted",
+                    "activity": activity_def.get("name"),
+                    "relation_type": rel_type,
+                },
+            )
         validator = plugin.relation_validators.get(rel_type)
         if validator is None:
             continue  # pure annotation — no validator, just stored
@@ -995,6 +1265,18 @@ async def execute_activity(
             result = await validator_fn(ctx)
             if result is not None and not result:
                 raise ActivityError(409, f"Validator '{validator_name}' failed")
+
+    # 8b. Built-in tombstone shape validation. Runs only for the engine's
+    # built-in `tombstone` activity type. Captures the version_ids that
+    # will be tombstoned after persistence (step 11c below) so we don't
+    # walk the used rows twice.
+    tombstone_version_ids: list[UUID] = []
+    if activity_def.get("name") == "tombstone":
+        tombstone_version_ids, _ = _validate_tombstone_activity(
+            used_rows=used_rows_by_ref,
+            used_refs=used_refs,
+            generated=generated,
+        )
 
     # 9. Create activity + association
     activity_row = await repo.create_activity(
@@ -1079,13 +1361,17 @@ async def execute_activity(
             content=gen["content"],
             derived_from=gen.get("derived_from"),
             attributed_to=user.id,
+            schema_version=gen.get("schema_version"),
         )
 
-        generated_response.append({
+        response_item = {
             "entity": gen.get("ref") or f"{gen['type']}/{gen['entity_id']}@{gen['version_id']}",
             "type": gen["type"],
             "content": gen["content"],
-        })
+        }
+        if gen.get("schema_version") is not None:
+            response_item["schemaVersion"] = gen["schema_version"]
+        generated_response.append(response_item)
 
     # 11b. Persist generated external entities (wasGeneratedBy link)
     for ext_uri in generated_externals:
@@ -1106,6 +1392,17 @@ async def execute_activity(
             "type": "external",
             "content": {"uri": ext_uri},
         })
+
+    # 11c. Tombstone deletion. Runs after the replacement entity has been
+    # persisted (step 11) so the new revision is in place before we null
+    # the originals. Per the deletion-scope decision, we only NULL the
+    # `content` blob and stamp `tombstoned_by`; the rows, derivation
+    # edges, schema_version, and used links survive. The replacement and
+    # any system:note entities generated by this same activity are NOT in
+    # `tombstone_version_ids` (they're new rows from this activity, not
+    # used rows) so they're untouched.
+    if tombstone_version_ids:
+        await repo.tombstone_entity_versions(tombstone_version_ids, activity_id)
 
     # 12. Create used links (references only — no overlap with generated)
     for ref in used_refs:
@@ -1555,6 +1852,17 @@ async def _execute_side_effects(
                         derived_from_id = None
                         entity_id_val = uuid4()
 
+                    # Resolve parent row (if any) to stamp schema_version
+                    # correctly. Revisions inherit the parent's sticky
+                    # version; fresh entities use the side-effect activity's
+                    # `entities.<type>.new_version` declaration.
+                    se_parent_row = None
+                    if derived_from_id is not None:
+                        se_parent_row = await repo.get_entity(derived_from_id)
+                    se_schema_version = _resolve_schema_version_for_generated(
+                        se_def, gen_type, se_parent_row
+                    )
+
                     await repo.create_entity(
                         version_id=se_version_id,
                         entity_id=entity_id_val,
@@ -1564,6 +1872,7 @@ async def _execute_side_effects(
                         content=gen_content,
                         derived_from=derived_from_id,
                         attributed_to="system",
+                        schema_version=se_schema_version,
                     )
 
         # Recurse into this side effect's own side effects

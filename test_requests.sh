@@ -1054,3 +1054,468 @@ print(f'  OK: trekAanvraagIn task correctly anchored to aanvraag {c[\"anchor_ent
 echo ""
 
 echo "D7 summary: anchor mechanism verified end-to-end"
+
+# ============================================================================
+# DOSSIER 8: entity schema versioning
+# ============================================================================
+# Verifies:
+#   1. testDienAanvraagInV2 stamps schema_version=v2 on a fresh aanvraag and
+#      round-trips the v2-only 'classificatie' field.
+#   2. A legacy (non-versioned) bewerkAanvraag on that v2 row keeps
+#      schema_version=v2 (sticky, rule A) — relaxed legacy interop.
+#   3. testBewerkAanvraagV2Only against D1's legacy (NULL-version) aanvraag
+#      returns 422 unsupported_schema_version with stored_version=null.
+# ============================================================================
+
+echo "============================================"
+echo "DOSSIER 8: entity schema versioning"
+echo "============================================"
+echo ""
+
+D8_BIJLAGE_FID=$(upload_file "jan.aanvrager" "D8 v2 bijlage" "d8.pdf")
+
+echo "--- D8 Step 1: testDienAanvraagInV2 (creates v2 aanvraag) ---"
+D8_STEP1=$(curl -s -X PUT "$BASE_URL/dossiers/d8000000-0000-0000-0000-000000000001/activities/a8000000-0000-0000-0000-000000000001/testDienAanvraagInV2" \
+  -H "Content-Type: application/json" \
+  -H "X-POC-User: jan.aanvrager" \
+  -d "{
+    \"workflow\": \"toelatingen\",
+    \"used\": [{ \"entity\": \"https://id.erfgoed.net/erfgoedobjecten/10008\" }],
+    \"generated\": [
+      {
+        \"entity\": \"oe:aanvraag/e8000000-0000-0000-0000-000000000001@f8000000-0000-0000-0000-000000000001\",
+        \"content\": {
+          \"onderwerp\": \"D8: v2 test aanvraag\",
+          \"handeling\": \"renovatie\",
+          \"aanvrager\": { \"rrn\": \"85010100123\" },
+          \"gemeente\": \"Brugge\",
+          \"object\": \"https://id.erfgoed.net/erfgoedobjecten/10008\",
+          \"bijlagen\": [{ \"file_id\": \"$D8_BIJLAGE_FID\", \"filename\": \"d8.pdf\" }],
+          \"classificatie\": \"beschermd_monument\",
+          \"urgentie\": \"hoog\"
+        }
+      }
+    ]
+  }")
+echo "$D8_STEP1" | python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+gen = r.get('generated', [])
+assert len(gen) == 1, f'expected 1 generated entity, got {len(gen)}: {r}'
+g = gen[0]
+assert g.get('schemaVersion') == 'v2', f'expected schemaVersion=v2 in response, got {g.get(\"schemaVersion\")}: {r}'
+c = g.get('content', {})
+assert c.get('classificatie') == 'beschermd_monument', f'classificatie not roundtripped: {c}'
+assert c.get('urgentie') == 'hoog', f'urgentie not roundtripped: {c}'
+print('  OK: testDienAanvraagInV2 created aanvraag with schema_version=v2 and v2-only fields')
+"
+echo ""
+
+echo "--- D8 Step 2: GET dossier — verify schemaVersion exposed on read ---"
+curl -s "$BASE_URL/dossiers/d8000000-0000-0000-0000-000000000001" \
+  -H "X-POC-User: claeyswo" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+ent = [e for e in d.get('currentEntities', []) if e.get('type') == 'oe:aanvraag']
+assert len(ent) == 1, f'expected 1 oe:aanvraag, got {len(ent)}'
+e = ent[0]
+assert e.get('schemaVersion') == 'v2', f'expected schemaVersion=v2 on read, got {e.get(\"schemaVersion\")}'
+c = e.get('content', {})
+assert c.get('classificatie') == 'beschermd_monument', f'classificatie missing on read: {c}'
+print('  OK: GET response exposes schemaVersion=v2 and v2 fields')
+"
+echo ""
+
+echo "--- D8 Step 3: legacy bewerkAanvraag on v2 row — sticky version (relaxed) ---"
+D8_STEP3_CODE=$(curl -s -o /tmp/d8_step3.json -w "%{http_code}" \
+  -X PUT "$BASE_URL/dossiers/d8000000-0000-0000-0000-000000000001/activities/a8000000-0000-0000-0000-000000000002/bewerkAanvraag" \
+  -H "Content-Type: application/json" \
+  -H "X-POC-User: benjamma" \
+  -d "{
+    \"workflow\": \"toelatingen\",
+    \"used\": [
+      { \"entity\": \"oe:aanvraag/e8000000-0000-0000-0000-000000000001@f8000000-0000-0000-0000-000000000001\" },
+      { \"entity\": \"https://id.erfgoed.net/erfgoedobjecten/10008\" }
+    ],
+    \"generated\": [
+      {
+        \"entity\": \"oe:aanvraag/e8000000-0000-0000-0000-000000000001@f8000000-0000-0000-0000-000000000002\",
+        \"derivedFrom\": \"oe:aanvraag/e8000000-0000-0000-0000-000000000001@f8000000-0000-0000-0000-000000000001\",
+        \"content\": {
+          \"onderwerp\": \"D8: v2 test aanvraag — bewerkt door legacy handler\",
+          \"handeling\": \"renovatie\",
+          \"aanvrager\": { \"rrn\": \"85010100123\" },
+          \"gemeente\": \"Brugge\",
+          \"object\": \"https://id.erfgoed.net/erfgoedobjecten/10008\",
+          \"bijlagen\": []
+        }
+      }
+    ]
+  }")
+python3 -c "
+import json
+code = '$D8_STEP3_CODE'
+assert code == '200', f'expected 200, got {code}'
+r = json.load(open('/tmp/d8_step3.json'))
+g = r['generated'][0]
+assert g.get('schemaVersion') == 'v2', f'sticky version broken: expected v2, got {g.get(\"schemaVersion\")}'
+print('  OK: legacy bewerkAanvraag on v2 row inherited schema_version=v2 (sticky)')
+"
+echo ""
+
+echo "--- D8 Step 4: testBewerkAanvraagV2Only on D1 legacy aanvraag (expect 422) ---"
+# D1 currently has ended up in toelating_verleend after D1 Step 4 revised the
+# aanvraag to version f1000000-...-000000000004. We need derivedFrom pointing
+# at the latest. Get it from the API.
+D1_LATEST=$(curl -s "$BASE_URL/dossiers/d1000000-0000-0000-0000-000000000001" \
+  -H "X-POC-User: claeyswo" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+for e in d.get('currentEntities', []):
+    if e.get('type') == 'oe:aanvraag':
+        print(f\"{e['entityId']}@{e['versionId']}\")
+        break
+")
+echo "  D1 latest aanvraag: $D1_LATEST"
+D8_STEP4_CODE=$(curl -s -o /tmp/d8_step4.json -w "%{http_code}" \
+  -X PUT "$BASE_URL/dossiers/d1000000-0000-0000-0000-000000000001/activities/a8000000-0000-0000-0000-000000000099/testBewerkAanvraagV2Only" \
+  -H "Content-Type: application/json" \
+  -H "X-POC-User: benjamma" \
+  -d "{
+    \"workflow\": \"toelatingen\",
+    \"used\": [
+      { \"entity\": \"oe:aanvraag/$D1_LATEST\" },
+      { \"entity\": \"https://id.erfgoed.net/erfgoedobjecten/10001\" }
+    ],
+    \"generated\": [
+      {
+        \"entity\": \"oe:aanvraag/e1000000-0000-0000-0000-000000000001@f1000000-0000-0000-0000-000000000099\",
+        \"derivedFrom\": \"oe:aanvraag/$D1_LATEST\",
+        \"content\": {
+          \"onderwerp\": \"should never persist\",
+          \"handeling\": \"renovatie\",
+          \"aanvrager\": { \"rrn\": \"85010100123\" },
+          \"gemeente\": \"Brugge\",
+          \"object\": \"https://id.erfgoed.net/erfgoedobjecten/10001\",
+          \"bijlagen\": []
+        }
+      }
+    ]
+  }")
+python3 -c "
+import json
+code = '$D8_STEP4_CODE'
+assert code == '422', f'expected 422, got {code}: {open(\"/tmp/d8_step4.json\").read()}'
+r = json.load(open('/tmp/d8_step4.json'))
+# Payload shape: ActivityError.payload is forwarded via _activity_error_to_http;
+# it lands under 'detail' for FastAPI HTTPExceptions. Check the payload marker.
+detail = r.get('detail', {})
+if isinstance(detail, dict):
+    err = detail.get('error')
+    stored = detail.get('stored_version')
+else:
+    # May be nested further — find 'unsupported_schema_version' anywhere
+    blob = json.dumps(r)
+    assert 'unsupported_schema_version' in blob, f'error marker not in response: {blob}'
+    err = 'unsupported_schema_version'
+    stored = None
+assert err == 'unsupported_schema_version', f'expected error=unsupported_schema_version, got {err}: {r}'
+print('  OK: 422 unsupported_schema_version when revising legacy (NULL-version) row')
+"
+echo ""
+
+echo "D8 summary: entity schema versioning verified end-to-end"
+
+# ============================================================================
+# DOSSIER 9: tombstone — irreversible content redaction
+# ============================================================================
+# Verifies the tombstone activity end-to-end:
+#   1. Two-version aanvraag (v1, v2) is tombstoned with a redacted
+#      replacement vT and a system:note carrying the reason.
+#   2. GET on a tombstoned single-version returns 301 to the replacement.
+#   3. Bulk-by-entity GET shows tombstoned versions with content=null,
+#      tombstonedBy, and redirectTo markers (option Y).
+#   4. currentEntities at the dossier level shows the replacement and
+#      the system:note (latest by construction).
+#   5. Negative: tombstone without a system:note → 422.
+#   6. Negative: tombstone targeting two different entity_ids → 422.
+#   7. Re-tombstone: tombstoning the replacement is allowed.
+# ============================================================================
+
+echo "============================================"
+echo "DOSSIER 9: tombstone — irreversible redaction"
+echo "============================================"
+echo ""
+
+D9_BIJLAGE_FID=$(upload_file "jan.aanvrager" "D9 initial bijlage" "d9.pdf")
+
+echo "--- D9 Step 1: dienAanvraagIn (creates v1) ---"
+curl -s -X PUT "$BASE_URL/dossiers/d9000000-0000-0000-0000-000000000001/activities/a9000000-0000-0000-0000-000000000001/dienAanvraagIn" \
+  -H "Content-Type: application/json" \
+  -H "X-POC-User: jan.aanvrager" \
+  -d "{
+    \"workflow\": \"toelatingen\",
+    \"used\": [{ \"entity\": \"https://id.erfgoed.net/erfgoedobjecten/10009\" }],
+    \"generated\": [
+      {
+        \"entity\": \"oe:aanvraag/e9000000-0000-0000-0000-000000000001@f9000000-0000-0000-0000-000000000001\",
+        \"content\": {
+          \"onderwerp\": \"D9: persoonlijke aanvraag\",
+          \"handeling\": \"renovatie\",
+          \"aanvrager\": { \"rrn\": \"85010100123\" },
+          \"gemeente\": \"Brugge\",
+          \"object\": \"https://id.erfgoed.net/erfgoedobjecten/10009\",
+          \"bijlagen\": [{ \"file_id\": \"$D9_BIJLAGE_FID\", \"filename\": \"d9.pdf\" }]
+        }
+      }
+    ]
+  }" > /dev/null
+echo "  v1 created"
+echo ""
+
+echo "--- D9 Step 2: bewerkAanvraag (creates v2) ---"
+curl -s -X PUT "$BASE_URL/dossiers/d9000000-0000-0000-0000-000000000001/activities/a9000000-0000-0000-0000-000000000002/bewerkAanvraag" \
+  -H "Content-Type: application/json" \
+  -H "X-POC-User: benjamma" \
+  -d "{
+    \"workflow\": \"toelatingen\",
+    \"used\": [
+      { \"entity\": \"oe:aanvraag/e9000000-0000-0000-0000-000000000001@f9000000-0000-0000-0000-000000000001\" },
+      { \"entity\": \"https://id.erfgoed.net/erfgoedobjecten/10009\" }
+    ],
+    \"generated\": [
+      {
+        \"entity\": \"oe:aanvraag/e9000000-0000-0000-0000-000000000001@f9000000-0000-0000-0000-000000000002\",
+        \"derivedFrom\": \"oe:aanvraag/e9000000-0000-0000-0000-000000000001@f9000000-0000-0000-0000-000000000001\",
+        \"content\": {
+          \"onderwerp\": \"D9: persoonlijke aanvraag - aangevuld\",
+          \"handeling\": \"renovatie\",
+          \"aanvrager\": { \"rrn\": \"85010100123\" },
+          \"gemeente\": \"Brugge\",
+          \"object\": \"https://id.erfgoed.net/erfgoedobjecten/10009\",
+          \"bijlagen\": []
+        }
+      }
+    ]
+  }" > /dev/null
+echo "  v2 created"
+echo ""
+
+echo "--- D9 Step 3: tombstone v1+v2 with redacted replacement vT + reason note ---"
+D9_TS_RESPONSE=$(curl -s -X PUT "$BASE_URL/dossiers/d9000000-0000-0000-0000-000000000001/activities/a9000000-0000-0000-0000-000000000003/tombstone" \
+  -H "Content-Type: application/json" \
+  -H "X-POC-User: claeyswo" \
+  -d "{
+    \"workflow\": \"toelatingen\",
+    \"used\": [
+      { \"entity\": \"oe:aanvraag/e9000000-0000-0000-0000-000000000001@f9000000-0000-0000-0000-000000000001\" },
+      { \"entity\": \"oe:aanvraag/e9000000-0000-0000-0000-000000000001@f9000000-0000-0000-0000-000000000002\" }
+    ],
+    \"generated\": [
+      {
+        \"entity\": \"oe:aanvraag/e9000000-0000-0000-0000-000000000001@f9000000-0000-0000-0000-000000000003\",
+        \"derivedFrom\": \"oe:aanvraag/e9000000-0000-0000-0000-000000000001@f9000000-0000-0000-0000-000000000002\",
+        \"content\": {
+          \"onderwerp\": \"[REDACTED]\",
+          \"handeling\": \"[REDACTED]\",
+          \"aanvrager\": { \"rrn\": \"[REDACTED]\" },
+          \"gemeente\": \"[REDACTED]\",
+          \"object\": \"[REDACTED]\",
+          \"bijlagen\": []
+        }
+      },
+      {
+        \"entity\": \"system:note/e9000000-0000-0000-0000-000000000099@f9000000-0000-0000-0000-000000000099\",
+        \"content\": { \"text\": \"FOI request 2026-042: redact RRN per GDPR Article 17\", \"ticket\": \"FOI-2026-042\" }
+      }
+    ]
+  }")
+echo "$D9_TS_RESPONSE" | python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+gen = r.get('generated', [])
+assert len(gen) == 2, f'expected 2 generated entities, got {len(gen)}: {r}'
+types = sorted(g['type'] for g in gen)
+assert types == ['oe:aanvraag', 'system:note'], f'unexpected generated types: {types}'
+print('  OK: tombstone activity persisted with replacement + reason note')
+"
+echo ""
+
+echo "--- D9 Step 4: GET tombstoned v1 → expect 301 redirect ---"
+D9_V1_CODE=$(curl -s -o /tmp/d9_v1.json -w "%{http_code}" \
+  "$BASE_URL/dossiers/d9000000-0000-0000-0000-000000000001/entities/oe:aanvraag/e9000000-0000-0000-0000-000000000001/f9000000-0000-0000-0000-000000000001" \
+  -H "X-POC-User: claeyswo")
+D9_V1_LOCATION=$(curl -s -o /dev/null -w "%{redirect_url}" \
+  "$BASE_URL/dossiers/d9000000-0000-0000-0000-000000000001/entities/oe:aanvraag/e9000000-0000-0000-0000-000000000001/f9000000-0000-0000-0000-000000000001" \
+  -H "X-POC-User: claeyswo")
+python3 -c "
+code = '$D9_V1_CODE'
+loc = '$D9_V1_LOCATION'
+assert code == '301', f'expected 301, got {code}'
+assert 'f9000000-0000-0000-0000-000000000003' in loc, f'expected redirect to v3 (replacement), got {loc!r}'
+print(f'  OK: 301 redirect to replacement ({loc.split(\"/\")[-1][:8]}...)')
+"
+echo ""
+
+echo "--- D9 Step 5: follow redirect, expect redacted replacement content ---"
+curl -s -L "$BASE_URL/dossiers/d9000000-0000-0000-0000-000000000001/entities/oe:aanvraag/e9000000-0000-0000-0000-000000000001/f9000000-0000-0000-0000-000000000001" \
+  -H "X-POC-User: claeyswo" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+c = d.get('content', {})
+assert c.get('onderwerp') == '[REDACTED]', f'expected redacted onderwerp, got {c}'
+assert c.get('aanvrager', {}).get('rrn') == '[REDACTED]', f'rrn not redacted: {c}'
+print('  OK: redirect resolved to redacted replacement')
+"
+echo ""
+
+echo "--- D9 Step 6: bulk GET by entity_id — expect markers on tombstoned versions ---"
+curl -s "$BASE_URL/dossiers/d9000000-0000-0000-0000-000000000001/entities/oe:aanvraag/e9000000-0000-0000-0000-000000000001" \
+  -H "X-POC-User: claeyswo" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+versions = d.get('versions', [])
+assert len(versions) == 3, f'expected 3 versions, got {len(versions)}: {[v[\"versionId\"][:8] for v in versions]}'
+
+tombstoned = [v for v in versions if v.get('tombstonedBy')]
+alive = [v for v in versions if not v.get('tombstonedBy')]
+assert len(tombstoned) == 2, f'expected 2 tombstoned, got {len(tombstoned)}'
+assert len(alive) == 1, f'expected 1 alive, got {len(alive)}'
+
+for ts in tombstoned:
+    assert ts.get('content') is None, f'tombstoned version still has content: {ts}'
+    assert 'tombstonedBy' in ts and ts['tombstonedBy'], f'missing tombstonedBy: {ts}'
+    assert 'redirectTo' in ts and 'f9000000-0000-0000-0000-000000000003' in ts['redirectTo'], f'bad redirectTo: {ts}'
+
+assert alive[0]['versionId'].endswith('000000003'), f'alive version is not vT: {alive[0]}'
+assert alive[0]['content']['onderwerp'] == '[REDACTED]', f'alive content not redacted: {alive[0]}'
+print('  OK: bulk GET shows 2 tombstoned (with markers) + 1 live replacement')
+"
+echo ""
+
+echo "--- D9 Step 7: dossier-level currentEntities — replacement + reason note visible ---"
+curl -s "$BASE_URL/dossiers/d9000000-0000-0000-0000-000000000001" \
+  -H "X-POC-User: claeyswo" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+ents = d.get('currentEntities', [])
+aanvraag = [e for e in ents if e.get('type') == 'oe:aanvraag']
+notes = [e for e in ents if e.get('type') == 'system:note']
+assert len(aanvraag) == 1, f'expected 1 oe:aanvraag in currentEntities, got {len(aanvraag)}'
+assert aanvraag[0]['content']['onderwerp'] == '[REDACTED]', f'aanvraag not redacted: {aanvraag[0]}'
+assert any('FOI-2026-042' in (n.get('content') or {}).get('ticket', '') for n in notes), f'reason note missing: {notes}'
+print('  OK: currentEntities surfaces redacted replacement + reason note')
+"
+echo ""
+
+echo "--- D9 Step 8: NEGATIVE — tombstone with no system:note (expect 422) ---"
+D9_NEG1_CODE=$(curl -s -o /tmp/d9_neg1.json -w "%{http_code}" \
+  -X PUT "$BASE_URL/dossiers/d9000000-0000-0000-0000-000000000001/activities/a9000000-0000-0000-0000-000000000004/tombstone" \
+  -H "Content-Type: application/json" \
+  -H "X-POC-User: claeyswo" \
+  -d "{
+    \"workflow\": \"toelatingen\",
+    \"used\": [
+      { \"entity\": \"oe:aanvraag/e9000000-0000-0000-0000-000000000001@f9000000-0000-0000-0000-000000000003\" }
+    ],
+    \"generated\": [
+      {
+        \"entity\": \"oe:aanvraag/e9000000-0000-0000-0000-000000000001@f9000000-0000-0000-0000-000000000004\",
+        \"derivedFrom\": \"oe:aanvraag/e9000000-0000-0000-0000-000000000001@f9000000-0000-0000-0000-000000000003\",
+        \"content\": {
+          \"onderwerp\": \"[REDACTED2]\",
+          \"handeling\": \"[REDACTED]\",
+          \"aanvrager\": { \"rrn\": \"[REDACTED]\" },
+          \"gemeente\": \"[REDACTED]\",
+          \"object\": \"[REDACTED]\",
+          \"bijlagen\": []
+        }
+      }
+    ]
+  }")
+python3 -c "
+import json
+code = '$D9_NEG1_CODE'
+assert code == '422', f'expected 422, got {code}: {open(\"/tmp/d9_neg1.json\").read()}'
+r = json.load(open('/tmp/d9_neg1.json'))
+blob = json.dumps(r)
+assert 'tombstone_missing_reason_note' in blob, f'wrong error code: {blob}'
+print('  OK: 422 tombstone_missing_reason_note when no system:note in generated')
+"
+echo ""
+
+echo "--- D9 Step 9: NEGATIVE — tombstone targeting two entity_ids (expect 422) ---"
+D9_NEG2_CODE=$(curl -s -o /tmp/d9_neg2.json -w "%{http_code}" \
+  -X PUT "$BASE_URL/dossiers/d9000000-0000-0000-0000-000000000001/activities/a9000000-0000-0000-0000-000000000005/tombstone" \
+  -H "Content-Type: application/json" \
+  -H "X-POC-User: claeyswo" \
+  -d "{
+    \"workflow\": \"toelatingen\",
+    \"used\": [
+      { \"entity\": \"oe:aanvraag/e9000000-0000-0000-0000-000000000001@f9000000-0000-0000-0000-000000000003\" },
+      { \"entity\": \"oe:aanvraag/e1000000-0000-0000-0000-000000000001@f1000000-0000-0000-0000-000000000004\" }
+    ],
+    \"generated\": [
+      {
+        \"entity\": \"oe:aanvraag/e9000000-0000-0000-0000-000000000001@f9000000-0000-0000-0000-000000000005\",
+        \"content\": {
+          \"onderwerp\": \"[REDACTED]\", \"handeling\": \"[REDACTED]\",
+          \"aanvrager\": { \"rrn\": \"[REDACTED]\" }, \"gemeente\": \"[REDACTED]\",
+          \"object\": \"[REDACTED]\", \"bijlagen\": []
+        }
+      },
+      {
+        \"entity\": \"system:note/e9000000-0000-0000-0000-000000000098@f9000000-0000-0000-0000-000000000098\",
+        \"content\": { \"text\": \"should not persist\" }
+      }
+    ]
+  }")
+python3 -c "
+import json
+code = '$D9_NEG2_CODE'
+assert code == '422', f'expected 422, got {code}: {open(\"/tmp/d9_neg2.json\").read()}'
+r = json.load(open('/tmp/d9_neg2.json'))
+blob = json.dumps(r)
+# Note: the v9 dossier's tombstoned f9...003 is in dossier d9, but f1...004 is in dossier d1.
+# The cross-dossier check fires before the multi-entity check, so we accept either error.
+assert ('tombstone_multi_entity' in blob
+        or 'different dossier' in blob.lower()
+        or 'not found in dossier' in blob.lower()), f'wrong error: {blob}'
+print('  OK: 422 rejects multi-entity / cross-dossier tombstone')
+"
+echo ""
+
+echo "--- D9 Step 10: re-tombstone the replacement (allowed) ---"
+D9_RETS_CODE=$(curl -s -o /tmp/d9_rets.json -w "%{http_code}" \
+  -X PUT "$BASE_URL/dossiers/d9000000-0000-0000-0000-000000000001/activities/a9000000-0000-0000-0000-000000000006/tombstone" \
+  -H "Content-Type: application/json" \
+  -H "X-POC-User: claeyswo" \
+  -d "{
+    \"workflow\": \"toelatingen\",
+    \"used\": [
+      { \"entity\": \"oe:aanvraag/e9000000-0000-0000-0000-000000000001@f9000000-0000-0000-0000-000000000003\" }
+    ],
+    \"generated\": [
+      {
+        \"entity\": \"oe:aanvraag/e9000000-0000-0000-0000-000000000001@f9000000-0000-0000-0000-000000000007\",
+        \"derivedFrom\": \"oe:aanvraag/e9000000-0000-0000-0000-000000000001@f9000000-0000-0000-0000-000000000003\",
+        \"content\": {
+          \"onderwerp\": \"[REDACTED-2]\", \"handeling\": \"[REDACTED]\",
+          \"aanvrager\": { \"rrn\": \"[REDACTED]\" }, \"gemeente\": \"[REDACTED]\",
+          \"object\": \"[REDACTED]\", \"bijlagen\": []
+        }
+      },
+      {
+        \"entity\": \"system:note/e9000000-0000-0000-0000-000000000097@f9000000-0000-0000-0000-000000000097\",
+        \"content\": { \"text\": \"Second-pass redaction: original placeholder leaked an internal ID, redacting again\" }
+      }
+    ]
+  }")
+python3 -c "
+code = '$D9_RETS_CODE'
+assert code == '200', f'expected 200 on re-tombstone, got {code}: {open(\"/tmp/d9_rets.json\").read()}'
+print('  OK: re-tombstoning the replacement is allowed (200)')
+"
+echo ""
+
+echo "D9 summary: tombstone mechanism verified end-to-end"

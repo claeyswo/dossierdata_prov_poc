@@ -57,6 +57,13 @@ class Aanvraag(BaseModel):
     bijlagen: list[Bijlage] = []
 
 
+class AanvraagV2(Aanvraag):
+    """V2 adds optional classificatie/urgentie fields. Additive only —
+    V1 content validates as V2 with the new fields left as None."""
+    classificatie: Optional[str] = None
+    urgentie: Optional[str] = None
+
+
 # --- Beslissing ---
 
 class BeslissingUitkomst(str, Enum):
