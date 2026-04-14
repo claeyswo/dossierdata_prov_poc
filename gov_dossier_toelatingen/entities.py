@@ -8,8 +8,21 @@ Generated from the JSON Schema definitions in the workflow template.
 from __future__ import annotations
 
 from enum import Enum
-from pydantic import BaseModel, Field
 from typing import Optional
+
+from pydantic import BaseModel
+
+from gov_dossier_engine.file_refs import FileId
+
+
+# --- Bijlage (file attachment) ---
+
+class Bijlage(BaseModel):
+    # `file_id` is a FileId — GET responses include `file_download_url` next to it.
+    file_id: FileId
+    filename: str
+    content_type: str = "application/octet-stream"
+    size: int = 0
 
 
 # --- Aanvraag ---
@@ -41,6 +54,14 @@ class Aanvraag(BaseModel):
     aanvrager: Aanvrager
     gemeente: str
     object: str  # URI of the protected heritage object
+    bijlagen: list[Bijlage] = []
+
+
+class AanvraagV2(Aanvraag):
+    """V2 adds optional classificatie/urgentie fields. Additive only —
+    V1 content validates as V2 with the new fields left as None."""
+    classificatie: Optional[str] = None
+    urgentie: Optional[str] = None
 
 
 # --- Beslissing ---
@@ -55,7 +76,9 @@ class Beslissing(BaseModel):
     beslissing: BeslissingUitkomst
     datum: str  # datetime string
     object: str  # URI
-    brief: str  # URI
+    # `brief` is a FileId — the signed decision letter PDF.
+    # GET responses will include `brief_download_url` next to it.
+    brief: FileId
 
 
 # --- Handtekening ---
@@ -83,3 +106,5 @@ class Behandelaar(BaseModel):
 class SystemFields(BaseModel):
     datum: str  # datetime string
     aanmaker: str  # URI
+
+

@@ -52,9 +52,32 @@ async def set_dossier_access(context: ActivityContext, content: dict | None) -> 
             "activity_view": "all",
         })
 
-    # Behandelaar gets access
-    behandelaar = await context.get_latest_entity("oe:behandelaar")
-    if behandelaar:
+    # Behandelaar gets access — oe:behandelaar is cardinality=multiple, so
+    # we iterate all behandelaar entities currently on the dossier and grant
+    # each one its own access entry. Previously this singleton-looked-up
+    # the "latest" one which was incorrect for multi-cardinality types.
+    # Dedupe by URI so repeated handler invocations that each create a new
+    # behandelaar entity (phase 3 will formalize revisions) don't cause
+    # duplicate access entries.
+    behandelaars = await context.get_entities_latest("oe:behandelaar")
+    seen_uris: set[str] = set()
+    for behandelaar_row in behandelaars:
+        uri = (behandelaar_row.content or {}).get("uri")
+        if not uri or uri in seen_uris:
+            continue
+        seen_uris.add(uri)
+        access_entries.append({
+            "role": f"behandelaar:{uri}",
+            "view": ["oe:aanvraag", "oe:beslissing", "oe:handtekening", "external",
+                      "oe:verantwoordelijke_organisatie", "oe:behandelaar",
+                      "oe:system_fields", "system:task"],
+            "activity_view": "all",
+        })
+
+    # Back-compat: also emit a generic "behandelaar" role so access rules
+    # that match by bare role-name (not by behandelaar URI) keep working.
+    # Remove once all downstream consumers match by URI.
+    if behandelaars:
         access_entries.append({
             "role": "behandelaar",
             "view": ["oe:aanvraag", "oe:beslissing", "oe:handtekening", "external",
@@ -133,18 +156,49 @@ async def handle_beslissing(context: ActivityContext, content: dict | None) -> H
         if beslissing.beslissing == "goedgekeurd":
             return HandlerResult(status="toelating_verleend")
         elif beslissing.beslissing == "onvolledig":
-            # Schedule trekAanvraagIn in 30 days, cancelled if vervollediging happens
+            # Schedule trekAanvraagIn in 30 days, cancelled if vervollediging happens.
+            #
+            # The task must be anchored to the aanvraag so cancellation only
+            # fires when someone advances THIS specific aanvraag, not when any
+            # aanvraag in the dossier is touched. Two cases:
+            #
+            # * The activity running this handler DID use the aanvraag
+            #   directly (neemBeslissing path): read it from context.
+            # * The activity did NOT use the aanvraag directly
+            #   (tekenBeslissing path uses the beslissing, not the aanvraag):
+            #   walk the activity graph from the beslissing to find it via
+            #   find_related_entity.
             from datetime import datetime, timezone, timedelta
+            from gov_dossier_engine.lineage import find_related_entity
+
+            aanvraag_row = context.get_used_row("oe:aanvraag")
+            if aanvraag_row is None:
+                beslissing_row = context.get_used_row("oe:beslissing")
+                if beslissing_row is not None:
+                    aanvraag_row = await find_related_entity(
+                        context.repo,
+                        context.dossier_id,
+                        beslissing_row,
+                        "oe:aanvraag",
+                    )
+
+            anchor_entity_id = str(aanvraag_row.entity_id) if aanvraag_row else None
+
             deadline = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
+            task_dict = {
+                "kind": "scheduled_activity",
+                "target_activity": "trekAanvraagIn",
+                "scheduled_for": deadline,
+                "cancel_if_activities": ["vervolledigAanvraag"],
+                "allow_multiple": False,
+                "anchor_type": "oe:aanvraag",
+            }
+            if anchor_entity_id is not None:
+                task_dict["anchor_entity_id"] = anchor_entity_id
+
             return HandlerResult(
                 status="aanvraag_onvolledig",
-                tasks=[{
-                    "kind": "scheduled_activity",
-                    "target_activity": "trekAanvraagIn",
-                    "scheduled_for": deadline,
-                    "cancel_if_activities": ["vervolledigAanvraag"],
-                    "allow_multiple": False,
-                }],
+                tasks=[task_dict],
             )
         else:
             return HandlerResult(status="toelating_geweigerd")

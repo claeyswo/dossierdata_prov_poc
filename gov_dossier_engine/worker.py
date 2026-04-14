@@ -91,7 +91,7 @@ async def complete_task(
     error: str | None = None,
     informed_by: str | None = None,
 ):
-    """Create a completeTask activity that generates a new version of the task entity."""
+    """Create a systemAction activity that generates a new version of the task entity + a note."""
     new_content = dict(task.content)
     new_content["status"] = status
     if result_uri:
@@ -99,15 +99,15 @@ async def complete_task(
     if error:
         new_content["error"] = error
 
-    complete_activity_id = uuid4()
+    activity_id = uuid4()
     now = datetime.now(timezone.utc)
 
     await repo.ensure_agent("system", "systeem", "Systeem", {})
 
     activity_row = await repo.create_activity(
-        activity_id=complete_activity_id,
+        activity_id=activity_id,
         dossier_id=dossier_id,
-        type="completeTask",
+        type="systemAction",
         started_at=now,
         ended_at=now,
         informed_by=informed_by,
@@ -115,7 +115,7 @@ async def complete_task(
 
     await repo.create_association(
         association_id=uuid4(),
-        activity_id=complete_activity_id,
+        activity_id=activity_id,
         agent_id="system",
         agent_name="Systeem",
         agent_type="systeem",
@@ -128,9 +128,22 @@ async def complete_task(
         entity_id=task.entity_id,
         dossier_id=dossier_id,
         type="system:task",
-        generated_by=complete_activity_id,
+        generated_by=activity_id,
         content=new_content,
         derived_from=task.id,
+        attributed_to="system",
+    )
+
+    # Create a note explaining the action
+    fn_name = task.content.get("function", "") if task.content else ""
+    note_text = f"Task {status}: {fn_name}" if fn_name else f"Task {status}"
+    await repo.create_entity(
+        version_id=uuid4(),
+        entity_id=uuid4(),
+        dossier_id=dossier_id,
+        type="system:note",
+        generated_by=activity_id,
+        content={"text": note_text},
         attributed_to="system",
     )
 
@@ -144,7 +157,7 @@ async def complete_task(
         dossier.cached_status = current_status
         dossier.eligible_activities = _json.dumps(eligible)
 
-    return complete_activity_id
+    return activity_id
 
 
 async def process_task(task: EntityRow, registry, config):
@@ -199,7 +212,7 @@ async def process_task(task: EntityRow, registry, config):
                         # Resolve all latest entities for context
                         all_latest = await repo.get_all_latest_entities(dossier_id)
                         resolved = {e.type: e for e in all_latest}
-                        ctx = ActivityContext(repo, dossier_id, resolved, plugin.entity_models)
+                        ctx = ActivityContext(repo, dossier_id, resolved, plugin.entity_models, plugin=plugin)
                         await fn(ctx)
                     else:
                         logger.warning(f"Task {task.id}: function '{fn_name}' not found")
@@ -215,6 +228,13 @@ async def process_task(task: EntityRow, registry, config):
                     if not act_def:
                         raise ValueError(f"Activity definition not found: {target_activity_type}")
 
+                    # Extract anchor from task content so the engine's
+                    # auto-resolve can fall back to it when the informing
+                    # activity's scope doesn't cover all needed types.
+                    task_anchor_id_str = task_content.get("anchor_entity_id")
+                    task_anchor_type = task_content.get("anchor_type")
+                    task_anchor_id = UUID(task_anchor_id_str) if task_anchor_id_str else None
+
                     await execute_activity(
                         plugin=plugin,
                         activity_def=act_def,
@@ -226,6 +246,9 @@ async def process_task(task: EntityRow, registry, config):
                         used_items=[],
                         generated_items=[],
                         informed_by=str(current_task.generated_by) if current_task.generated_by else None,
+                        caller="system",
+                        anchor_entity_id=task_anchor_id,
+                        anchor_type=task_anchor_type,
                     )
                     await repo.session.flush()
 
@@ -243,7 +266,7 @@ async def process_task(task: EntityRow, registry, config):
                     if not fn:
                         raise ValueError(f"Task function not found: {fn_name}")
 
-                    ctx = ActivityContext(repo, dossier_id, {}, plugin.entity_models)
+                    ctx = ActivityContext(repo, dossier_id, {}, plugin.entity_models, plugin=plugin)
                     task_result = await fn(ctx)
 
                     # task_result should have target_dossier_id and optionally content
@@ -284,7 +307,7 @@ async def process_task(task: EntityRow, registry, config):
                         used_items=[{"entity": source_uri}],
                         generated_items=generated_items,
                         informed_by=informed_by_uri,
-                    )
+                    caller="system",)
                     await repo.session.flush()
 
                     # completeTask in source dossier, informed by the activity in target dossier

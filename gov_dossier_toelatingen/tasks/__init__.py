@@ -54,9 +54,40 @@ async def send_behandelaar_notificatie(context: ActivityContext):
         logger.info("[TASK] Notificatie naar behandelaar (geen entiteit)")
 
 
+async def move_bijlagen_to_permanent(context: ActivityContext):
+    """Move uploaded bijlagen from temp to permanent dossier location in the File Service."""
+    aanvraag = context.get_typed("oe:aanvraag")
+    if not aanvraag or not aanvraag.bijlagen:
+        logger.info("[TASK] move_bijlagen: no bijlagen to move")
+        return
+
+    dossier_id = str(context.dossier_id)
+
+    # In production, read file_service URL from config
+    file_service_url = "http://localhost:8001"
+
+    import aiohttp
+    async with aiohttp.ClientSession() as session:
+        for bijlage in aanvraag.bijlagen:
+            try:
+                async with session.post(
+                    f"{file_service_url}/internal/move",
+                    params={"file_id": bijlage.file_id, "dossier_id": dossier_id},
+                ) as resp:
+                    if resp.status == 200:
+                        result = await resp.json()
+                        logger.info(f"[TASK] Moved bijlage {bijlage.file_id} → {dossier_id}/bijlagen/")
+                    else:
+                        error = await resp.text()
+                        logger.warning(f"[TASK] Failed to move bijlage {bijlage.file_id}: {error}")
+            except Exception as e:
+                logger.error(f"[TASK] Error moving bijlage {bijlage.file_id}: {e}")
+
+
 TASK_HANDLERS = {
     "send_ontvangstbevestiging": send_ontvangstbevestiging,
     "log_beslissing_genomen": log_beslissing_genomen,
     "log_organisatie_aangeduid": log_organisatie_aangeduid,
     "send_behandelaar_notificatie": send_behandelaar_notificatie,
+    "move_bijlagen_to_permanent": move_bijlagen_to_permanent,
 }

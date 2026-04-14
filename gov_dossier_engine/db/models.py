@@ -108,6 +108,8 @@ class EntityRow(Base):
     derived_from = Column(UUID_DB(), ForeignKey("entities.id"), nullable=True)
     attributed_to = Column(Text, nullable=True)
     content = Column(JSON, nullable=True)
+    schema_version = Column(Text, nullable=True)  # e.g. "v1", "v2"; NULL = unversioned/legacy
+    tombstoned_by = Column(UUID_DB(), ForeignKey("activities.id"), nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     dossier = relationship("DossierRow", back_populates="entities")
@@ -118,6 +120,7 @@ class EntityRow(Base):
         Index("ix_entities_type", "type"),
         Index("ix_entities_dossier_type", "dossier_id", "type"),
         Index("ix_entities_dossier_type_created", "dossier_id", "type", "created_at"),
+        Index("ix_entities_dossier_entity", "dossier_id", "entity_id"),
         Index("ix_entities_generated_by", "generated_by"),
     )
 
@@ -129,6 +132,28 @@ class UsedRow(Base):
     entity_id = Column(UUID_DB(), ForeignKey("entities.id"), primary_key=True)
 
     activity = relationship("ActivityRow", back_populates="used_entities")
+
+
+class RelationRow(Base):
+    """Generic activity→entity relation under a named type.
+
+    Used for PROV-style annotations beyond `used` and `wasGeneratedBy` — e.g.
+    `oe:neemtAkteVan` ("takes note of") for explicitly acknowledging newer
+    entity versions the activity chose not to act on. Plugins can register
+    their own relation types; the engine stores and returns them uniformly
+    but delegates validation to plugin-registered validators."""
+    __tablename__ = "activity_relations"
+
+    activity_id = Column(UUID_DB(), ForeignKey("activities.id"), primary_key=True)
+    entity_id = Column(UUID_DB(), ForeignKey("entities.id"), primary_key=True)
+    relation_type = Column(Text, primary_key=True, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        Index("ix_relations_activity", "activity_id"),
+        Index("ix_relations_entity", "entity_id"),
+        Index("ix_relations_type", "relation_type"),
+    )
 
 
 class TaskRow(Base):
@@ -167,16 +192,39 @@ class Repository:
 
     def __init__(self, session: Session):
         self.session = session
+        # Session-scoped cache: agents that have already been ensured in this
+        # session. Lets `ensure_agent` short-circuit after the first call per
+        # agent_id, avoiding redundant SELECT+UPDATE pairs. Cleared when the
+        # session ends (next request gets a fresh Repository).
+        self._ensured_agents: set[str] = set()
+        # Session-scoped cache of activities per dossier. `derive_status`,
+        # `validate_workflow_rules`, `compute_eligible_activities`, and the
+        # post-activity hook all call `get_activities_for_dossier` within a
+        # single `execute_activity` — without this cache they each issue a
+        # separate SELECT. The cache is invalidated in-place when
+        # `create_activity` adds a new row for the same dossier, so it stays
+        # consistent with the session's view. Keyed by dossier_id.
+        self._activities_cache: dict[UUID, list] = {}
+        # Session-scoped cache of dossier rows. Avoids redundant `SELECT
+        # FROM dossiers WHERE id = ?` when the same dossier is fetched by
+        # multiple code paths in a single request.
+        self._dossier_cache: dict[UUID, Optional["DossierRow"]] = {}
 
     # --- Dossier ---
 
     async def get_dossier(self, dossier_id: UUID) -> Optional[DossierRow]:
+        if dossier_id in self._dossier_cache:
+            return self._dossier_cache[dossier_id]
         result = await self.session.get(DossierRow, dossier_id)
+        self._dossier_cache[dossier_id] = result
         return result
 
     async def create_dossier(self, dossier_id: UUID, workflow: str) -> DossierRow:
         row = DossierRow(id=dossier_id, workflow=workflow)
         self.session.add(row)
+        # Cache the newly-created row so a subsequent get_dossier in the
+        # same session hits the cache instead of issuing a SELECT.
+        self._dossier_cache[dossier_id] = row
         return row
 
     # --- Activity ---
@@ -185,13 +233,18 @@ class Repository:
         return await self.session.get(ActivityRow, activity_id)
 
     async def get_activities_for_dossier(self, dossier_id: UUID) -> list[ActivityRow]:
+        cached = self._activities_cache.get(dossier_id)
+        if cached is not None:
+            return cached
         from sqlalchemy import select
         result = await self.session.execute(
             select(ActivityRow)
             .where(ActivityRow.dossier_id == dossier_id)
             .order_by(ActivityRow.started_at)
         )
-        return list(result.scalars().all())
+        rows = list(result.scalars().all())
+        self._activities_cache[dossier_id] = rows
+        return rows
 
     async def create_activity(
         self,
@@ -213,6 +266,12 @@ class Repository:
             computed_status=computed_status,
         )
         self.session.add(row)
+        # Keep the activities cache consistent with the session's view.
+        # Append-only: insertion order matches started_at order for
+        # activities created within a single request.
+        cached = self._activities_cache.get(dossier_id)
+        if cached is not None:
+            cached.append(row)
         return row
 
     # --- Association ---
@@ -242,12 +301,36 @@ class Repository:
     async def get_entity(self, version_id: UUID) -> Optional[EntityRow]:
         return await self.session.get(EntityRow, version_id)
 
-    async def get_latest_entity(self, dossier_id: UUID, entity_type: str) -> Optional[EntityRow]:
+    async def get_singleton_entity(
+        self, dossier_id: UUID, entity_type: str
+    ) -> Optional[EntityRow]:
+        """Return the latest (most recently created) entity of `entity_type`
+        in the dossier. Intended for singleton-cardinality types — callers
+        expecting a unique entity per type per dossier.
+
+        NOTE: this method does NOT enforce the singleton invariant itself;
+        cardinality enforcement happens at the engine layer via
+        `plugin.cardinality_of(entity_type)`. See phase 1b."""
         from sqlalchemy import select
         result = await self.session.execute(
             select(EntityRow)
             .where(EntityRow.dossier_id == dossier_id)
             .where(EntityRow.type == entity_type)
+            .order_by(EntityRow.created_at.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
+    async def get_latest_entity_by_id(
+        self, dossier_id: UUID, entity_id: UUID
+    ) -> Optional[EntityRow]:
+        """Return the newest version row for a specific logical entity_id,
+        or None if no versions of this entity exist in the dossier."""
+        from sqlalchemy import select
+        result = await self.session.execute(
+            select(EntityRow)
+            .where(EntityRow.dossier_id == dossier_id)
+            .where(EntityRow.entity_id == entity_id)
             .order_by(EntityRow.created_at.desc())
             .limit(1)
         )
@@ -276,6 +359,37 @@ class Repository:
         from sqlalchemy import select
         result = await self.session.execute(
             select(EntityRow)
+            .where(EntityRow.dossier_id == dossier_id)
+            .where(EntityRow.type == entity_type)
+            .order_by(EntityRow.created_at)
+        )
+        return list(result.scalars().all())
+
+    async def get_entities_by_type_latest(
+        self, dossier_id: UUID, entity_type: str
+    ) -> list[EntityRow]:
+        """Return the latest version of each distinct logical entity of this
+        type in the dossier. For singleton types the list has at most one
+        element. For multi-cardinality types, one element per entity_id."""
+        from sqlalchemy import select, func
+        # Subquery: max(created_at) per entity_id for this type
+        subq = (
+            select(
+                EntityRow.entity_id,
+                func.max(EntityRow.created_at).label("max_created"),
+            )
+            .where(EntityRow.dossier_id == dossier_id)
+            .where(EntityRow.type == entity_type)
+            .group_by(EntityRow.entity_id)
+            .subquery()
+        )
+        result = await self.session.execute(
+            select(EntityRow)
+            .join(
+                subq,
+                (EntityRow.entity_id == subq.c.entity_id)
+                & (EntityRow.created_at == subq.c.max_created),
+            )
             .where(EntityRow.dossier_id == dossier_id)
             .where(EntityRow.type == entity_type)
             .order_by(EntityRow.created_at)
@@ -313,6 +427,7 @@ class Repository:
         content: dict | None = None,
         derived_from: UUID | None = None,
         attributed_to: str | None = None,
+        schema_version: str | None = None,
     ) -> EntityRow:
         row = EntityRow(
             id=version_id,
@@ -323,6 +438,7 @@ class Repository:
             content=content,
             derived_from=derived_from,
             attributed_to=attributed_to,
+            schema_version=schema_version,
         )
         self.session.add(row)
         return row
@@ -350,6 +466,24 @@ class Repository:
             content={"uri": uri},
         )
 
+    async def tombstone_entity_versions(
+        self, version_ids: list[UUID], tombstone_activity_id: UUID
+    ) -> None:
+        """Mark the given entity versions as tombstoned: set content=NULL
+        and stamp tombstoned_by with the activity that performed the
+        deletion. Per the deletion-scope decision (option a), only the
+        content blob is nulled — the row itself, derivation edges,
+        used/relations references, schema_version, and all PROV linkage
+        survive intact. The audit skeleton stays whole; the data is gone."""
+        if not version_ids:
+            return
+        from sqlalchemy import update
+        await self.session.execute(
+            update(EntityRow)
+            .where(EntityRow.id.in_(version_ids))
+            .values(content=None, tombstoned_by=tombstone_activity_id)
+        )
+
     # --- Used ---
 
     async def create_used(self, activity_id: UUID, entity_version_id: UUID):
@@ -364,17 +498,81 @@ class Repository:
         )
         return {row[0] for row in result.all()}
 
+    async def get_entities_generated_by_activity(
+        self, activity_id: UUID
+    ) -> list[EntityRow]:
+        """Return all entities whose `generated_by` points at this activity."""
+        from sqlalchemy import select
+        result = await self.session.execute(
+            select(EntityRow)
+            .where(EntityRow.generated_by == activity_id)
+            .order_by(EntityRow.created_at)
+        )
+        return list(result.scalars().all())
+
+    async def get_used_entities_for_activity(
+        self, activity_id: UUID
+    ) -> list[EntityRow]:
+        """Return the full EntityRow objects used by an activity."""
+        from sqlalchemy import select
+        result = await self.session.execute(
+            select(EntityRow)
+            .join(UsedRow, UsedRow.entity_id == EntityRow.id)
+            .where(UsedRow.activity_id == activity_id)
+        )
+        return list(result.scalars().all())
+
+    # --- Relations (generic activity→entity edges beyond used/generated) ---
+
+    async def create_relation(
+        self,
+        activity_id: UUID,
+        entity_version_id: UUID,
+        relation_type: str,
+    ):
+        """Record an activity→entity relation under a named type. Idempotent
+        at the (activity, entity, type) level: inserting the same triple
+        twice is a no-op (caller should avoid it but we don't enforce it
+        here beyond the PK constraint)."""
+        row = RelationRow(
+            activity_id=activity_id,
+            entity_id=entity_version_id,
+            relation_type=relation_type,
+        )
+        self.session.add(row)
+
+    async def get_relations_for_activity(
+        self, activity_id: UUID
+    ) -> list[RelationRow]:
+        """Return every relation row attached to this activity."""
+        from sqlalchemy import select
+        result = await self.session.execute(
+            select(RelationRow).where(RelationRow.activity_id == activity_id)
+        )
+        return list(result.scalars().all())
+
     # --- Agent ---
 
     async def ensure_agent(self, agent_id: str, agent_type: str, name: str | None, properties: dict | None):
+        # Fast path: already ensured this session, nothing to do. This is
+        # safe because agents are effectively immutable for the purposes of
+        # a single activity execution — name/properties changes are rare
+        # and not functional.
+        if agent_id in self._ensured_agents:
+            return
         existing = await self.session.get(AgentRow, agent_id)
         if existing:
-            existing.name = name
-            existing.properties = properties
-            existing.updated_at = datetime.now(timezone.utc)
+            # Only write if something actually changed. Bumping `updated_at`
+            # on every call was pure overhead — the field has no semantic
+            # meaning for the engine.
+            if existing.name != name or existing.properties != properties:
+                existing.name = name
+                existing.properties = properties
+                existing.updated_at = datetime.now(timezone.utc)
         else:
             row = AgentRow(id=agent_id, type=agent_type, name=name, properties=properties)
             self.session.add(row)
+        self._ensured_agents.add(agent_id)
 
     # --- Task ---
 

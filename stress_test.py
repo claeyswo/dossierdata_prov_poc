@@ -75,6 +75,29 @@ def make_d2_flow(dossier_idx: int) -> list[dict]:
 
     steps = []
 
+    # Pre-generate synthetic file ids for this dossier. The stress test does
+    # not actually upload files to the File Service — the read benchmark only
+    # measures Pydantic hydration + the FileId-walker + HMAC signing, none of
+    # which touch the File Service. The values just need to be opaque strings
+    # so the walker treats them as file ids.
+    aanvraag_bijlage_fids = [str(uuid4()), str(uuid4())]  # 2 bijlagen per aanvraag
+    brief_fids = [str(uuid4()) for _ in range(3)]
+
+    bijlagen_content = [
+        {
+            "file_id": aanvraag_bijlage_fids[0],
+            "filename": "detailplan.pdf",
+            "content_type": "application/pdf",
+            "size": 102400,
+        },
+        {
+            "file_id": aanvraag_bijlage_fids[1],
+            "filename": "fotos.zip",
+            "content_type": "application/zip",
+            "size": 512000,
+        },
+    ]
+
     # Step 1: dienAanvraagIn
     steps.append({
         "path": f"/dossiers/{did}/activities/a0{dossier_idx:06d}-0001-0000-0000-000000000001/dienAanvraagIn",
@@ -90,6 +113,7 @@ def make_d2_flow(dossier_idx: int) -> list[dict]:
                     "aanvrager": aanvrager,
                     "gemeente": gemeente,
                     "object": obj_uri,
+                    "bijlagen": bijlagen_content,
                 }
             }]
         }
@@ -100,13 +124,14 @@ def make_d2_flow(dossier_idx: int) -> list[dict]:
         "path": f"/dossiers/{did}/activities/a0{dossier_idx:06d}-0002-0000-0000-000000000001/doeVoorstelBeslissing",
         "user": behandelaar,
         "body": {
+            "used": [{"entity": f"oe:aanvraag/{eid_aanvraag}@{v[0]}"}],
             "generated": [{
                 "entity": f"oe:beslissing/{eid_beslissing}@{v[1]}",
                 "content": {
                     "beslissing": "onvolledig",
                     "datum": datetime.now(timezone.utc).isoformat(),
                     "object": obj_uri,
-                    "brief": f"https://dms.example.com/brieven/brief-{dossier_idx}-001",
+                    "brief": brief_fids[0],
                 }
             }]
         }
@@ -117,6 +142,7 @@ def make_d2_flow(dossier_idx: int) -> list[dict]:
         "path": f"/dossiers/{did}/activities/a0{dossier_idx:06d}-0003-0000-0000-000000000001/tekenBeslissing",
         "user": "sophie.tekent",
         "body": {
+            "used": [{"entity": f"oe:beslissing/{eid_beslissing}@{v[1]}"}],
             "generated": [{
                 "entity": f"oe:handtekening/{eid_handtekening}@{v[2]}",
                 "content": {"getekend": True}
@@ -139,6 +165,7 @@ def make_d2_flow(dossier_idx: int) -> list[dict]:
                     "aanvrager": aanvrager,
                     "gemeente": gemeente,
                     "object": obj_uri,
+                    "bijlagen": bijlagen_content,
                 }
             }]
         }
@@ -159,6 +186,7 @@ def make_d2_flow(dossier_idx: int) -> list[dict]:
                     "aanvrager": aanvrager,
                     "gemeente": gemeente,
                     "object": obj_uri,
+                    "bijlagen": bijlagen_content,
                 }
             }]
         }
@@ -169,6 +197,7 @@ def make_d2_flow(dossier_idx: int) -> list[dict]:
         "path": f"/dossiers/{did}/activities/a0{dossier_idx:06d}-0006-0000-0000-000000000001/doeVoorstelBeslissing",
         "user": behandelaar,
         "body": {
+            "used": [{"entity": f"oe:aanvraag/{eid_aanvraag}@{v[4]}"}],
             "generated": [{
                 "entity": f"oe:beslissing/{eid_beslissing}@{v[5]}",
                 "derivedFrom": f"oe:beslissing/{eid_beslissing}@{v[1]}",
@@ -176,7 +205,7 @@ def make_d2_flow(dossier_idx: int) -> list[dict]:
                     "beslissing": "goedgekeurd",
                     "datum": datetime.now(timezone.utc).isoformat(),
                     "object": obj_uri,
-                    "brief": f"https://dms.example.com/brieven/brief-{dossier_idx}-002",
+                    "brief": brief_fids[1],
                 }
             }]
         }
@@ -187,6 +216,7 @@ def make_d2_flow(dossier_idx: int) -> list[dict]:
         "path": f"/dossiers/{did}/activities/a0{dossier_idx:06d}-0007-0000-0000-000000000001/tekenBeslissing",
         "user": "sophie.tekent",
         "body": {
+            "used": [{"entity": f"oe:beslissing/{eid_beslissing}@{v[5]}"}],
             "generated": [{
                 "entity": f"oe:handtekening/{eid_handtekening}@{v[6]}",
                 "derivedFrom": f"oe:handtekening/{eid_handtekening}@{v[2]}",
@@ -200,6 +230,7 @@ def make_d2_flow(dossier_idx: int) -> list[dict]:
         "path": f"/dossiers/{did}/activities/a0{dossier_idx:06d}-0008-0000-0000-000000000001/doeVoorstelBeslissing",
         "user": behandelaar,
         "body": {
+            "used": [{"entity": f"oe:aanvraag/{eid_aanvraag}@{v[4]}"}],
             "generated": [{
                 "entity": f"oe:beslissing/{eid_beslissing}@{v[7]}",
                 "derivedFrom": f"oe:beslissing/{eid_beslissing}@{v[5]}",
@@ -207,7 +238,7 @@ def make_d2_flow(dossier_idx: int) -> list[dict]:
                     "beslissing": "goedgekeurd",
                     "datum": datetime.now(timezone.utc).isoformat(),
                     "object": obj_uri,
-                    "brief": f"https://dms.example.com/brieven/brief-{dossier_idx}-003",
+                    "brief": brief_fids[2],
                 }
             }]
         }
@@ -218,6 +249,7 @@ def make_d2_flow(dossier_idx: int) -> list[dict]:
         "path": f"/dossiers/{did}/activities/a0{dossier_idx:06d}-0009-0000-0000-000000000001/tekenBeslissing",
         "user": "sophie.tekent",
         "body": {
+            "used": [{"entity": f"oe:beslissing/{eid_beslissing}@{v[7]}"}],
             "generated": [{
                 "entity": f"oe:handtekening/{eid_handtekening}@{v[8]}",
                 "derivedFrom": f"oe:handtekening/{eid_handtekening}@{v[6]}",

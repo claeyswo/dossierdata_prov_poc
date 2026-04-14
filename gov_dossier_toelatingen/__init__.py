@@ -17,19 +17,15 @@ import logging
 import os
 import yaml
 
-from gov_dossier_engine.plugin import Plugin
-from gov_dossier_engine.entities import DossierAccess
-
-from .entities import (
-    Aanvraag,
-    Beslissing,
-    Handtekening,
-    VerantwoordelijkeOrganisatie,
-    Behandelaar,
-    SystemFields,
+from gov_dossier_engine.plugin import (
+    Plugin,
+    build_entity_registries_from_workflow,
+    validate_workflow_version_references,
 )
+
 from .handlers import HANDLERS
 from .validators import VALIDATORS
+from .relation_validators import RELATION_VALIDATORS
 from .tasks import TASK_HANDLERS
 
 logger = logging.getLogger("toelatingen.index")
@@ -114,28 +110,32 @@ def register_search_routes(app, get_user):
 
 
 def create_plugin() -> Plugin:
-    """Create and return the toelatingen plugin."""
+    """Create and return the toelatingen plugin.
+
+    Entity model and versioned schema registries are built from the
+    workflow YAML's `entity_types` block — each entry declares its
+    `model` (default/unversioned) and optional `schemas` mapping
+    version strings to fully-qualified Pydantic class paths. This is
+    the single source of truth for the versioning picture; the engine
+    cross-checks every activity's `new_version` / `allowed_versions`
+    against it at load time.
+    """
 
     workflow_path = os.path.join(os.path.dirname(__file__), "workflow.yaml")
     with open(workflow_path) as f:
         workflow = yaml.safe_load(f)
 
-    entity_models = {
-        "oe:aanvraag": Aanvraag,
-        "oe:beslissing": Beslissing,
-        "oe:handtekening": Handtekening,
-        "oe:verantwoordelijke_organisatie": VerantwoordelijkeOrganisatie,
-        "oe:behandelaar": Behandelaar,
-        "oe:system_fields": SystemFields,
-        "oe:dossier_access": DossierAccess,
-    }
+    entity_models, entity_schemas = build_entity_registries_from_workflow(workflow)
+    validate_workflow_version_references(workflow, entity_schemas)
 
     return Plugin(
         name=workflow["name"],
         workflow=workflow,
         entity_models=entity_models,
+        entity_schemas=entity_schemas,
         handlers=HANDLERS,
         validators=VALIDATORS,
+        relation_validators=RELATION_VALIDATORS,
         task_handlers=TASK_HANDLERS,
         post_activity_hook=update_search_index,
         search_route_factory=register_search_routes,
