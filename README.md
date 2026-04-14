@@ -240,15 +240,35 @@ The worker is production-ready and safe to deploy redundantly. Every significant
 - `attempt_count` is incremented.
 - If `attempt_count >= max_attempts` (default 3), the new version has `status = "dead_letter"` — terminal, never picked up by the worker again.
 - Otherwise, the new version stays in `status = "scheduled"` but gains a `next_attempt_at` field set to `now + base_delay_seconds * 2**(attempt_count - 1) * (1 + jitter)` where jitter is uniform in `[-0.1, 0.1]`. The default `base_delay_seconds` is 60, so failures retry at roughly 60s, 120s, 240s for attempts 1, 2, 3. The jitter prevents thundering-herd retries.
-- `last_error` carries the exception's type and message. `last_attempt_at` carries an ISO timestamp of the failed attempt.
+- Error telemetry — exception type, message, full stack trace — goes to the Python `logging` system via `logger.exception(..., extra={...})` with structured fields (task_id, dossier_id, attempt_count, max_attempts, function, kind). Deployments wire this to Sentry via `sentry_sdk`'s logging integration: ERROR-level events with `exc_info` become full Sentry events automatically, with the `extra` fields showing up as tags. WARNING-level retries are typically dropped at the Sentry level so transient flakiness doesn't swamp the error budget. The task content itself does NOT carry error text — only operational state (`attempt_count`, `last_attempt_at`, `next_attempt_at`) that the poll loop needs for retry decisions. To investigate a dead-lettered task, query Sentry (or your logging backend) by `task_id` and see the complete attempt-by-attempt history with stack traces.
 
 Tasks can override `max_attempts` and `base_delay_seconds` in their content to opt into a different retry shape — e.g. a cross-dossier task that calls a flaky external service might use `max_attempts=5, base_delay_seconds=30` for faster, more aggressive retry. All retry state goes through the same `complete_task → execute_activity → systemAction` pathway as happy-path completions, so every write is validated, every post-activity hook fires, and the full PROV graph is preserved.
 
-**Dead-letter handling.** Dead-lettered tasks stay in the database with `status = "dead_letter"` and their full error history (`attempt_count`, `last_error`, `last_attempt_at`). They're invisible to the poll query (which filters on `status = 'scheduled'`) and require operator intervention. To requeue a dead-lettered task manually, write a new task version with `status = "scheduled"` and `attempt_count = 0` via a `systemAction` activity. To investigate, query by `content ->> 'status' = 'dead_letter'` and read `last_error`.
+**Dead-letter handling.** Dead-lettered tasks stay in the database with `status = "dead_letter"` and are invisible to the poll query (which filters on `status = 'scheduled'`). They require operator intervention. Use the worker's `--requeue-dead-letters` CLI flag:
+
+```bash
+# Requeue every dead-lettered task, all dossiers
+python -m dossier_engine.worker --requeue-dead-letters
+
+# Requeue only dead letters in one dossier
+python -m dossier_engine.worker --requeue-dead-letters --dossier=<uuid>
+
+# Requeue one specific task by its logical entity_id
+python -m dossier_engine.worker --requeue-dead-letters --task=<entity_uuid>
+
+# Combine filters — requeue a specific task in a specific dossier
+python -m dossier_engine.worker --requeue-dead-letters --dossier=<uuid> --task=<entity_uuid>
+```
+
+The requeue writes a fresh revision of each dead-lettered task with `status = "scheduled"`, `attempt_count = 0`, and `next_attempt_at = null`. The original `scheduled_for` is preserved as the historical record of when the task was first queued, and `last_attempt_at` is preserved so operators can still see when the task last tried. All other task content (function name, anchor, target_activity, etc.) is carried forward unchanged.
+
+Each dossier's requeue is audited as a single `systemAction` activity that generates N task revisions plus one `system:note` explaining the scope and listing the requeued task entity_ids. Running `--requeue-dead-letters` once with 50 dead letters spread across 10 dossiers produces 10 audit entries, one per dossier, each listing the tasks requeued in that dossier. The systemAction is a first-class activity in the PROV graph — an auditor walking the dossier's history sees exactly when each requeue happened and which tasks were affected.
+
+The requeue command runs as a one-shot and exits — it does NOT start a drain cycle. If you want to immediately execute the requeued tasks, run `python -m dossier_engine.worker --once` afterward (or wait for the next normal poll cycle to pick them up).
 
 **Graceful shutdown.** `SIGTERM` and `SIGINT` set an `asyncio.Event`. The outer sleep loop uses `asyncio.wait_for(shutdown.wait(), timeout=poll_interval)` as its "sleep", so the signal unblocks the sleep immediately. The inner drain loop checks the event at the top of each iteration, so a signal mid-drain finishes the in-flight task cleanly (its transaction runs to completion — we never interrupt a task mid-transaction) and then exits before starting the next one. Container orchestrators that send SIGTERM and wait a few seconds before killing the process will see the worker exit cleanly with `Worker stopped` in the log.
 
-**Observability log lines** (all under logger `dossier.worker`):
+**Observability log lines** (all under logger `dossier.worker`). ERROR-level entries include `exc_info` when they report an exception, so the Sentry logging integration captures them as full events with stack traces:
 
 | Line | Level | When |
 |---|---|---|
@@ -257,41 +277,69 @@ Tasks can override `max_attempts` and `base_delay_seconds` in their content to o
 | `Task X: recorded task 'Y' completed` | INFO | successful recorded task |
 | `Task X: scheduled activity Y executed` | INFO | successful scheduled_activity |
 | `Task X: cross-dossier activity Y in Z` | INFO | successful cross_dossier |
-| `Task X: cancelled by activity` | INFO | `cancel_if_activities` fired |
 | `Drain cycle: processed N tasks` | INFO | end of each drain pass, only when N > 0 |
-| `Task X: attempt K/M failed, retry at T: E` | WARNING | transient failure with retry scheduled |
-| `Task X: attempt K/M failed, moving to dead_letter: E` | ERROR | failure with retries exhausted |
+| `Task X: attempt K/M failed, retry at T` | WARNING | transient failure with retry scheduled; carries `exc_info` + structured `extra` |
+| `Task X: attempt K/M failed, moving to dead_letter` | ERROR | failure with retries exhausted; carries `exc_info` + structured `extra` |
 | `Task X execution failed: E` | ERROR | raw exception trace before retry decision |
+| `requeue_dead_letters: dossier X — requeued N task(s)` | INFO | per-dossier requeue completion |
+| `requeue_dead_letters: done, N task(s) requeued total` | INFO | end of a requeue run |
 | `Worker received signal N, shutting down gracefully` | INFO | SIGTERM/SIGINT arrived |
 | `Worker stopped` | INFO | clean exit |
 
-A simple prometheus-style scrape can be built on top of these by counting `recorded task '*' completed` lines for throughput and `moving to dead_letter` lines for failure-budget alerts. Real metrics (gauge for queue depth, histogram for task duration) are a separate Level 2 concern and not yet implemented — see the production-readiness arc inventory for the unbuilt Level 2 items.
+The failure log lines carry structured `extra` fields (`task_id`, `task_entity_id`, `dossier_id`, `function`, `kind`, `attempt_count`, `max_attempts`) that Sentry maps to event tags. That makes Sentry queries like `task_id:<uuid>` or `dossier_id:<uuid> attempt_count:>1` work out of the box, so an operator investigating a failing task can pull the full attempt history without having to cross-reference logs manually.
 
-**Inspecting the queue from psql**:
+A simple prometheus-style scrape can be built on top of these by counting `recorded task '*' completed` lines for throughput and `moving to dead_letter` lines for failure-budget alerts. Real metrics (gauge for queue depth, histogram for task duration) are a separate Level 2 concern and not yet implemented.
+
+**Inspecting the queue from psql**. These are latest-version-aware queries — they ignore superseded task revisions and only show each logical task's current state:
 
 ```sql
--- Backlog depth by status
+-- Backlog depth by status (latest version per logical task)
+WITH latest AS (
+  SELECT DISTINCT ON (entity_id) *
+  FROM entities
+  WHERE type = 'system:task'
+  ORDER BY entity_id, created_at DESC
+)
 SELECT content->>'status' AS status, COUNT(*)
-FROM entities
-WHERE type = 'system:task'
-GROUP BY 1;
+FROM latest
+GROUP BY 1
+ORDER BY 2 DESC;
 
--- Dead-lettered tasks with their errors
-SELECT entity_id, content->>'function', content->>'last_error',
-       content->>'attempt_count', content->>'last_attempt_at'
-FROM entities
-WHERE type = 'system:task' AND content->>'status' = 'dead_letter';
+-- Dead-lettered tasks (error details live in Sentry, not here)
+WITH latest AS (
+  SELECT DISTINCT ON (entity_id) *
+  FROM entities
+  WHERE type = 'system:task'
+  ORDER BY entity_id, created_at DESC
+)
+SELECT entity_id,
+       content->>'function'        AS fn,
+       content->>'attempt_count'   AS attempts,
+       content->>'last_attempt_at' AS last_tried,
+       dossier_id
+FROM latest
+WHERE content->>'status' = 'dead_letter'
+ORDER BY content->>'last_attempt_at' DESC;
 
 -- Tasks waiting on retry delay
-SELECT entity_id, content->>'function',
-       content->>'attempt_count', content->>'next_attempt_at'
-FROM entities
-WHERE type = 'system:task'
-  AND content->>'status' = 'scheduled'
-  AND content ? 'next_attempt_at';
+WITH latest AS (
+  SELECT DISTINCT ON (entity_id) *
+  FROM entities
+  WHERE type = 'system:task'
+  ORDER BY entity_id, created_at DESC
+)
+SELECT entity_id,
+       content->>'function'        AS fn,
+       content->>'attempt_count'   AS attempts,
+       content->>'next_attempt_at' AS retry_at
+FROM latest
+WHERE content->>'status' = 'scheduled'
+  AND content ? 'next_attempt_at'
+  AND (content->>'next_attempt_at')::timestamptz > NOW()
+ORDER BY (content->>'next_attempt_at')::timestamptz;
 ```
 
-Note that these queries scan the full history including superseded task versions. To see only latest-version-per-task, add a `MAX(created_at)` subquery join — the worker's `find_due_tasks` in `worker.py` shows the shape.
+For the full attempt history of a specific task (who failed, when, what error), query Sentry by `task_id:<entity_id>`. The database only stores operational state, not error details.
 
 **Running multiple workers.** On Postgres with `FOR UPDATE OF entities SKIP LOCKED`, concurrent workers are safe by construction. Run as many as your task throughput requires. A sensible starting point is one worker per CPU core for CPU-bound task functions, or a few workers per core for IO-bound ones. All workers connect to the same Postgres instance; no other coordination is needed.
 

@@ -142,18 +142,44 @@ A sensible starting point is one worker per CPU core for CPU-bound task function
 
 ### Dead-letter inspection and requeue
 
-A task that fails `max_attempts` times is written with `status = "dead_letter"` and stays in that state forever unless an operator intervenes. To inspect:
+A task that fails `max_attempts` times is written with `status = "dead_letter"` and stays in that state forever unless an operator intervenes. The worker emits an ERROR-level log line (`Task X: attempt K/M failed, moving to dead_letter`) with `exc_info` and a structured `extra` dict — deployments wired to Sentry will see this as a full Sentry event with stack trace and task/dossier/attempt tags.
+
+Error telemetry (exception type, message, stack trace, breadcrumbs) lives in **Sentry**, not in the database. The task's content only carries operational state that the worker needs for retry decisions (`attempt_count`, `last_attempt_at`, `next_attempt_at`). To investigate why a task died, query Sentry by `task_id:<entity_id>` and read the full attempt history there.
+
+To see which tasks are currently dead-lettered:
 
 ```sql
-SELECT entity_id, content->>'function' AS fn,
-       content->>'attempt_count' AS tries,
-       content->>'last_error' AS err,
-       content->>'last_attempt_at' AS last
-FROM entities
-WHERE type = 'system:task' AND content->>'status' = 'dead_letter';
+WITH latest AS (
+  SELECT DISTINCT ON (entity_id) *
+  FROM entities
+  WHERE type = 'system:task'
+  ORDER BY entity_id, created_at DESC
+)
+SELECT entity_id, dossier_id,
+       content->>'function'        AS fn,
+       content->>'attempt_count'   AS attempts,
+       content->>'last_attempt_at' AS last_tried
+FROM latest
+WHERE content->>'status' = 'dead_letter'
+ORDER BY content->>'last_attempt_at' DESC;
 ```
 
-To requeue a dead-lettered task, write a new task entity version via a `systemAction` activity with `status = "scheduled"`, `attempt_count = 0`, and optionally a different `max_attempts` or `base_delay_seconds` if you want more lenient retries the second time around. The requeue has to go through the engine (not raw SQL) so the append-only invariant and post-activity hook are respected.
+Once the root cause is fixed, requeue dead-lettered tasks via the `--requeue-dead-letters` CLI flag:
+
+```bash
+# Everything across all dossiers
+python -m dossier_engine.worker --requeue-dead-letters
+
+# Only dead letters in one dossier
+python -m dossier_engine.worker --requeue-dead-letters --dossier=<uuid>
+
+# One specific task by its logical entity_id
+python -m dossier_engine.worker --requeue-dead-letters --task=<entity_uuid>
+```
+
+The command resets each matching task's `status` to `scheduled`, zeroes `attempt_count`, clears `next_attempt_at`, and preserves the original `scheduled_for` and `last_attempt_at` for historical context. Each dossier's requeue is written as one `systemAction` activity generating N task revisions + one `system:note` describing the scope, so the requeue is fully auditable in the PROV graph. Running the command with 50 dead letters spread across 10 dossiers produces 10 audit entries (one per dossier), each listing the affected tasks.
+
+The requeue command runs as a one-shot and exits. To immediately execute the requeued tasks, run `python -m dossier_engine.worker --once` afterward or wait for the next normal poll cycle.
 
 ### Graceful shutdown
 
@@ -168,11 +194,11 @@ Container orchestrators (Kubernetes, systemd) should send SIGTERM and wait at le
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | Worker log shows `database.url is required in config` at startup | Config file missing `database.url` or Postgres is down | Verify `config.yaml` has the Postgres URL; `pg_lsclusters` to confirm Postgres is running |
-| `Task X: attempt K/M failed, retry at T` appearing repeatedly for the same task | Task function is deterministically failing | Read `last_error` from the task content, fix the underlying cause, wait for the task to dead-letter or requeue it manually |
-| `Task X: attempt K/M failed, moving to dead_letter` | Task hit `max_attempts` | Inspect via the SQL above, fix the root cause, requeue if appropriate |
-| Worker drains nothing even though there are `scheduled` tasks | `next_attempt_at` is set to a future time (task is waiting on retry delay) OR `scheduled_for` hasn't arrived yet OR another worker has the row locked | Check `content->>'next_attempt_at'` and `content->>'scheduled_for'` on the task; both must be ≤ now for it to be claimable |
+| `Task X: attempt K/M failed, retry at T` appearing repeatedly for the same task | Task function is deterministically failing | Pull the task's error history from Sentry (query by `task_id:X`), fix the underlying cause, wait for the task to dead-letter or requeue it manually |
+| `Task X: attempt K/M failed, moving to dead_letter` | Task hit `max_attempts` | Pull error history from Sentry, fix root cause, `python -m dossier_engine.worker --requeue-dead-letters --task=<entity_uuid>` |
+| Worker drains nothing even though there are `scheduled` tasks | `next_attempt_at` is set to a future time (task is waiting on retry delay) OR `scheduled_for` hasn't arrived yet OR another worker has the row locked | Check `content->>'next_attempt_at'` and `content->>'scheduled_for'` on the latest task version; both must be ≤ now for it to be claimable |
 | Multiple workers each pick up different-but-overlapping subsets of tasks | Expected — `FOR UPDATE OF entities SKIP LOCKED` distributes tasks across workers per-row | No fix needed, this is correct concurrent operation |
-| `NameError: name 'func' is not defined` in worker | Missing `from sqlalchemy import func, select` | This was fixed in worker sub-step 3; ensure your worker.py is current |
+| After requeue, task hits 422 "Invalid derivation chain" | `_refetch_task` bug, fixed | Ensure your worker.py uses `get_latest_entity_by_id` in `_refetch_task`, not the old `get_entities_by_type` loop |
 
 ### Postgres cluster going down
 

@@ -31,12 +31,13 @@ class TaskEntity(BaseModel):
         scheduled → superseded          (replaced by another task with same anchor)
 
     Retry semantics. On execution failure, the worker increments
-    `attempt_count`, records the error in `last_error`, and either:
+    `attempt_count` and either:
 
     * Sets `status = "dead_letter"` if `attempt_count >= max_attempts`.
       Dead-lettered tasks are terminal and never picked up by the poll
-      loop again — they need operator intervention (requeue via an
-      admin activity, or investigate and drop).
+      loop again — an operator must requeue them (via the
+      `--requeue-dead-letters` CLI flag) after fixing whatever was
+      causing the failures.
     * Sets `next_attempt_at` to now + exponential backoff
       (`base_delay_seconds * 2**(attempt_count - 1)` ± 10% jitter)
       and leaves `status = "scheduled"` so the poll loop picks it up
@@ -46,9 +47,20 @@ class TaskEntity(BaseModel):
       and `next_attempt_at <= now` (when set).
 
     `max_attempts` and `base_delay_seconds` can be overridden per
-    task when it's scheduled; absent defaults come from the worker's
-    config. `attempt_count` starts at 0 and is only touched by the
-    worker on failure.
+    task when it's scheduled; absent defaults come from the TaskEntity
+    defaults below. `attempt_count` starts at 0 and is only touched by
+    the worker on failure.
+
+    Error telemetry — stack traces, exception details, breadcrumbs —
+    is sent to the Python `logging` system via `logger.exception(...)`
+    and is NOT stored on the task entity. Deployments wire that
+    logging to Sentry (or Datadog, or Honeycomb — whatever the
+    platform is); the task content only carries operational state
+    that the worker's poll loop needs to make retry decisions.
+    `last_attempt_at` is kept because it's cheap and useful for
+    human psql queries ("what tasks tried in the last hour"); the
+    full error history lives in the telemetry backend, keyed by
+    task_id.
     """
     kind: str                           # "fire_and_forget", "recorded", "scheduled_activity", "cross_dossier_activity"
     function: Optional[str] = None      # plugin task function name
@@ -60,7 +72,6 @@ class TaskEntity(BaseModel):
     allow_multiple: bool = False
     status: str = "scheduled"           # scheduled, completed, cancelled, superseded, dead_letter
     result: Optional[str] = None        # URI or result data after completion
-    error: Optional[str] = None         # most recent error on transient failure (legacy field)
 
     # Anchor: the specific entity this task is scoped to, used for cancel,
     # supersede, and allow_multiple matching. Stored as strings so the Pydantic
@@ -76,7 +87,6 @@ class TaskEntity(BaseModel):
     attempt_count: int = 0
     max_attempts: int = 3
     base_delay_seconds: int = 60
-    last_error: Optional[str] = None
     last_attempt_at: Optional[str] = None   # ISO datetime, most recent attempt
     next_attempt_at: Optional[str] = None   # ISO datetime, when to try again
 

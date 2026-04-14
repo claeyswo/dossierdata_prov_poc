@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import logging
 import random
 import signal
@@ -30,13 +29,7 @@ from sqlalchemy import func, select
 from .app import load_config_and_registry, SYSTEM_USER
 from .db import init_db, create_tables, get_session_factory
 from .db.models import EntityRow, Repository
-from .engine import (
-    ActivityContext,
-    Caller,
-    compute_eligible_activities,
-    derive_status,
-    execute_activity,
-)
+from .engine import ActivityContext, Caller, execute_activity
 
 logger = logging.getLogger("dossier.worker")
 
@@ -247,10 +240,19 @@ async def _record_failure(
     field set by `_compute_next_attempt_at`, so the poll loop skips
     it until the retry delay elapses.
 
-    Either way, `last_error` and `last_attempt_at` are recorded for
-    observability, and the write goes through `complete_task` (which
-    itself goes through `execute_activity` — see sub-step 5), so the
-    failure write path inherits all the engine's invariants.
+    Error telemetry goes to the Python logging system via
+    `logger.exception(...)`, which captures the full traceback and
+    sends it through whatever handlers are installed — in production
+    that's typically Sentry via `sentry_sdk`'s logging integration.
+    The task content itself carries only operational state
+    (`attempt_count`, `last_attempt_at`, `next_attempt_at`); the
+    full error history for a task is reconstructed from the
+    telemetry backend keyed by `task_id`.
+
+    The new task version is written via `complete_task` (which itself
+    goes through `execute_activity` — see sub-step 5), so the
+    failure write path inherits all the engine's invariants and the
+    retry is visible in the PROV graph as a regular `systemAction`.
     """
     now = datetime.now(timezone.utc)
     current_count = task.content.get("attempt_count")
@@ -259,23 +261,37 @@ async def _record_failure(
     max_attempts = max_attempts_val if max_attempts_val is not None else 3
     base_delay_val = task.content.get("base_delay_seconds")
     base_delay = base_delay_val if base_delay_val is not None else 60
-    error_text = f"{type(error).__name__}: {error}"
+
+    # Context carried into log records so Sentry (or whatever backend)
+    # can index events by task/dossier/attempt.
+    log_extra = {
+        "task_id": str(task.id),
+        "task_entity_id": str(task.entity_id),
+        "dossier_id": str(dossier_id),
+        "function": task.content.get("function"),
+        "kind": task.content.get("kind"),
+        "attempt_count": attempt_count,
+        "max_attempts": max_attempts,
+    }
 
     extra_content = {
         "attempt_count": attempt_count,
-        "last_error": error_text,
         "last_attempt_at": now.isoformat(),
     }
 
     if attempt_count >= max_attempts:
+        # ERROR-level with exc_info=True so the stack trace rides
+        # along to whatever log backend is configured. Sentry's
+        # logging integration promotes ERROR+exc_info events to
+        # full Sentry events with structured tags from `extra`.
         logger.error(
-            f"Task {task.id}: attempt {attempt_count}/{max_attempts} failed, "
-            f"moving to dead_letter: {error_text}"
+            "Task %s: attempt %d/%d failed, moving to dead_letter",
+            task.id, attempt_count, max_attempts,
+            exc_info=error, extra=log_extra,
         )
         await complete_task(
             repo, plugin, dossier_id, task,
             status="dead_letter",
-            error=error_text,
             extra_content=extra_content,
         )
     else:
@@ -283,38 +299,20 @@ async def _record_failure(
             attempt_count, base_delay, now,
         )
         extra_content["next_attempt_at"] = next_attempt_at.isoformat()
+        # WARNING-level for transient retries — Sentry typically
+        # drops warnings by default so the noise floor stays
+        # reasonable during flaky-infrastructure events. ERROR comes
+        # only when we actually give up (dead_letter branch above).
         logger.warning(
-            f"Task {task.id}: attempt {attempt_count}/{max_attempts} failed, "
-            f"retry at {next_attempt_at.isoformat()}: {error_text}"
+            "Task %s: attempt %d/%d failed, retry at %s",
+            task.id, attempt_count, max_attempts, next_attempt_at.isoformat(),
+            exc_info=error, extra=log_extra,
         )
         await complete_task(
             repo, plugin, dossier_id, task,
             status="scheduled",  # back to scheduled for retry
-            error=error_text,
             extra_content=extra_content,
         )
-
-
-async def check_cancelled(repo: Repository, task: EntityRow) -> bool:
-    """Return True if any `cancel_if_activities` activity has landed
-    after this task was scheduled.
-
-    The task's own `cancel_if_activities` list enumerates activity
-    types that, if they occur after the task is scheduled, should
-    cancel the task instead of executing it. This is how the workflow
-    says "if the user changes their mind before the scheduled action
-    fires, don't do the scheduled action." The comparison uses
-    `task.created_at` as the "scheduled at" time because task entities
-    are immutable once created (subsequent versions overwrite the
-    status and that's all), so the first version's `created_at` is
-    when the task entered the queue.
-    """
-    cancel_list = task.content.get("cancel_if_activities", [])
-    if not cancel_list or not task.created_at:
-        return False
-    return await repo.has_cancelling_activity_after(
-        task.dossier_id, cancel_list, task.created_at,
-    )
 
 
 async def complete_task(
@@ -324,7 +322,6 @@ async def complete_task(
     task: EntityRow,
     status: str = "completed",
     result_uri: str | None = None,
-    error: str | None = None,
     informed_by: str | None = None,
     extra_content: dict | None = None,
 ):
@@ -351,20 +348,20 @@ async def complete_task(
 
     `extra_content` is a dict of additional fields to merge into the
     new task version's content. The retry policy uses this to carry
-    `attempt_count`, `next_attempt_at`, `last_error`, and
-    `last_attempt_at` through the completion path.
+    `attempt_count`, `next_attempt_at`, and `last_attempt_at`
+    through the completion path. Error telemetry does NOT flow
+    through here — it goes to `logger.exception` and out to the
+    configured logging backend (typically Sentry).
     """
     # Build the new task content with the status transition (and
-    # optional result / error fields). This is just a Python dict
-    # mutation on a copy of the existing content; the engine will
-    # validate the dict against TaskEntity when resolve_generated
-    # runs.
+    # optional result URI, plus any extra fields from the caller).
+    # This is just a Python dict mutation on a copy of the existing
+    # content; the engine will validate the dict against TaskEntity
+    # when resolve_generated runs.
     new_content = dict(task.content)
     new_content["status"] = status
     if result_uri:
         new_content["result"] = result_uri
-    if error:
-        new_content["error"] = error
     if extra_content:
         new_content.update(extra_content)
 
@@ -440,14 +437,15 @@ async def _execute_claimed_task(session, task: EntityRow, registry) -> None:
 
     Responsibilities inside this function:
     * Resolve the dossier and plugin.
-    * Re-fetch the task for latest version (guards against the tiny
-      window where another worker updated the same task entity
-      between the claim and our first read of its content inside
-      this transaction — `SKIP LOCKED` alone doesn't protect against
-      content changes that committed in a transaction that finished
-      just before ours started).
-    * Check cancellation via `check_cancelled` and short-circuit to
-      a `cancelled` complete_task if so.
+    * Re-fetch the task for latest version. The re-fetch is how we
+      observe cancellations: the pipeline's `cancel_matching_tasks`
+      runs synchronously as part of every activity that could cancel
+      a task, so if the task was cancelled between when the poll
+      selected it and when we got the row lock, the latest version's
+      status will be `cancelled` (not `scheduled`) and we return
+      early. No separate cancel check is needed — the status guard
+      below handles it uniformly with other "status already changed"
+      cases.
     * Dispatch on `kind` to the appropriate `_process_*` handler.
 
     Raises on execution failure. The caller's error handler in the
@@ -488,13 +486,6 @@ async def _execute_claimed_task(session, task: EntityRow, registry) -> None:
         f"function={current_task.content.get('function')}"
     )
 
-    if await check_cancelled(repo, current_task):
-        logger.info(f"Task {task.id}: cancelled by activity")
-        await complete_task(
-            repo, plugin, dossier_id, current_task, status="cancelled",
-        )
-        return
-
     if kind == "recorded":
         await _process_recorded(repo, plugin, dossier_id, current_task)
     elif kind == "scheduled_activity":
@@ -515,13 +506,29 @@ async def _refetch_task(
     task_entity_id: UUID,
 ) -> EntityRow | None:
     """Pull the latest version of one logical task entity inside the
-    current transaction. Returns None if the task doesn't exist or
-    has no content."""
-    latest_tasks = await repo.get_entities_by_type(dossier_id, "system:task")
-    for t in latest_tasks:
-        if t.entity_id == task_entity_id and t.content:
-            return t
-    return None
+    current transaction.
+
+    Returns None if the task doesn't exist or has no content.
+
+    History note: an earlier implementation used
+    `get_entities_by_type(dossier_id, "system:task")` and then looped
+    through the results in Python looking for a matching entity_id.
+    That version was buggy in two ways — it fetched every task row
+    in the dossier just to find one, and
+    `get_entities_by_type` orders by `created_at ASC` and the loop
+    returned the first match, so for any task with multiple versions
+    it returned the OLDEST version instead of the latest. The bug
+    was invisible for a long time because the completion path was
+    only reached by single-version tasks in the test suite, and the
+    retry path in `_record_failure` doesn't go through `_refetch_task`
+    at all — it gets the claimed (latest) task from the outer loop
+    directly. The bug only surfaced when the requeue feature created
+    a multi-version task that then hit the success path.
+    """
+    task = await repo.get_latest_entity_by_id(dossier_id, task_entity_id)
+    if task is None or not task.content:
+        return None
+    return task
 
 
 async def _process_recorded(
@@ -846,6 +853,202 @@ async def worker_loop(config_path: str = "config.yaml", poll_interval: int = 10,
     logger.info("Worker stopped")
 
 
+async def requeue_dead_letters(
+    config_path: str,
+    dossier_id: UUID | None = None,
+    task_entity_id: UUID | None = None,
+) -> int:
+    """Requeue dead-lettered tasks by writing fresh task revisions
+    with reset retry state.
+
+    Scope filters (mutually inclusive):
+    * `dossier_id=None, task_entity_id=None` — every dead-lettered
+      task across every dossier
+    * `dossier_id=X` — every dead-lettered task in one dossier
+    * `task_entity_id=Y` — one specific task by its logical entity id
+    * `dossier_id=X, task_entity_id=Y` — both filters applied (the
+      task must be in the given dossier AND match the entity id)
+
+    Semantics. Each matching task gets a new version written via a
+    `systemAction` activity per dossier. The new version has:
+
+    * `status = "scheduled"`  — claimable again by the poll loop
+    * `attempt_count = 0`     — fresh retry budget
+    * `next_attempt_at = None` — no retry delay, immediately due
+    * `last_attempt_at` preserved from the dead-lettered version so
+      operators can still see when the task last tried
+    * `scheduled_for` preserved from the original task — it's the
+      historical record of when the task was first queued, not a
+      retry-scheduling field
+
+    The requeue goes through `execute_activity` (like every other
+    task-content write now) so each dossier's requeue operation is
+    auditable in its PROV graph as a `systemAction` with N task
+    revisions plus one `system:note` explaining the bulk requeue.
+
+    Returns the total number of tasks requeued across all dossiers.
+    """
+    config, registry = load_config_and_registry(config_path)
+    db_url = config.get("database", {}).get("url")
+    if not db_url:
+        raise RuntimeError(
+            "database.url is required in config (Postgres connection string)"
+        )
+    await init_db(db_url)
+    await create_tables()
+
+    session_factory = get_session_factory()
+
+    # Find dead-lettered tasks. We want the latest version per logical
+    # task entity (same projection pattern as find_due_tasks) AND the
+    # latest version's status must be dead_letter. Optionally filter
+    # by dossier_id and/or entity_id.
+    latest_per_entity = (
+        select(
+            EntityRow.entity_id.label("eid"),
+            func.max(EntityRow.created_at).label("latest_at"),
+        )
+        .where(EntityRow.type == "system:task")
+        .group_by(EntityRow.entity_id)
+        .subquery()
+    )
+    stmt = (
+        select(EntityRow)
+        .join(
+            latest_per_entity,
+            (EntityRow.entity_id == latest_per_entity.c.eid)
+            & (EntityRow.created_at == latest_per_entity.c.latest_at),
+        )
+        .where(EntityRow.type == "system:task")
+        .where(EntityRow.content["status"].as_string() == "dead_letter")
+    )
+    if dossier_id is not None:
+        stmt = stmt.where(EntityRow.dossier_id == dossier_id)
+    if task_entity_id is not None:
+        stmt = stmt.where(EntityRow.entity_id == task_entity_id)
+
+    async with session_factory() as session:
+        result = await session.execute(stmt)
+        dead_letters = list(result.scalars().all())
+
+    if not dead_letters:
+        logger.info("requeue_dead_letters: no dead-lettered tasks match")
+        return 0
+
+    # Group by dossier so each dossier's requeue is a single
+    # systemAction. Writing the requeue as one activity per dossier
+    # matches the auditing story — an operator running a bulk requeue
+    # against the whole database gets one PROV event per dossier
+    # touched, listing every task that was requeued.
+    by_dossier: dict[UUID, list[EntityRow]] = {}
+    for task in dead_letters:
+        by_dossier.setdefault(task.dossier_id, []).append(task)
+
+    logger.info(
+        "requeue_dead_letters: requeuing %d task(s) across %d dossier(s)",
+        len(dead_letters), len(by_dossier),
+    )
+
+    total = 0
+    for d_id, tasks in by_dossier.items():
+        async with session_factory() as session:
+            async with session.begin():
+                repo = Repository(session)
+                dossier = await repo.get_dossier(d_id)
+                if not dossier:
+                    logger.error(
+                        "requeue_dead_letters: dossier %s not found, "
+                        "skipping %d tasks", d_id, len(tasks),
+                    )
+                    continue
+                plugin = registry.get(dossier.workflow)
+                if not plugin:
+                    logger.error(
+                        "requeue_dead_letters: plugin not found for "
+                        "workflow %s, skipping %d tasks",
+                        dossier.workflow, len(tasks),
+                    )
+                    continue
+
+                systemaction_def = plugin.find_activity_def("systemAction")
+                if not systemaction_def:
+                    raise RuntimeError(
+                        "systemAction activity definition not found — "
+                        "engine should register it at startup"
+                    )
+
+                generated_items: list[dict] = []
+                task_refs_for_note: list[str] = []
+                for task in tasks:
+                    # Build a fresh-start revision: status back to
+                    # scheduled, attempt_count reset, next_attempt_at
+                    # cleared so the poll loop treats it as immediately
+                    # due on the scheduled_for axis. last_attempt_at
+                    # preserved for the "when did this last try"
+                    # diagnostic query. scheduled_for preserved as
+                    # historical record.
+                    new_content = dict(task.content)
+                    new_content["status"] = "scheduled"
+                    new_content["attempt_count"] = 0
+                    new_content["next_attempt_at"] = None
+                    new_version_id = uuid4()
+                    generated_items.append({
+                        "entity": (
+                            f"system:task/{task.entity_id}@{new_version_id}"
+                        ),
+                        "content": new_content,
+                        "derivedFrom": (
+                            f"system:task/{task.entity_id}@{task.id}"
+                        ),
+                    })
+                    task_refs_for_note.append(str(task.entity_id))
+
+                # One system:note per bulk requeue, describing the
+                # scope and listing the task entity ids.
+                note_entity_id = uuid4()
+                note_version_id = uuid4()
+                scope_desc = []
+                if dossier_id is not None:
+                    scope_desc.append(f"dossier={dossier_id}")
+                if task_entity_id is not None:
+                    scope_desc.append(f"task={task_entity_id}")
+                scope_str = ", ".join(scope_desc) if scope_desc else "all dossiers"
+                generated_items.append({
+                    "entity": (
+                        f"system:note/{note_entity_id}@{note_version_id}"
+                    ),
+                    "content": {
+                        "text": (
+                            f"Operator requeue of {len(tasks)} dead-lettered "
+                            f"task(s) (scope: {scope_str}). Task entity ids: "
+                            f"{task_refs_for_note}"
+                        ),
+                    },
+                })
+
+                await execute_activity(
+                    plugin=plugin,
+                    activity_def=systemaction_def,
+                    repo=repo,
+                    dossier_id=d_id,
+                    activity_id=uuid4(),
+                    user=SYSTEM_USER,
+                    role="systeem",
+                    used_items=[],
+                    generated_items=generated_items,
+                    caller=Caller.SYSTEM,
+                )
+
+        logger.info(
+            "requeue_dead_letters: dossier %s — requeued %d task(s)",
+            d_id, len(tasks),
+        )
+        total += len(tasks)
+
+    logger.info("requeue_dead_letters: done, %d task(s) requeued total", total)
+    return total
+
+
 def main():
     """CLI entry point."""
     logging.basicConfig(
@@ -881,6 +1084,36 @@ def main():
         action="store_true",
         help="Drain all currently-due tasks and exit instead of polling forever.",
     )
+    parser.add_argument(
+        "--requeue-dead-letters",
+        action="store_true",
+        help=(
+            "Requeue dead-lettered tasks: write fresh revisions with "
+            "status=scheduled, attempt_count=0, next_attempt_at cleared. "
+            "Scope defaults to all dead-lettered tasks across all "
+            "dossiers; narrow with --dossier and/or --task. The requeue "
+            "runs once and exits (does not start a drain cycle). Use "
+            "a separate `--once` invocation afterward if you want to "
+            "immediately execute the requeued tasks."
+        ),
+    )
+    parser.add_argument(
+        "--dossier",
+        default=None,
+        help=(
+            "Scope filter for --requeue-dead-letters: only requeue "
+            "dead-lettered tasks belonging to the given dossier UUID."
+        ),
+    )
+    parser.add_argument(
+        "--task",
+        default=None,
+        help=(
+            "Scope filter for --requeue-dead-letters: only requeue the "
+            "task with the given logical entity UUID (system:task "
+            "entity_id, not version_id)."
+        ),
+    )
     args = parser.parse_args()
 
     # Default config path via installed dossier_app package, same
@@ -892,6 +1125,24 @@ def main():
             config_path = str(Path(dossier_app.__file__).parent / "config.yaml")
         except ImportError:
             config_path = "config.yaml"
+
+    # --requeue-dead-letters is an admin one-shot action. It shares
+    # the config/db bootstrap with the polling loop but runs a
+    # different top-level coroutine and exits when done.
+    if args.requeue_dead_letters:
+        dossier_uuid = UUID(args.dossier) if args.dossier else None
+        task_uuid = UUID(args.task) if args.task else None
+        asyncio.run(requeue_dead_letters(
+            config_path=config_path,
+            dossier_id=dossier_uuid,
+            task_entity_id=task_uuid,
+        ))
+        return
+
+    if args.dossier or args.task:
+        parser.error(
+            "--dossier and --task are only valid with --requeue-dead-letters"
+        )
 
     asyncio.run(worker_loop(
         config_path=config_path,

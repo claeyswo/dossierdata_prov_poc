@@ -227,40 +227,6 @@ class Repository:
         self._activities_cache[dossier_id] = rows
         return rows
 
-    async def has_cancelling_activity_after(
-        self,
-        dossier_id: UUID,
-        types: list[str],
-        after: datetime,
-    ) -> bool:
-        """Return True if any activity in `dossier_id` with a type in
-        `types` was created strictly after `after`.
-
-        Used by the worker's `check_cancelled` to decide whether a due
-        task should be marked cancelled instead of executed. Backed by
-        the `ix_activities_dossier_type` composite index so Postgres
-        can satisfy this with a small index range scan regardless of
-        the dossier's total activity count. The old implementation
-        loaded every activity in the dossier into Python and looped
-        over it, which was O(n) per task check.
-
-        `types` may be empty, in which case this returns False
-        (no types means no cancellation condition). `after` must be
-        an aware datetime — callers pass `task.created_at` which is
-        always aware because the column is TIMESTAMPTZ.
-        """
-        if not types:
-            return False
-        stmt = (
-            select(ActivityRow.id)
-            .where(ActivityRow.dossier_id == dossier_id)
-            .where(ActivityRow.type.in_(types))
-            .where(ActivityRow.created_at > after)
-            .limit(1)
-        )
-        result = await self.session.execute(stmt)
-        return result.scalar_one_or_none() is not None
-
     async def create_activity(
         self,
         activity_id: UUID,
