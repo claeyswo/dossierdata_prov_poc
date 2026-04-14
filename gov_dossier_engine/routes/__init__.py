@@ -8,16 +8,80 @@ All routes call the same generic engine.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from uuid import UUID
 
 from fastapi import FastAPI, Depends, HTTPException
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from typing import Any, Optional
 
 from ..plugin import Plugin, PluginRegistry
 from ..auth import User, POCAuthMiddleware
 from ..db import get_session_factory, Repository
-from ..engine import execute_activity, derive_status, derive_allowed_activities, ActivityError
+from ..engine import (
+    execute_activity, derive_status, derive_allowed_activities,
+    compute_eligible_activities, filter_by_user_auth, ActivityError,
+)
+from ..file_refs import inject_download_urls
+
+
+def _activity_error_to_http(e: ActivityError) -> HTTPException:
+    """Forward an ActivityError to an HTTPException, merging any structured
+    payload so the client gets a single JSON body."""
+    if e.payload:
+        body = {"detail": e.detail, **e.payload}
+        return HTTPException(e.status_code, detail=body)
+    return HTTPException(e.status_code, detail=e.detail)
+
+
+def _entity_version_dict(
+    e,
+    dossier_id,
+    entity_type: str,
+    siblings: list,
+    include_entity_id: bool = True,
+) -> dict:
+    """Render an EntityRow as a dict for the bulk version-listing endpoints.
+
+    For tombstoned versions (option Y from the design): keep the row in
+    the response with `content: null`, add `tombstonedBy` (the activity
+    UUID that performed the redaction) and `redirectTo` (a relative URL
+    pointing at the live replacement). The replacement is whichever
+    sibling has the same entity_id and is not itself tombstoned and has
+    the latest created_at — or simply the latest sibling if everything
+    is tombstoned, since re-tombstoning is allowed.
+    """
+    out = {
+        "versionId": str(e.id),
+        "content": e.content,
+        "generatedBy": str(e.generated_by) if e.generated_by else None,
+        "derivedFrom": str(e.derived_from) if e.derived_from else None,
+        "attributedTo": e.attributed_to,
+        "createdAt": e.created_at.isoformat() if e.created_at else None,
+    }
+    if include_entity_id:
+        out["entityId"] = str(e.entity_id)
+    if e.schema_version is not None:
+        out["schemaVersion"] = e.schema_version
+
+    if e.tombstoned_by is not None:
+        out["tombstonedBy"] = str(e.tombstoned_by)
+        # Find the live replacement: latest sibling with same entity_id
+        # that isn't this row.
+        candidates = [s for s in siblings if s.entity_id == e.entity_id and s.id != e.id]
+        live = [c for c in candidates if c.tombstoned_by is None]
+        target_pool = live if live else candidates
+        if target_pool:
+            replacement = max(
+                target_pool,
+                key=lambda r: r.created_at or datetime.min.replace(tzinfo=timezone.utc),
+            )
+            out["redirectTo"] = (
+                f"/dossiers/{dossier_id}/entities/{entity_type}/"
+                f"{replacement.entity_id}/{replacement.id}"
+            )
+    return out
 
 
 # =====================================================================
@@ -36,6 +100,21 @@ class GeneratedItem(BaseModel):
     derivedFrom: Optional[str] = None
 
 
+class RelationItem(BaseModel):
+    """Generic activity→entity relation under a named type.
+
+    Example for the `oe:neemtAkteVan` pattern — acknowledging newer versions
+    of an entity the activity chose not to act on:
+        {"entity": "oe:aanvraag/X@v3", "type": "oe:neemtAkteVan"}
+
+    The `type` string is validated against the activity's YAML declaration
+    of allowed relation types. Plugins register validators per type to
+    enforce semantics (e.g. neemtAkteVan must cover every version between
+    the declared used version and the current latest)."""
+    entity: str
+    type: str
+
+
 class ActivityRequest(BaseModel):
     type: Optional[str] = None     # set from URL on typed endpoints
     workflow: Optional[str] = None  # only needed for first activity
@@ -43,6 +122,7 @@ class ActivityRequest(BaseModel):
     informed_by: Optional[str] = None  # local UUID or cross-dossier URI
     used: list[UsedItem] = []
     generated: list[GeneratedItem] = []
+    relations: list[RelationItem] = []
 
 
 class BatchActivityItem(BaseModel):
@@ -53,6 +133,7 @@ class BatchActivityItem(BaseModel):
     informed_by: Optional[str] = None
     used: list[UsedItem] = []
     generated: list[GeneratedItem] = []
+    relations: list[RelationItem] = []
 
 
 class BatchActivityRequest(BaseModel):
@@ -83,6 +164,7 @@ class GeneratedResponse(BaseModel):
     entity: str
     type: str
     content: Optional[dict[str, Any]] = None
+    schemaVersion: Optional[str] = None
 
 
 class DossierResponse(BaseModel):
@@ -92,10 +174,16 @@ class DossierResponse(BaseModel):
     allowedActivities: list[dict[str, str]] = []
 
 
+class RelationResponse(BaseModel):
+    entity: str
+    type: str
+
+
 class FullResponse(BaseModel):
     activity: ActivityResponse
     used: list[UsedResponse] = []
     generated: list[GeneratedResponse] = []
+    relations: list[RelationResponse] = []
     dossier: DossierResponse
 
 
@@ -112,7 +200,7 @@ class DossierDetailResponse(BaseModel):
 # Route Registration
 # =====================================================================
 
-def register_routes(app: FastAPI, registry: PluginRegistry, get_user):
+def register_routes(app: FastAPI, registry: PluginRegistry, get_user, global_access: list[dict] | None = None):
     """Register all routes — generic endpoints + per-workflow typed wrappers."""
 
     # --- Generic activity endpoint ---
@@ -167,11 +255,12 @@ def register_routes(app: FastAPI, registry: PluginRegistry, get_user):
                         role=request.role,
                         used_items=[item.model_dump() for item in request.used],
                         generated_items=[item.model_dump() for item in request.generated],
+                        relation_items=[item.model_dump() for item in request.relations],
                         workflow_name=request.workflow,
                         informed_by=request.informed_by,
                     )
                 except ActivityError as e:
-                    raise HTTPException(e.status_code, detail=e.detail)
+                    raise _activity_error_to_http(e)
 
                 return response
 
@@ -227,13 +316,20 @@ def register_routes(app: FastAPI, registry: PluginRegistry, get_user):
                             role=item.role,
                             used_items=[u.model_dump() for u in item.used],
                             generated_items=[g.model_dump() for g in item.generated],
+                            relation_items=[r.model_dump() for r in item.relations],
                             workflow_name=request.workflow,
                             informed_by=item.informed_by,
                         )
                     except ActivityError as e:
+                        # Preserve the batch position in the error detail but
+                        # still forward any structured payload.
+                        prefix = f"Activity '{item.type}' (#{len(results)+1}) failed: "
+                        if e.payload:
+                            body = {"detail": f"{prefix}{e.detail}", **e.payload}
+                            raise HTTPException(e.status_code, detail=body)
                         raise HTTPException(
                             e.status_code,
-                            detail=f"Activity '{item.type}' (#{len(results)+1}) failed: {e.detail}",
+                            detail=f"{prefix}{e.detail}",
                         )
 
                     # Flush so next activity can see entities from this one
@@ -271,27 +367,71 @@ def register_routes(app: FastAPI, registry: PluginRegistry, get_user):
                 raise HTTPException(500, detail=f"Plugin not found for workflow: {dossier.workflow}")
 
             # Check dossier_access
-            access_entry = await check_dossier_access(repo, dossier_id, user)
+            access_entry = await check_dossier_access(repo, dossier_id, user, global_access)
             visible_prefixes, activity_view_mode = get_visibility_from_entry(access_entry)
 
-            status = await derive_status(repo, dossier_id)
-            allowed = await derive_allowed_activities(plugin, repo, dossier_id, user)
+            # Use cached status and eligible activities if available
+            import json as _json
+
+            if dossier.cached_status is not None:
+                status = dossier.cached_status
+            else:
+                status = await derive_status(repo, dossier_id)
+
+            if dossier.eligible_activities is not None:
+                try:
+                    eligible = _json.loads(dossier.eligible_activities)
+                except (ValueError, TypeError):
+                    eligible = await compute_eligible_activities(plugin, repo, dossier_id)
+            else:
+                eligible = await compute_eligible_activities(plugin, repo, dossier_id)
+
+            allowed = await filter_by_user_auth(plugin, eligible, user, repo, dossier_id)
 
             # Get current entities — filtered by visible prefixes
             entities = await repo.get_all_latest_entities(dossier_id)
             current_entities = []
             visible_entity_version_ids = set()
+
+            # Prepare download URL signing. The model-aware injector
+            # hydrates each entity's content through its registered Pydantic
+            # model and walks for fields annotated with `FileId`.
+            file_config = app.state.config.get("file_service", {})
+            signing_key = file_config.get("signing_key", "poc-signing-key-change-in-production")
+            file_service_url = file_config.get("url", "http://localhost:8001")
+
+            def _make_signer(dossier_id_str: str, user_id: str):
+                from gov_file_service import sign_token, token_to_query_string
+
+                def sign(file_id: str) -> str:
+                    token = sign_token(
+                        file_id=file_id,
+                        action="download",
+                        signing_key=signing_key,
+                        user_id=user_id,
+                        dossier_id=dossier_id_str,
+                    )
+                    return f"{file_service_url}/download/{file_id}?{token_to_query_string(token)}"
+
+                return sign
+
+            sign = _make_signer(str(dossier_id), user.id)
+
             for e in entities:
-                # type IS the prefix (e.g. "oe:aanvraag")
-                # Filter: only include if type is in visible set (or no filtering)
                 if visible_prefixes is None or e.type in visible_prefixes:
-                    current_entities.append({
+                    model_class = plugin.resolve_schema(e.type, e.schema_version)
+                    content = inject_download_urls(model_class, e.content, sign) if e.content else e.content
+
+                    entity_out = {
                         "type": e.type,
                         "entityId": str(e.entity_id),
                         "versionId": str(e.id),
-                        "content": e.content,
+                        "content": content,
                         "createdAt": e.created_at.isoformat() if e.created_at else None,
-                    })
+                    }
+                    if e.schema_version is not None:
+                        entity_out["schemaVersion"] = e.schema_version
+                    current_entities.append(entity_out)
                     visible_entity_version_ids.add(e.id)
 
             # Get activity history — filtered by activity_view_mode
@@ -411,7 +551,7 @@ def register_routes(app: FastAPI, registry: PluginRegistry, get_user):
                 raise HTTPException(404, detail="Dossier not found")
 
             # Check dossier_access
-            access_entry = await check_dossier_access(repo, dossier_id, user)
+            access_entry = await check_dossier_access(repo, dossier_id, user, global_access)
             visible_types, _ = get_visibility_from_entry(access_entry)
             if visible_types is not None and entity_type not in visible_types:
                 raise HTTPException(403, detail=f"No access to entity type '{entity_type}'")
@@ -424,15 +564,7 @@ def register_routes(app: FastAPI, registry: PluginRegistry, get_user):
                 "dossier_id": str(dossier_id),
                 "entity_type": entity_type,
                 "versions": [
-                    {
-                        "versionId": str(e.id),
-                        "entityId": str(e.entity_id),
-                        "content": e.content,
-                        "generatedBy": str(e.generated_by),
-                        "derivedFrom": str(e.derived_from) if e.derived_from else None,
-                        "attributedTo": e.attributed_to,
-                        "createdAt": e.created_at.isoformat() if e.created_at else None,
-                    }
+                    _entity_version_dict(e, dossier_id, entity_type, entities)
                     for e in entities
                 ],
             }
@@ -458,7 +590,7 @@ def register_routes(app: FastAPI, registry: PluginRegistry, get_user):
                 raise HTTPException(404, detail="Dossier not found")
 
             # Check dossier_access
-            access_entry = await check_dossier_access(repo, dossier_id, user)
+            access_entry = await check_dossier_access(repo, dossier_id, user, global_access)
             visible_types, _ = get_visibility_from_entry(access_entry)
             if visible_types is not None and entity_type not in visible_types:
                 raise HTTPException(403, detail=f"No access to entity type '{entity_type}'")
@@ -474,14 +606,7 @@ def register_routes(app: FastAPI, registry: PluginRegistry, get_user):
                 "entity_type": entity_type,
                 "entity_id": str(entity_id),
                 "versions": [
-                    {
-                        "versionId": str(e.id),
-                        "content": e.content,
-                        "generatedBy": str(e.generated_by),
-                        "derivedFrom": str(e.derived_from) if e.derived_from else None,
-                        "attributedTo": e.attributed_to,
-                        "createdAt": e.created_at.isoformat() if e.created_at else None,
-                    }
+                    _entity_version_dict(e, dossier_id, entity_type, versions, include_entity_id=False)
                     for e in versions
                 ],
             }
@@ -508,7 +633,7 @@ def register_routes(app: FastAPI, registry: PluginRegistry, get_user):
                 raise HTTPException(404, detail="Dossier not found")
 
             # Check dossier_access
-            access_entry = await check_dossier_access(repo, dossier_id, user)
+            access_entry = await check_dossier_access(repo, dossier_id, user, global_access)
             visible_types, _ = get_visibility_from_entry(access_entry)
             if visible_types is not None and entity_type not in visible_types:
                 raise HTTPException(403, detail=f"No access to entity type '{entity_type}'")
@@ -516,6 +641,24 @@ def register_routes(app: FastAPI, registry: PluginRegistry, get_user):
             entity = await repo.get_entity(version_id)
             if not entity or entity.dossier_id != dossier_id or entity.type != entity_type:
                 raise HTTPException(404, detail="Entity version not found")
+
+            # Tombstone redirect. If this version has been redacted, look
+            # up the latest version of the same logical entity (which by
+            # construction is the tombstone replacement, since tombstones
+            # generate a new revision) and 301 to its URL. Per the
+            # deletion-scope decision the row itself survives, so the
+            # initial fetch and FK-walk are still cheap.
+            if entity.tombstoned_by is not None:
+                latest = await repo.get_latest_entity_by_id(dossier_id, entity.entity_id)
+                if latest is not None and latest.id != entity.id:
+                    target = (
+                        f"/dossiers/{dossier_id}/entities/{entity_type}/"
+                        f"{entity.entity_id}/{latest.id}"
+                    )
+                    return RedirectResponse(url=target, status_code=301)
+                # No replacement found (shouldn't happen under normal
+                # tombstone flow, but guard anyway): return 410 Gone.
+                raise HTTPException(410, detail="Entity version was tombstoned and has no replacement")
 
             return {
                 "dossier_id": str(dossier_id),
@@ -528,6 +671,42 @@ def register_routes(app: FastAPI, registry: PluginRegistry, get_user):
                 "attributedTo": entity.attributed_to,
                 "createdAt": entity.created_at.isoformat() if entity.created_at else None,
             }
+
+    # --- File upload request (generates signed upload URL) ---
+
+    @app.post(
+        "/files/upload/request",
+        tags=["files"],
+        summary="Request a signed upload URL",
+    )
+    async def request_upload(
+        request_body: dict,
+        user: User = Depends(get_user),
+    ):
+        """Request a signed URL for file upload. User must be authenticated.
+        Returns a file_id and upload_url to send the file to the File Service."""
+        from uuid import uuid4
+        from gov_file_service import sign_token, token_to_query_string
+
+        file_config = app.state.config.get("file_service", {})
+        signing_key = file_config.get("signing_key", "poc-signing-key-change-in-production")
+        file_service_url = file_config.get("url", "http://localhost:8001")
+
+        file_id = str(uuid4())
+        token = sign_token(
+            file_id=file_id,
+            action="upload",
+            signing_key=signing_key,
+            user_id=user.id,
+        )
+
+        upload_url = f"{file_service_url}/upload/{file_id}?{token_to_query_string(token)}"
+
+        return {
+            "file_id": file_id,
+            "upload_url": upload_url,
+            "filename": request_body.get("filename", ""),
+        }
 
     # --- Per-workflow typed route wrappers for docs ---
 
@@ -603,11 +782,12 @@ def _register_typed_route(
                         role=request.role,
                         used_items=[item.model_dump() for item in request.used],
                         generated_items=[item.model_dump() for item in request.generated],
+                        relation_items=[item.model_dump() for item in request.relations],
                         workflow_name=request.workflow,
                         informed_by=request.informed_by,
                     )
                 except ActivityError as e:
-                    raise HTTPException(e.status_code, detail=e.detail)
+                    raise _activity_error_to_http(e)
 
                 return response
 
@@ -669,15 +849,9 @@ def _build_activity_description(act_def: dict, plugin: Plugin) -> str:
             # Add entity schema if it's a content-bearing type
             if not u.get("external") and accept in ("new", "any"):
                 entity_type = u.get("type", "")
-                model_class = plugin.entity_models.get(entity_type)
-                if model_class:
-                    try:
-                        schema = model_class.model_json_schema()
-                        import json
-                        desc += f"\n**Content schema (`{entity_type}`):**\n"
-                        desc += f"```json\n{json.dumps(schema, indent=2)}\n```\n"
-                    except Exception:
-                        pass
+                desc += _format_entity_schemas_for_doc(
+                    plugin, act_def, entity_type, context="used"
+                )
         desc += "\n"
 
     # Generates with schemas
@@ -686,18 +860,83 @@ def _build_activity_description(act_def: dict, plugin: Plugin) -> str:
         desc += "### Generates\n"
         for g in generates:
             desc += f"\n#### `{g}`\n"
-            model_class = plugin.entity_models.get(g)
-            if model_class:
-                try:
-                    schema = model_class.model_json_schema()
-                    import json
-                    desc += f"\n**Content schema:**\n"
-                    desc += f"```json\n{json.dumps(schema, indent=2)}\n```\n"
-                except Exception:
-                    pass
+            desc += _format_entity_schemas_for_doc(
+                plugin, act_def, g, context="generates"
+            )
         desc += "\n"
 
     return desc
+
+
+def _format_entity_schemas_for_doc(plugin, act_def, entity_type: str, context: str) -> str:
+    """Render the schema section(s) for a content-bearing entity type on an
+    activity, for inclusion in the OpenAPI summary.
+
+    For activities that declare version discipline via `entities.<type>`:
+      * `new_version` → "When creating a fresh entity: version X"
+      * `allowed_versions` → "When revising an existing entity: accepts X, Y"
+      * Each distinct version emits its own JSON schema block, labeled.
+
+    For legacy activities (no `entities` block), emits a single unlabeled
+    schema block from `entity_models[type]` — identical to pre-versioning
+    behavior.
+    """
+    import json
+
+    ecfg = (act_def.get("entities") or {}).get(entity_type) or {}
+    new_version = ecfg.get("new_version")
+    allowed_versions = list(ecfg.get("allowed_versions") or [])
+
+    # Legacy path — no version discipline declared for this type on this activity.
+    if not ecfg:
+        model_class = plugin.resolve_schema(entity_type, None)
+        if not model_class:
+            return ""
+        try:
+            schema = model_class.model_json_schema()
+        except Exception:
+            return ""
+        out = f"\n**Content schema (`{entity_type}`):**\n"
+        out += f"```json\n{json.dumps(schema, indent=2)}\n```\n"
+        return out
+
+    # Versioned path — enumerate.
+    out = ""
+
+    if context == "generates" and new_version:
+        out += (
+            f"\n**Fresh entities are stamped as version `{new_version}`.** "
+            f"The engine inherits the parent's stored version on revisions "
+            f"(sticky).\n"
+        )
+    if allowed_versions:
+        pretty = ", ".join(f"`{v}`" for v in allowed_versions)
+        out += (
+            f"\n**This activity accepts existing entities at version(s): "
+            f"{pretty}.** Revisions of entities at other versions are "
+            f"rejected with `422 unsupported_schema_version`.\n"
+        )
+
+    # Collect every version we need to render a schema for (deduped, ordered).
+    versions_to_render: list[str] = []
+    seen: set[str] = set()
+    for v in ([new_version] if new_version else []) + allowed_versions:
+        if v and v not in seen:
+            versions_to_render.append(v)
+            seen.add(v)
+
+    for v in versions_to_render:
+        model_class = plugin.resolve_schema(entity_type, v)
+        if not model_class:
+            continue
+        try:
+            schema = model_class.model_json_schema()
+        except Exception:
+            continue
+        out += f"\n**Schema `{entity_type}` @ `{v}`:**\n"
+        out += f"```json\n{json.dumps(schema, indent=2)}\n```\n"
+
+    return out
 
 
 from .access import check_dossier_access, get_visibility_from_entry

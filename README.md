@@ -146,6 +146,73 @@ The test script (`test_requests.sh`) creates 4 dossiers:
 
 **D4 — Batch explicit ref:** dienAanvraagIn → BATCH[bewerkAanvraag + doeVoorstelBeslissing with explicit used ref]
 
+**D5 — Derivation rule checks:** 5 negative cases for missing/stale/unknown/cross-entity derivation.
+
+**D6 — Stale used references + `oe:neemtAkteVan`:** positive and negative acknowledgement paths.
+
+**D7 — Anchor mechanism:** verifies that D2's `trekAanvraagIn` scheduled task is anchored to the aanvraag and cancelled by `vervolledigAanvraag`.
+
+Expected result: **11 OKs, 0 failures.**
+
+### Running the full test suite from scratch
+
+Both the dossier API (port 8000) and the file service (port 8001) must be up, and the database must be empty. The test suite is order-dependent on fresh state (fixed entity/activity UUIDs per dossier). Use this procedure:
+
+**Prerequisites** (check once per environment):
+
+```bash
+python3 -c "import multipart" 2>/dev/null || pip install python-multipart
+```
+
+The file service uses `multipart/form-data` uploads and will refuse to start without `python-multipart`, failing with `RuntimeError: Form data requires "python-multipart"` in `/tmp/files.log`. The base `pyproject.toml` deps don't include it, so a fresh environment needs this once.
+
+```bash
+# 1. Kill any surviving uvicorn processes (important — see note below)
+pkill -9 -f uvicorn
+sleep 1
+ps -ef | grep uvicorn | grep -v grep   # must be empty
+
+# 2. Wipe the database and file storage
+rm -f  /home/claude/toelatingen/dossiers.db*
+rm -rf /home/claude/toelatingen/file_storage
+
+# 3. Launch both services, fully detached from the calling shell.
+#    The `</dev/null` redirect is REQUIRED — without it, the child
+#    inherits the parent's stdin and may be killed when the parent exits,
+#    leaving zombie processes holding a deleted-inode database.
+cd /home/claude/toelatingen
+setsid python3 -m uvicorn main:app --port 8000 \
+  </dev/null >/tmp/dossier.log 2>&1 &
+setsid python3 -m uvicorn gov_file_service.app:app --port 8001 \
+  </dev/null >/tmp/files.log 2>&1 &
+sleep 4
+
+# 4. Confirm both services are alive before running tests
+curl -s -o /dev/null -w "dossier:%{http_code}\n" http://localhost:8000/dossiers
+curl -s -o /dev/null -w "files:%{http_code}\n"   http://localhost:8001/health
+# Expected: dossier:401 (auth challenge = alive), files:200 (health endpoint).
+# Anything returning 000 means that service isn't actually listening — check
+# /tmp/dossier.log or /tmp/files.log for the crash reason before proceeding.
+# The dossier API has no /health endpoint, so 401 on /dossiers is the
+# canonical liveness signal — it proves auth middleware is wired up.
+
+# 5. Run the suite
+bash /home/claude/toelatingen/test_requests.sh > /tmp/test_run.log 2>&1
+grep -c "OK:" /tmp/test_run.log       # should print: 11
+grep -cE "Traceback|AssertionError" /tmp/test_run.log  # should print: 0
+```
+
+**If you're running inside an agentic tool environment** (Claude Code, a notebook runner, or anything that wraps bash cells with a timeout and kills the cell's process group on return): don't bundle the `setsid` launches, the `sleep 4`, and the `curl` liveness check into a single cell. Split them into three: (1) kill+wipe, (2) launch the two services, (3) verify with `curl`. Even with `</dev/null` and `setsid`, some wrappers hang waiting on the backgrounded children to exit before returning, and the cell times out. When that happens the tool kills the cell's process group and takes the services down with it, leaving you with an empty on-disk `dossiers.db` and the symptoms described below.
+
+**The deleted-inode gotcha:** if you `rm` the database while a uvicorn process is still running, the server holds the unlinked inode via an open fd and keeps serving the old state, while a new empty `dossiers.db` file appears on disk. Subsequent test runs then see an impossible mix of "empty DB on disk" and "fully-populated state via the API," with frozen timestamps and replayed idempotency responses. Always `pkill` **before** `rm`, and confirm `ps` is clean before restarting. You can verify the live process is pointing at the current file (not a deleted one) with:
+
+```bash
+PID=$(pgrep -f "uvicorn main:app")
+ls -la /proc/$PID/fd/ | grep "\.db"
+# Bad:  .../dossiers.db (deleted)
+# Good: .../dossiers.db
+```
+
 ## POC Users
 
 | Username | Name | Roles |

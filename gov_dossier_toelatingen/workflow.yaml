@@ -67,6 +67,9 @@ entity_types:
     cardinality: "single"
     revisable: true
     model: "gov_dossier_toelatingen.entities.Aanvraag"
+    schemas:
+      v1: "gov_dossier_toelatingen.entities.Aanvraag"
+      v2: "gov_dossier_toelatingen.entities.AanvraagV2"
 
   - type: "oe:beslissing"
     description: "Beslissing over een toelating"
@@ -108,6 +111,26 @@ authorization:
   create_dossier:
     access: "authenticated"
 
+# Built-in tombstone activity authorization. The engine registers a
+# `tombstone` activity for every workflow at boot; this block declares
+# which user roles can call it. Absent or empty = no one can tombstone
+# in this workflow (deny by default).
+tombstone:
+  allowed_roles: ["beheerder"]
+
+# Workflow-wide PROV-extension relations. Any activity in this workflow may
+# emit these on its request body unless it overrides the list with its own
+# `relations:` block. Each entry declares a relation type and the plugin
+# must register a validator under that name (or accept pure-annotation
+# semantics if no validator is registered).
+relations:
+  - type: "oe:neemtAkteVan"
+    description: >
+      Acknowledges that the client is aware of a newer version of an entity
+      it used, and has chosen to proceed with the older version anyway. The
+      engine rejects an activity whose `used` block references a stale
+      entity version unless every intervening newer version is listed here.
+
 activities:
 
   - name: "dienAanvraagIn"
@@ -145,6 +168,8 @@ activities:
       - activity: "setSystemFields"
 
     tasks:
+      - kind: "recorded"
+        function: "move_bijlagen_to_permanent"
       - kind: "recorded"
         function: "send_ontvangstbevestiging"
 
@@ -184,7 +209,12 @@ activities:
       - activity: "duidVerantwoordelijkeOrganisatieAan"
       - activity: "setSystemFields"
 
-    tasks: []
+    relations:
+      - type: "oe:neemtAkteVan"
+
+    tasks:
+      - kind: "recorded"
+        function: "move_bijlagen_to_permanent"
 
   - name: "vervolledigAanvraag"
     label: "Vervolledig aanvraag"
@@ -227,7 +257,12 @@ activities:
       - activity: "duidVerantwoordelijkeOrganisatieAan"
       - activity: "setSystemFields"
 
+    relations:
+      - type: "oe:neemtAkteVan"
+
     tasks:
+      - kind: "recorded"
+        function: "move_bijlagen_to_permanent"
       - kind: "recorded"
         function: "send_ontvangstbevestiging"
 
@@ -261,6 +296,8 @@ activities:
 
     validators: []
     side_effects: []
+    relations:
+      - type: "oe:neemtAkteVan"
     tasks: []
 
   - name: "tekenBeslissing"
@@ -297,6 +334,8 @@ activities:
 
     validators: []
     side_effects: []
+    relations:
+      - type: "oe:neemtAkteVan"
     tasks: []
 
   - name: "neemBeslissing"
@@ -337,6 +376,8 @@ activities:
 
     validators: []
     side_effects: []
+    relations:
+      - type: "oe:neemtAkteVan"
     tasks:
       - kind: "recorded"
         function: "log_beslissing_genomen"
@@ -499,6 +540,79 @@ activities:
 
     generates:
       - "oe:system_fields"
+
+    status: null
+    validators: []
+    side_effects: []
+    tasks: []
+
+  # -----------------------------------------------------------------------
+  # Test-only activities for schema versioning (D8 in test_requests.sh).
+  # These exercise the entity_schemas / new_version / allowed_versions
+  # mechanism without touching real workflow activities.
+  # -----------------------------------------------------------------------
+
+  - name: "testDienAanvraagInV2"
+    label: "TEST: Dien aanvraag in (v2 schema)"
+    description: "Test-only: creates a v2 aanvraag (with classificatie/urgentie)"
+    can_create_dossier: true
+
+    allowed_roles: ["oe:aanvrager"]
+    default_role: "oe:aanvrager"
+
+    authorization:
+      access: "authenticated"
+
+    forbidden:
+      activities:
+        - "dienAanvraagIn"
+        - "testDienAanvraagInV2"
+
+    used:
+      - type: "object"
+        external: true
+        required: true
+        description: "URI van het beschermd erfgoed object"
+
+    generates:
+      - "oe:aanvraag"
+
+    entities:
+      oe:aanvraag:
+        new_version: "v2"
+
+    status: "ingediend"
+    validators: []
+    side_effects:
+      - activity: "duidVerantwoordelijkeOrganisatieAan"
+      - activity: "setSystemFields"
+    tasks: []
+
+  - name: "testBewerkAanvraagV2Only"
+    label: "TEST: Bewerk aanvraag (v2-only)"
+    description: "Test-only: revises an aanvraag but only accepts v2"
+    can_create_dossier: false
+
+    allowed_roles: ["oe:behandelaar"]
+    default_role: "oe:behandelaar"
+
+    authorization:
+      access: "roles"
+      roles:
+        - role: "behandelaar"
+
+    used:
+      - type: "object"
+        external: true
+        required: true
+        description: "URI van het beschermd erfgoed object"
+
+    generates:
+      - "oe:aanvraag"
+
+    entities:
+      oe:aanvraag:
+        allowed_versions: ["v2"]
 
     status: null
     validators: []
