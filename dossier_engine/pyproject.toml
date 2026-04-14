@@ -1,0 +1,33 @@
+[project]
+name = "dossier-engine"
+version = "0.1.0"
+description = "PROV-based activity-driven dossier management framework (plugin-agnostic)"
+requires-python = ">=3.11"
+
+dependencies = [
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.27.0",
+    "pydantic>=2.0.0",
+    "pyyaml>=6.0",
+    "sqlalchemy[asyncio]>=2.0.0",
+    "aiosqlite>=0.19.0",
+    "dossier-common>=0.1.0,<0.2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "httpx>=0.26.0",
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+]
+postgres = [
+    "asyncpg>=0.29.0",
+]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["dossier_engine*"]

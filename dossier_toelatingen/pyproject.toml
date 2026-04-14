@@ -1,0 +1,31 @@
+[project]
+name = "dossier-toelatingen"
+version = "0.1.0"
+description = "Toelatingen beschermd erfgoed workflow plugin for dossier-engine"
+requires-python = ">=3.11"
+
+dependencies = [
+    "pydantic>=2.0.0",
+    "pyyaml>=6.0",
+    "dossier-engine>=0.1.0,<0.2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["dossier_toelatingen*"]
+
+# The workflow.yaml ships inside the package and is loaded by the
+# plugin at registration time via importlib.resources, so it must
+# be included as package data.
+[tool.setuptools.package-data]
+dossier_toelatingen = ["*.yaml"]

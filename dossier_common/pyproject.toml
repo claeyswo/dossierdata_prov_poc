@@ -1,0 +1,22 @@
+[project]
+name = "dossier-common"
+version = "0.1.0"
+description = "Shared utilities for the dossier platform (signing, and whatever else becomes broadly useful)"
+requires-python = ">=3.11"
+
+# No runtime dependencies — this package is stdlib-only by design,
+# so every sibling can depend on it without pulling in extra weight.
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["dossier_common*"]

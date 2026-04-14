@@ -1,0 +1,201 @@
+"""
+Handler-facing types.
+
+Everything a handler or validator function touches at call time lives here:
+
+* `ActivityContext` — passed to handlers and validators. Wraps the repo,
+  the dossier id, the resolved `used` entities, and the plugin reference
+  so handlers can do typed entity access without knowing about the
+  engine's internals.
+
+* `_PendingEntity` — duck-typed stand-in for an `EntityRow` that hasn't
+  been persisted yet. Used inside the engine's main loop so handlers can
+  read entities the current activity is in the process of generating
+  (via `context.get_typed`) before they hit the database.
+
+* `HandlerResult` — what a handler returns: optional content, optional
+  status transition, optional generated entities, optional task definitions.
+
+* `TaskResult` — what a cross-dossier task function returns. Tells the
+  worker which dossier the resulting activity should land in.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+from uuid import UUID
+
+from ..db.models import Repository, EntityRow
+from ..plugin import Plugin
+from .errors import CardinalityError
+
+
+class _PendingEntity:
+    """Lightweight stand-in for an entity that hasn't been persisted yet.
+
+    The engine constructs one of these for every entity the current
+    activity is generating, so handlers running in the same activity can
+    read them via `context.get_typed()` before the database row exists.
+    Quacks like `EntityRow` for the fields handlers care about.
+
+    When you add a column to `EntityRow`, also add it here, or
+    `context.get_typed` will fail with AttributeError on pending entities.
+    """
+
+    def __init__(self, content, entity_id, id, attributed_to, schema_version=None):
+        self.content = content
+        self.entity_id = entity_id
+        self.id = id
+        self.attributed_to = attributed_to
+        self.created_at = None
+        self.schema_version = schema_version
+
+
+class ActivityContext:
+    """Context object passed to plugin handlers and validators.
+
+    Provides typed access to the entities the current activity has used,
+    plus a few helpers that hide the cardinality-vs-singleton distinction
+    so handlers don't have to think about it.
+    """
+
+    def __init__(
+        self,
+        repo: Repository,
+        dossier_id: UUID,
+        used_entities: dict[str, EntityRow],
+        entity_models: dict[str, Any] | None = None,
+        plugin: Plugin | None = None,
+    ):
+        self.repo = repo
+        self.dossier_id = dossier_id
+        self._used_entities = used_entities
+        self._entity_models = entity_models or {}
+        self._plugin = plugin
+
+    def get_used_entity(self, entity_type: str) -> EntityRow | None:
+        return self._used_entities.get(entity_type)
+
+    def get_used_row(self, entity_type: str) -> EntityRow | None:
+        """Return the EntityRow for a used entity of this type. Useful for
+        handlers that need the version id to seed a lineage walk."""
+        return self._used_entities.get(entity_type)
+
+    def get_typed(self, entity_type: str) -> Any | None:
+        """Get a used entity's content as a validated Pydantic model instance.
+
+        Returns None if the entity doesn't exist or has no content (e.g.
+        a tombstoned row).
+
+        Routes via `plugin.resolve_schema` so the returned model matches
+        the row's stored `schema_version` — this is the read-side of the
+        store-version-wins rule. Legacy unversioned rows (schema_version
+        is NULL) fall back to `entity_models`.
+        """
+        entity = self._used_entities.get(entity_type)
+        if not entity or not entity.content:
+            return None
+        if self._plugin is not None:
+            model_class = self._plugin.resolve_schema(entity_type, entity.schema_version)
+        else:
+            model_class = self._entity_models.get(entity_type)
+        if model_class:
+            return model_class(**entity.content)
+        return None
+
+    def _require_singleton(self, entity_type: str) -> None:
+        if self._plugin and not self._plugin.is_singleton(entity_type):
+            raise CardinalityError(
+                f"ActivityContext singleton lookup called on non-singleton "
+                f"type '{entity_type}'. Use get_entities_latest(entity_type) "
+                f"to iterate instead."
+            )
+
+    async def get_singleton_typed(self, entity_type: str) -> Any | None:
+        """Get the singleton entity's content as a validated Pydantic model
+        instance. Raises `CardinalityError` if called on a non-singleton type."""
+        self._require_singleton(entity_type)
+        entity = await self.repo.get_singleton_entity(self.dossier_id, entity_type)
+        if not entity or not entity.content:
+            return None
+        if self._plugin is not None:
+            model_class = self._plugin.resolve_schema(entity_type, entity.schema_version)
+        else:
+            model_class = self._entity_models.get(entity_type)
+        if model_class:
+            return model_class(**entity.content)
+        return None
+
+    async def has_activity(self, activity_type: str) -> bool:
+        activities = await self.repo.get_activities_for_dossier(self.dossier_id)
+        return any(a.type == activity_type for a in activities)
+
+    async def get_singleton_entity(self, entity_type: str) -> EntityRow | None:
+        """Return the singleton entity row for this type in the dossier.
+        Raises `CardinalityError` if called on a non-singleton type."""
+        self._require_singleton(entity_type)
+        return await self.repo.get_singleton_entity(self.dossier_id, entity_type)
+
+    async def get_entities_latest(self, entity_type: str) -> list[EntityRow]:
+        """Return the latest version of each logical entity of this type.
+
+        Works for both singleton and multi-cardinality types — for
+        singletons the list has zero or one elements. For multi-cardinality
+        types, one element per distinct entity_id.
+        """
+        return await self.repo.get_entities_by_type_latest(self.dossier_id, entity_type)
+
+
+class HandlerResult:
+    """Return value from a plugin handler function.
+
+    Handlers can produce any combination of:
+
+    * `content` — convenience for the common case of one generated entity
+      whose type is implied by the activity's `generates` block.
+    * `generated` — explicit list of entities to create. Each item is
+      either a `(type, content)` tuple (legacy) or a dict with explicit
+      `type`, `content`, optional `entity_id`, optional `derived_from`.
+      Multi-cardinality types must use the dict form to specify which
+      logical entity is being revised.
+    * `status` — new dossier status, overrides the activity's YAML status.
+    * `tasks` — task definitions to schedule. Same shape as the activity's
+      YAML `tasks` block.
+    """
+
+    def __init__(
+        self,
+        content: dict | None = None,
+        status: str | None = None,
+        generated: list | None = None,
+        tasks: list[dict] | None = None,
+    ):
+        # Convenience: single content with no explicit generated list →
+        # one generated item with type=None. The engine resolves the type
+        # from the activity's `generates[0]` later.
+        if content and not generated:
+            self.generated = [{"type": None, "content": content}]
+        else:
+            normalized = []
+            for item in (generated or []):
+                if isinstance(item, dict):
+                    normalized.append(item)
+                elif isinstance(item, (tuple, list)) and len(item) == 2:
+                    normalized.append({"type": item[0], "content": item[1]})
+                else:
+                    raise ValueError(f"Invalid HandlerResult.generated item: {item}")
+            self.generated = normalized
+        self.status = status
+        self.tasks = tasks or []
+
+
+class TaskResult:
+    """Return value from a cross-dossier task function.
+
+    The worker uses `target_dossier_id` to know which dossier to land
+    the resulting activity in.
+    """
+
+    def __init__(self, target_dossier_id: str, content: dict | None = None):
+        self.target_dossier_id = target_dossier_id
+        self.content = content

@@ -8,10 +8,10 @@ Three modes:
 
 Usage:
   # First, start the API:
-  cd gov_dossier_app && uvicorn main:app --host 0.0.0.0 --port 8000
+  cd dossier_app && uvicorn main:app --host 0.0.0.0 --port 8000
 
   # Seed 100,000 dossiers directly into the DB (fast, bypasses API):
-  python stress_test.py seed --count 100000 --config gov_dossier_app/config.yaml
+  python stress_test.py seed --count 100000 --config dossier_app/config.yaml
 
   # Write benchmark: 100 dossiers via API, time each step:
   python stress_test.py write --count 100 --base-url http://localhost:8000
@@ -424,10 +424,10 @@ async def seed_dossiers(count: int, config_path: str):
 
     # Import engine internals
     sys.path.insert(0, ".")
-    from gov_dossier_engine.app import load_config_and_registry, SYSTEM_USER
-    from gov_dossier_engine.db import init_db, create_tables, get_session_factory
-    from gov_dossier_engine.db.models import Repository
-    from gov_dossier_engine.engine import execute_activity
+    from dossier_engine.app import load_config_and_registry, SYSTEM_USER
+    from dossier_engine.db import init_db, create_tables, get_session_factory
+    from dossier_engine.db.models import Repository
+    from dossier_engine.engine import execute_activity
 
     config, registry = load_config_and_registry(config_path)
     db_url = config.get("database", {}).get("url", "sqlite+aiosqlite:///./dossiers.db")
@@ -456,7 +456,7 @@ async def seed_dossiers(count: int, config_path: str):
             pass  # Not SQLite, ignore
 
     # Pre-compute activity def and user lookups
-    from gov_dossier_engine.auth import User
+    from dossier_engine.auth import User
     act_def_map = {a["name"]: a for a in plugin.workflow.get("activities", [])}
     poc_users = plugin.workflow.get("poc_users", [])
     user_map = {}
@@ -531,7 +531,7 @@ def main():
 
     seed_p = sub.add_parser("seed", help="Seed dossiers directly into DB")
     seed_p.add_argument("--count", type=int, default=1000)
-    seed_p.add_argument("--config", default="gov_dossier_app/config.yaml")
+    seed_p.add_argument("--config", default="dossier_app/config.yaml")
 
     write_p = sub.add_parser("write", help="Write benchmark via API")
     write_p.add_argument("--count", type=int, default=100)

@@ -1,0 +1,34 @@
+[project]
+name = "dossier-app"
+version = "0.1.0"
+description = "Dossier API deployment project — wires engine + toelatingen + file service into a runnable app"
+requires-python = ">=3.11"
+
+# Strict pins — this is a deployment, not a library. We want
+# reproducible installs. Libraries (engine, toelatingen, common) use
+# compatible-range pins because they're mutually developed.
+dependencies = [
+    "dossier-common==0.1.0",
+    "dossier-engine==0.1.0",
+    "dossier-toelatingen==0.1.0",
+    "file-service==0.1.0",
+    "uvicorn[standard]>=0.27.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "httpx>=0.26.0",
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["dossier_app*"]
+
+[tool.setuptools.package-data]
+dossier_app = ["*.yaml"]

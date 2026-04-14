@@ -10,6 +10,47 @@ version: "1.0"                    # version of this workflow definition
 
 ---
 
+## Workflow-level Relations (permission gate)
+
+```yaml
+# Declares the relation types that exist in this workflow. Activities
+# opt in to specific types in their own `relations:` block (see the
+# activity definition section). A type that appears here but not on
+# any activity is legal-but-unused; a type that appears on an activity
+# but not here is a configuration error.
+#
+# Each entry is a type string. No validators here — validators are
+# specified per activity, because the same relation type might have
+# different constraints depending on the activity context.
+#
+# relations:
+#   - "oe:neemtAkteVan"
+#   - "oe:verbondenAan"
+```
+
+---
+
+## Workflow-level Tombstone
+
+```yaml
+# Opts the workflow in to the tombstone activity, which redacts entity
+# content while keeping the PROV graph intact. The tombstone activity
+# is built into the engine, not declared per-workflow — the workflow
+# just configures who is allowed to run it.
+#
+# If this block is omitted, the workflow has no tombstone capability
+# at all and all tombstone attempts return 403.
+#
+# tombstone:
+#   allowed_roles:
+#     - role: "beheerder"
+#     # Any of the three authorization patterns (direct, scoped,
+#     # entity-derived) described in the activity authorization
+#     # section can be used here.
+```
+
+---
+
 ## Roles
 
 ```yaml
@@ -83,7 +124,24 @@ entity_types:
                                   #   - client specifies which one via derivedFrom for revisions
     revisable: true               # can new versions be created?
     model: ""                     # Python import path to the Pydantic model
-                                  # e.g. "gov_dossier_subsidie.entities.Aanvraag"
+                                  # e.g. "dossier_subsidie.entities.Aanvraag"
+
+    # --- Schema versioning (optional) ---
+    # If this entity type has evolved over time and old rows need to
+    # keep rendering, declare every version's Pydantic model under a
+    # versioned key. The engine resolves `(type, schema_version)` → model
+    # at read time, so a single entity_type can carry rows under multiple
+    # schemas without migration.
+    #
+    # When `schemas` is set, the `model` field above is the legacy fallback
+    # used for rows that predate versioning (schema_version is NULL). New
+    # rows written through activities that declare version discipline
+    # (see the activity-level `entities:` block) are stamped with a version
+    # from this map.
+    #
+    # schemas:
+    #   v1: "dossier_subsidie.entities.AanvraagV1"
+    #   v2: "dossier_subsidie.entities.AanvraagV2"
 
   # Always include — managed by side effects, used for access control.
   # This model lives in the engine, not in the plugin.
@@ -91,7 +149,7 @@ entity_types:
     description: "Bepaalt wie dit dossier kan zien en wat ze kunnen zien"
     cardinality: "single"
     revisable: true
-    model: "gov_dossier_engine.entities.DossierAccess"
+    model: "dossier_engine.entities.DossierAccess"
 ```
 
 ---
@@ -248,6 +306,50 @@ activities:
     generates:
       - ""                        # e.g. "oe:aanvraag", "oe:beslissing"
 
+    # --- Schema versioning (optional, per entity type) ---
+    # For each entity type this activity reads or writes, you can
+    # constrain which versions the activity accepts and which version
+    # it stamps on new rows. Requires the referenced entity_type to
+    # declare a `schemas:` map (see Entity Types section).
+    #
+    # `new_version` — the version stamped on fresh entities this
+    #   activity generates. Applies when the client supplies no
+    #   `derivedFrom` (i.e. it's a brand new logical entity) OR when
+    #   the handler appends a generated entity.
+    #
+    # `allowed_versions` — the versions the activity will accept as
+    #   the parent of a revision. If the client passes a `derivedFrom`
+    #   pointing at an entity whose stored `schema_version` is not in
+    #   this list, the engine returns `422 unsupported_schema_version`.
+    #   For revisions, the engine inherits the parent's `schema_version`
+    #   onto the new row (sticky) rather than re-stamping with
+    #   `new_version`.
+    #
+    # entities:
+    #   "oe:aanvraag":
+    #     new_version: "v2"
+    #     allowed_versions: ["v1", "v2"]
+    #   "oe:beslissing":
+    #     new_version: "v1"
+    #     allowed_versions: ["v1"]
+
+    # --- Activity-level relations opt-in ---
+    # The workflow-level `relations:` block (if present) acts as the
+    # permission gate: it declares which relation types exist in the
+    # workflow at all. Activities then opt in here to the relation
+    # types they accept in their request body.
+    #
+    # Each entry names a relation type and (optionally) a plugin-
+    # registered validator function. The validator receives the
+    # relation's resolved entity row plus the activity state and
+    # enforces the semantics — for `oe:neemtAkteVan`, this means
+    # checking that the acknowledged version covers every intervening
+    # version between the stale `used` version and the current latest.
+    #
+    # relations:
+    #   - type: "oe:neemtAkteVan"
+    #     validator: "validate_neemt_akte_van"
+
     # --- Status ---
     # What status this activity sets on the dossier.
     # Can be:
@@ -363,7 +465,7 @@ Task functions are defined in the plugin's `tasks/` module and registered in `TA
 ```python
 # Type 1 and 2: receives ActivityContext
 async def send_notification_email(context: ActivityContext):
-    aanvraag = context.get_typed("oe:aanvraag")
+    aanvraag = context.get_singleton_typed("oe:aanvraag")
     # ... send email ...
 
 async def log_audit_event(context: ActivityContext):
@@ -371,10 +473,10 @@ async def log_audit_event(context: ActivityContext):
     pass
 
 # Type 4: returns TaskResult with target dossier
-from gov_dossier_engine.engine import TaskResult
+from dossier_engine.engine import TaskResult
 
 async def find_related_dossier(context: ActivityContext):
-    aanvraag = context.get_typed("oe:aanvraag")
+    aanvraag = context.get_singleton_typed("oe:aanvraag")
     # ... determine target dossier ...
     return TaskResult(
         target_dossier_id="d5000000-...",
@@ -401,8 +503,8 @@ the decision depends on entity content at runtime — handlers can append tasks 
 
 ```python
 async def neem_beslissing(context: ActivityContext, content: dict | None) -> HandlerResult:
-    beslissing = context.get_typed("oe:beslissing")
-    handtekening = context.get_typed("oe:handtekening")
+    beslissing = context.get_singleton_typed("oe:beslissing")
+    handtekening = context.get_singleton_typed("oe:handtekening")
 
     if not handtekening or not handtekening.getekend:
         return HandlerResult(status="klaar_voor_behandeling")
@@ -461,13 +563,13 @@ The worker processes due tasks. Runs as a separate process sharing the same DB.
 
 ```bash
 # Process all due tasks once and exit
-python -m gov_dossier_engine.worker --once
+python -m dossier_engine.worker --once
 
 # Run continuously, polling every 10 seconds
-python -m gov_dossier_engine.worker
+python -m dossier_engine.worker
 
 # Custom interval and config
-python -m gov_dossier_engine.worker --interval 5 --config gov_dossier_app/config.yaml
+python -m dossier_engine.worker --interval 5 --config dossier_app/config.yaml
 ```
 
 The worker:
@@ -689,7 +791,7 @@ Columns query parameters: `?include_tasks=true` (default)
 
 ## Full Workflow Example
 
-See `gov_dossier_toelatingen/workflow.yaml` for a complete example implementing
+See `dossier_toelatingen/workflow.yaml` for a complete example implementing
 a heritage permit ("toelating beschermd erfgoed") workflow with:
 
 - Client activities: dienAanvraagIn, bewerkAanvraag, vervolledigAanvraag, doeVoorstelBeslissing, tekenBeslissing, neemBeslissing, trekAanvraagIn

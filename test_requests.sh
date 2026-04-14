@@ -694,7 +694,7 @@ print('  OK: happy-path derivation v1->v2 accepted')
 "
 echo ""
 
-echo "--- D5 Step 3: NEGATIVE — missing derivedFrom on existing entity (expect 409 missing_derivation) ---"
+echo "--- D5 Step 3: NEGATIVE — missing derivedFrom on existing entity (expect 422 missing_derivation_chain) ---"
 RESP=$(curl -s -w "\n%{http_code}" -X PUT "$BASE_URL/dossiers/d5000000-0000-0000-0000-000000000001/activities/a5000000-0000-0000-0000-000000000003/bewerkAanvraag" \
   -H "Content-Type: application/json" \
   -H "X-POC-User: marie.brugge" \
@@ -719,17 +719,17 @@ lines = sys.stdin.read().strip().split('\n')
 code = lines[-1]
 body = json.loads('\n'.join(lines[:-1]))
 inner = body.get('detail', {})
-assert code == '409', f'expected 409, got {code}: {body}'
+assert code == '422', f'expected 422, got {code}: {body}'
 assert isinstance(inner, dict), f'expected dict detail, got {type(inner).__name__}: {inner}'
-assert inner.get('error') == 'missing_derivation', f'expected error=missing_derivation, got {inner.get(\"error\")}'
+assert inner.get('error') == 'missing_derivation_chain', f'expected error=missing_derivation_chain, got {inner.get(\"error\")}'
 assert 'latest_version' in inner, f'expected latest_version in payload'
 lv = inner['latest_version']
 assert lv['versionId'] == 'f5000000-0000-0000-0000-000000000002', f'wrong latest: {lv[\"versionId\"]}'
-print(f'  OK: 409 missing_derivation; latest_version.versionId={lv[\"versionId\"][:8]}...')
+print(f'  OK: 422 missing_derivation_chain; latest_version.versionId={lv[\"versionId\"][:8]}...')
 "
 echo ""
 
-echo "--- D5 Step 4: NEGATIVE — stale derivedFrom (v1, but latest is v2) (expect 409 stale_derivation) ---"
+echo "--- D5 Step 4: NEGATIVE — derivedFrom from non-latest version (expect 422 invalid_derivation_chain) ---"
 RESP=$(curl -s -w "\n%{http_code}" -X PUT "$BASE_URL/dossiers/d5000000-0000-0000-0000-000000000001/activities/a5000000-0000-0000-0000-000000000004/bewerkAanvraag" \
   -H "Content-Type: application/json" \
   -H "X-POC-User: marie.brugge" \
@@ -755,12 +755,12 @@ lines = sys.stdin.read().strip().split('\n')
 code = lines[-1]
 body = json.loads('\n'.join(lines[:-1]))
 inner = body.get('detail', {})
-assert code == '409', f'expected 409, got {code}: {body}'
-assert inner.get('error') == 'stale_derivation', f'expected error=stale_derivation, got {inner.get(\"error\")}'
+assert code == '422', f'expected 422, got {code}: {body}'
+assert inner.get('error') == 'invalid_derivation_chain', f'expected error=invalid_derivation_chain, got {inner.get(\"error\")}'
 assert inner.get('declared_parent') == 'f5000000-0000-0000-0000-000000000001'
 assert inner.get('latest_parent') == 'f5000000-0000-0000-0000-000000000002'
 assert 'latest_version' in inner
-print(f'  OK: 409 stale_derivation; declared=v1, latest=v2, latest_version.content returned')
+print(f'  OK: 422 invalid_derivation_chain; declared=v1, latest=v2, latest_version.content returned')
 "
 echo ""
 
@@ -829,16 +829,98 @@ print(f'  OK: 422 cross_entity_derivation')
 "
 echo ""
 
-echo "D5 summary: all 5 derivation rule checks passed"
+echo "--- D5 Step 7: NEGATIVE — same logical entity in used and generated, local (expect 422 used_generated_overlap) ---"
+RESP=$(curl -s -w "\n%{http_code}" -X PUT "$BASE_URL/dossiers/d5000000-0000-0000-0000-000000000001/activities/a5000000-0000-0000-0000-000000000007/bewerkAanvraag" \
+  -H "Content-Type: application/json" \
+  -H "X-POC-User: marie.brugge" \
+  -d '{
+    "used": [
+      { "entity": "https://id.erfgoed.net/erfgoedobjecten/50001" },
+      { "entity": "oe:aanvraag/e5000000-0000-0000-0000-000000000001@f5000000-0000-0000-0000-000000000002" }
+    ],
+    "generated": [
+      {
+        "entity": "oe:aanvraag/e5000000-0000-0000-0000-000000000001@f5000000-0000-0000-0000-000000000007",
+        "derivedFrom": "oe:aanvraag/e5000000-0000-0000-0000-000000000001@f5000000-0000-0000-0000-000000000002",
+        "content": {
+          "onderwerp": "should not get here — used and generated overlap on entity_id",
+          "handeling": "renovatie",
+          "aanvrager": { "rrn": "85010100123" },
+          "gemeente": "Brugge",
+          "object": "https://id.erfgoed.net/erfgoedobjecten/50001"
+        }
+      }
+    ]
+  }')
+echo "$RESP" | python3 -c "
+import sys, json
+lines = sys.stdin.read().strip().split('\n')
+code = lines[-1]
+body = json.loads('\n'.join(lines[:-1]))
+inner = body.get('detail', {})
+assert code == '422', f'expected 422, got {code}: {body}'
+assert inner.get('error') == 'used_generated_overlap', f'expected error=used_generated_overlap, got {inner.get(\"error\")}'
+overlaps = inner.get('overlaps', [])
+assert len(overlaps) == 1, f'expected 1 overlap, got {len(overlaps)}: {overlaps}'
+assert overlaps[0]['kind'] == 'local'
+assert overlaps[0]['entity_id'] == 'e5000000-0000-0000-0000-000000000001'
+print(f'  OK: 422 used_generated_overlap (local entity_id)')
+"
+echo ""
+
+echo "--- D5 Step 8: NEGATIVE — same external URI in used and generated (expect 422 used_generated_overlap) ---"
+RESP=$(curl -s -w "\n%{http_code}" -X PUT "$BASE_URL/dossiers/d5000000-0000-0000-0000-000000000001/activities/a5000000-0000-0000-0000-000000000008/bewerkAanvraag" \
+  -H "Content-Type: application/json" \
+  -H "X-POC-User: marie.brugge" \
+  -d '{
+    "used": [
+      { "entity": "https://id.erfgoed.net/erfgoedobjecten/50001" }
+    ],
+    "generated": [
+      { "entity": "https://id.erfgoed.net/erfgoedobjecten/50001" }
+    ]
+  }')
+echo "$RESP" | python3 -c "
+import sys, json
+lines = sys.stdin.read().strip().split('\n')
+code = lines[-1]
+body = json.loads('\n'.join(lines[:-1]))
+inner = body.get('detail', {})
+assert code == '422', f'expected 422, got {code}: {body}'
+assert inner.get('error') == 'used_generated_overlap', f'expected error=used_generated_overlap, got {inner.get(\"error\")}'
+overlaps = inner.get('overlaps', [])
+assert len(overlaps) == 1, f'expected 1 overlap, got {len(overlaps)}: {overlaps}'
+assert overlaps[0]['kind'] == 'external'
+assert overlaps[0]['entity'] == 'https://id.erfgoed.net/erfgoedobjecten/50001'
+print(f'  OK: 422 used_generated_overlap (external URI)')
+"
+echo ""
+
+echo "D5 summary: all derivation + invariant checks passed"
 echo ""
 echo ""
 
 # ============================================================================
 # DOSSIER 6: stale used reference check + oe:neemtAkteVan
 # ============================================================================
-# Creates an aanvraag v1, revises it to v2 via bewerkAanvraag. Then tries
-# activities that `use` v1 — expecting 409 stale_used_reference unless the
-# request carries a matching `oe:neemtAkteVan` relation.
+# Verifies the staleness-acknowledgement workflow on its canonical use case:
+# a read-only activity (`doeVoorstelBeslissing`) references the aanvraag it
+# inspects via the `used` block. If the operator's view of the aanvraag is
+# stale (a newer version exists), the engine fires `oe:neemtAkteVan`'s
+# validator. Without an `oe:neemtAkteVan` ack covering the intervening
+# versions, the request fails with 409 stale_used_reference.
+#
+# The setup creates an aanvraag, revises it via bewerkAanvraag (so v2 is the
+# latest), then runs three doeVoorstelBeslissing variants:
+#   3. used=v1, no ack            → expect 409 stale_used_reference
+#   4. used=v1, ack=v2            → expect 200, beslissing created
+#   5. used=v1, ack=external uri  → expect 422 (externals can't be in relations)
+#
+# Note: revise activities (bewerkAanvraag, vervolledigAanvraag) cannot
+# legitimately participate in this workflow, because per the engine's
+# disjoint invariant, a logical entity is never in both `used` and
+# `generated` of the same activity. The staleness story applies only to
+# read-only references — see `pipeline/invariants.py`.
 # ============================================================================
 
 echo "============================================"
@@ -890,27 +972,25 @@ curl -s -X PUT "$BASE_URL/dossiers/d6000000-0000-0000-0000-000000000001/activiti
 echo "  aanvraag v2 created (now latest)"
 echo ""
 
-echo "--- D6 Step 3: NEGATIVE — bewerkAanvraag uses stale v1, no relation (expect 409 stale_used_reference) ---"
-RESP=$(curl -s -w "\n%{http_code}" -X PUT "$BASE_URL/dossiers/d6000000-0000-0000-0000-000000000001/activities/a6000000-0000-0000-0000-000000000003/bewerkAanvraag" \
+echo "--- D6 Step 3: NEGATIVE — doeVoorstelBeslissing reads stale v1, no ack (expect 409 stale_used_reference) ---"
+D6_BRIEF_FID=$(upload_file "marie.brugge" "D6 brief" "d6-brief.pdf")
+RESP=$(curl -s -w "\n%{http_code}" -X PUT "$BASE_URL/dossiers/d6000000-0000-0000-0000-000000000001/activities/a6000000-0000-0000-0000-000000000003/doeVoorstelBeslissing" \
   -H "Content-Type: application/json" \
   -H "X-POC-User: marie.brugge" \
-  -d '{
-    "used": [
-      {"entity": "https://id.erfgoed.net/erfgoedobjecten/60001"},
-      {"entity": "oe:aanvraag/e6000000-0000-0000-0000-000000000001@f6000000-0000-0000-0000-000000000001"}
+  -d "{
+    \"used\": [
+      {\"entity\": \"oe:aanvraag/e6000000-0000-0000-0000-000000000001@f6000000-0000-0000-0000-000000000001\"}
     ],
-    "generated": [{
-      "entity": "oe:aanvraag/e6000000-0000-0000-0000-000000000001@f6000000-0000-0000-0000-000000000003",
-      "derivedFrom": "oe:aanvraag/e6000000-0000-0000-0000-000000000001@f6000000-0000-0000-0000-000000000002",
-      "content": {
-        "onderwerp": "trying to use v1 without ack",
-        "handeling": "renovatie",
-        "aanvrager": {"rrn": "85010100123"},
-        "gemeente": "Brugge",
-        "object": "https://id.erfgoed.net/erfgoedobjecten/60001"
+    \"generated\": [{
+      \"entity\": \"oe:beslissing/e6000000-0000-0000-0000-000000000002@f6000000-0000-0000-0000-000000000003\",
+      \"content\": {
+        \"beslissing\": \"goedgekeurd\",
+        \"datum\": \"2026-04-01T10:00:00Z\",
+        \"object\": \"https://id.erfgoed.net/erfgoedobjecten/60001\",
+        \"brief\": \"$D6_BRIEF_FID\"
       }
     }]
-  }')
+  }")
 echo "$RESP" | python3 -c "
 import sys, json
 lines = sys.stdin.read().strip().split('\n')
@@ -931,30 +1011,62 @@ print('  OK: 409 stale_used_reference with stale entry + intervening versions + 
 "
 echo ""
 
-echo "--- D6 Step 4: POSITIVE — bewerkAanvraag uses stale v1 with oe:neemtAkteVan for v2 (expect success) ---"
-RESP=$(curl -s -w "\n%{http_code}" -X PUT "$BASE_URL/dossiers/d6000000-0000-0000-0000-000000000001/activities/a6000000-0000-0000-0000-000000000004/bewerkAanvraag" \
+echo "--- D6 Step 4: NEGATIVE — ack an external URI (expect 422 — relations cannot reference externals) ---"
+RESP=$(curl -s -w "\n%{http_code}" -X PUT "$BASE_URL/dossiers/d6000000-0000-0000-0000-000000000001/activities/a6000000-0000-0000-0000-000000000004/doeVoorstelBeslissing" \
   -H "Content-Type: application/json" \
   -H "X-POC-User: marie.brugge" \
-  -d '{
-    "used": [
-      {"entity": "https://id.erfgoed.net/erfgoedobjecten/60001"},
-      {"entity": "oe:aanvraag/e6000000-0000-0000-0000-000000000001@f6000000-0000-0000-0000-000000000001"}
+  -d "{
+    \"used\": [
+      {\"entity\": \"oe:aanvraag/e6000000-0000-0000-0000-000000000001@f6000000-0000-0000-0000-000000000001\"}
     ],
-    "relations": [
-      {"entity": "oe:aanvraag/e6000000-0000-0000-0000-000000000001@f6000000-0000-0000-0000-000000000002", "type": "oe:neemtAkteVan"}
+    \"relations\": [
+      {\"entity\": \"https://id.erfgoed.net/erfgoedobjecten/60001\", \"type\": \"oe:neemtAkteVan\"}
     ],
-    "generated": [{
-      "entity": "oe:aanvraag/e6000000-0000-0000-0000-000000000001@f6000000-0000-0000-0000-000000000004",
-      "derivedFrom": "oe:aanvraag/e6000000-0000-0000-0000-000000000001@f6000000-0000-0000-0000-000000000002",
-      "content": {
-        "onderwerp": "using v1 but acknowledging v2",
-        "handeling": "renovatie",
-        "aanvrager": {"rrn": "85010100123"},
-        "gemeente": "Brugge",
-        "object": "https://id.erfgoed.net/erfgoedobjecten/60001"
+    \"generated\": [{
+      \"entity\": \"oe:beslissing/e6000000-0000-0000-0000-000000000002@f6000000-0000-0000-0000-000000000004\",
+      \"content\": {
+        \"beslissing\": \"goedgekeurd\",
+        \"datum\": \"2026-04-01T11:00:00Z\",
+        \"object\": \"https://id.erfgoed.net/erfgoedobjecten/60001\",
+        \"brief\": \"$D6_BRIEF_FID\"
       }
     }]
-  }')
+  }")
+echo "$RESP" | python3 -c "
+import sys, json
+lines = sys.stdin.read().strip().split('\n')
+code = lines[-1]
+body = json.loads('\n'.join(lines[:-1]))
+inner = body.get('detail', {})
+assert code == '422', f'expected 422, got {code}: {body}'
+detail_str = inner if isinstance(inner, str) else inner.get('detail', '')
+assert 'external' in detail_str.lower() or 'cannot reference' in detail_str.lower(), \
+    f'expected external-rejection error, got: {detail_str}'
+print('  OK: 422 relations cannot reference external URIs')
+"
+echo ""
+
+echo "--- D6 Step 5: POSITIVE — doeVoorstelBeslissing reads stale v1, acks v2 (expect 200) ---"
+RESP=$(curl -s -w "\n%{http_code}" -X PUT "$BASE_URL/dossiers/d6000000-0000-0000-0000-000000000001/activities/a6000000-0000-0000-0000-000000000005/doeVoorstelBeslissing" \
+  -H "Content-Type: application/json" \
+  -H "X-POC-User: marie.brugge" \
+  -d "{
+    \"used\": [
+      {\"entity\": \"oe:aanvraag/e6000000-0000-0000-0000-000000000001@f6000000-0000-0000-0000-000000000001\"}
+    ],
+    \"relations\": [
+      {\"entity\": \"oe:aanvraag/e6000000-0000-0000-0000-000000000001@f6000000-0000-0000-0000-000000000002\", \"type\": \"oe:neemtAkteVan\"}
+    ],
+    \"generated\": [{
+      \"entity\": \"oe:beslissing/e6000000-0000-0000-0000-000000000002@f6000000-0000-0000-0000-000000000005\",
+      \"content\": {
+        \"beslissing\": \"goedgekeurd\",
+        \"datum\": \"2026-04-01T12:00:00Z\",
+        \"object\": \"https://id.erfgoed.net/erfgoedobjecten/60001\",
+        \"brief\": \"$D6_BRIEF_FID\"
+      }
+    }]
+  }")
 echo "$RESP" | python3 -c "
 import sys, json
 lines = sys.stdin.read().strip().split('\n')
@@ -967,53 +1079,7 @@ rels = body.get('relations', [])
 assert len(rels) == 1, f'expected 1 relation in response, got {rels}'
 assert rels[0]['type'] == 'oe:neemtAkteVan'
 assert 'f6000000-0000-0000-0000-000000000002' in rels[0]['entity']
-print('  OK: activity accepted with oe:neemtAkteVan acknowledgement; relation echoed back')
-"
-echo ""
-
-echo "--- D6 Step 5: NEGATIVE — ack unrelated version (expect 422 unrelated_acknowledgement) ---"
-# Reference v4 (which is the latest now after Step 4) while the used block
-# references v1. v4 is newer than v1, v2 is also newer, but v4 is already
-# the latest — there's nothing "between" v1 and v4 except v2. Acknowledging
-# v4 but using v1 means v2 is still an intervening version that's not
-# covered. The validator should accept v4 (since v4 IS in v1's intervening
-# set) but still reject with stale_used_reference because v2 is uncovered.
-# For the "unrelated_acknowledgement" test we need an ack that points at
-# something OUTSIDE any stale gap — use an external entity URI, which isn't
-# allowed in relations at all (engine rejects at the parse step with 422).
-RESP=$(curl -s -w "\n%{http_code}" -X PUT "$BASE_URL/dossiers/d6000000-0000-0000-0000-000000000001/activities/a6000000-0000-0000-0000-000000000005/bewerkAanvraag" \
-  -H "Content-Type: application/json" \
-  -H "X-POC-User: marie.brugge" \
-  -d '{
-    "used": [{"entity": "https://id.erfgoed.net/erfgoedobjecten/60001"}],
-    "relations": [
-      {"entity": "https://id.erfgoed.net/erfgoedobjecten/60001", "type": "oe:neemtAkteVan"}
-    ],
-    "generated": [{
-      "entity": "oe:aanvraag/e6000000-0000-0000-0000-000000000001@f6000000-0000-0000-0000-000000000005",
-      "derivedFrom": "oe:aanvraag/e6000000-0000-0000-0000-000000000001@f6000000-0000-0000-0000-000000000004",
-      "content": {
-        "onderwerp": "ack an external uri",
-        "handeling": "renovatie",
-        "aanvrager": {"rrn": "85010100123"},
-        "gemeente": "Brugge",
-        "object": "https://id.erfgoed.net/erfgoedobjecten/60001"
-      }
-    }]
-  }')
-echo "$RESP" | python3 -c "
-import sys, json
-lines = sys.stdin.read().strip().split('\n')
-code = lines[-1]
-body = json.loads('\n'.join(lines[:-1]))
-inner = body.get('detail', {})
-assert code == '422', f'expected 422, got {code}: {body}'
-# Detail is a plain string for this one (no payload) — engine rejects
-# externals in relations upfront.
-detail_str = inner if isinstance(inner, str) else inner.get('detail', '')
-assert 'external' in detail_str.lower() or 'cannot reference' in detail_str.lower(), \
-    f'expected external-rejection error, got: {detail_str}'
-print('  OK: 422 relations cannot reference external URIs')
+print('  OK: doeVoorstelBeslissing accepted with oe:neemtAkteVan acknowledgement; relation echoed back')
 "
 echo ""
 
@@ -1134,7 +1200,6 @@ D8_STEP3_CODE=$(curl -s -o /tmp/d8_step3.json -w "%{http_code}" \
   -d "{
     \"workflow\": \"toelatingen\",
     \"used\": [
-      { \"entity\": \"oe:aanvraag/e8000000-0000-0000-0000-000000000001@f8000000-0000-0000-0000-000000000001\" },
       { \"entity\": \"https://id.erfgoed.net/erfgoedobjecten/10008\" }
     ],
     \"generated\": [
@@ -1184,7 +1249,6 @@ D8_STEP4_CODE=$(curl -s -o /tmp/d8_step4.json -w "%{http_code}" \
   -d "{
     \"workflow\": \"toelatingen\",
     \"used\": [
-      { \"entity\": \"oe:aanvraag/$D1_LATEST\" },
       { \"entity\": \"https://id.erfgoed.net/erfgoedobjecten/10001\" }
     ],
     \"generated\": [
@@ -1280,7 +1344,6 @@ curl -s -X PUT "$BASE_URL/dossiers/d9000000-0000-0000-0000-000000000001/activiti
   -d "{
     \"workflow\": \"toelatingen\",
     \"used\": [
-      { \"entity\": \"oe:aanvraag/e9000000-0000-0000-0000-000000000001@f9000000-0000-0000-0000-000000000001\" },
       { \"entity\": \"https://id.erfgoed.net/erfgoedobjecten/10009\" }
     ],
     \"generated\": [
