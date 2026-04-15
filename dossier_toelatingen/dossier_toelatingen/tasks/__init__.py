@@ -63,8 +63,8 @@ async def move_bijlagen_to_permanent(context: ActivityContext):
 
     dossier_id = str(context.dossier_id)
 
-    # In production, read file_service URL from config
-    file_service_url = "http://localhost:8001"
+    import os
+    file_service_url = os.environ.get("FILE_SERVICE_URL", "http://localhost:8001")
 
     import aiohttp
     async with aiohttp.ClientSession() as session:

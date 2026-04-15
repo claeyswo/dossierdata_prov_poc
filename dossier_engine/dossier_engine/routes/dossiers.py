@@ -73,7 +73,7 @@ def register(app: FastAPI, *, registry, get_user, global_access) -> None:
         user: User = Depends(get_user),
     ):
         session_factory = get_session_factory()
-        async with session_factory() as session:
+        async with session_factory() as session, session.begin():
             repo = Repository(session)
 
             dossier = await repo.get_dossier(dossier_id)
@@ -205,7 +205,7 @@ def register(app: FastAPI, *, registry, get_user, global_access) -> None:
         user: User = Depends(get_user),
     ):
         session_factory = get_session_factory()
-        async with session_factory() as session:
+        async with session_factory() as session, session.begin():
             query = select(DossierRow)
             if workflow:
                 query = query.where(DossierRow.workflow == workflow)

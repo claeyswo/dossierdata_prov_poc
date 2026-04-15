@@ -39,9 +39,17 @@ def _default_config_path() -> str:
     `FILE_SERVICE_CONFIG` env var if you need a different config."""
     try:
         import dossier_app
-        return str(Path(dossier_app.__file__).parent / "config.yaml")
+        pkg_file = getattr(dossier_app, "__file__", None)
+        if pkg_file is not None:
+            return str(Path(pkg_file).parent / "config.yaml")
+        # Namespace package or editable install where __file__ is None —
+        # fall back to __path__ (a list of directories).
+        pkg_path = getattr(dossier_app, "__path__", None)
+        if pkg_path:
+            return str(Path(pkg_path[0]) / "config.yaml")
     except ImportError:
-        return "config.yaml"
+        pass
+    return "config.yaml"
 
 
 CONFIG_PATH = os.environ.get("FILE_SERVICE_CONFIG", _default_config_path())

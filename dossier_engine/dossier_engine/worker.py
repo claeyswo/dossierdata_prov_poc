@@ -27,7 +27,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import func, select
 
 from .app import load_config_and_registry, SYSTEM_USER
-from .db import init_db, create_tables, get_session_factory
+from .db import init_db, get_session_factory
 from .db.models import EntityRow, Repository
 from .engine import ActivityContext, Caller, execute_activity
 
@@ -748,7 +748,9 @@ async def worker_loop(config_path: str = "config.yaml", poll_interval: int = 10,
             "database.url is required in config (Postgres connection string)"
         )
     await init_db(db_url)
-    await create_tables()
+    # Schema is managed by Alembic migrations (run via the API startup
+    # or `alembic upgrade head`). The worker does not create or migrate
+    # tables — it only needs the engine connection.
 
     shutdown = asyncio.Event()
 
@@ -946,7 +948,9 @@ async def requeue_dead_letters(
             "database.url is required in config (Postgres connection string)"
         )
     await init_db(db_url)
-    await create_tables()
+    # Schema is managed by Alembic migrations (run via the API startup
+    # or `alembic upgrade head`). The worker does not create or migrate
+    # tables — it only needs the engine connection.
 
     session_factory = get_session_factory()
 

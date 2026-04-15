@@ -26,12 +26,21 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import random
 import statistics
 import sys
 import time
 from datetime import datetime, timezone, timedelta
 from uuid import uuid4, UUID
+
+# When run as a script, Python adds the script's directory to sys.path[0].
+# That directory (/home/.../toelatingen/) contains project subdirectories
+# like dossier_toelatingen/ which shadow the pip-installed packages of the
+# same name. Remove it so pip-installed editable packages win.
+_script_dir = os.path.dirname(os.path.abspath(__file__))
+if _script_dir in sys.path:
+    sys.path.remove(_script_dir)
 
 import aiohttp
 
@@ -423,7 +432,6 @@ async def seed_dossiers(count: int, config_path: str):
     logger.info(f"Seeding {count} dossiers directly into DB...")
 
     # Import engine internals
-    sys.path.insert(0, ".")
     from dossier_engine.app import load_config_and_registry, SYSTEM_USER
     from dossier_engine.db import init_db, create_tables, get_session_factory
     from dossier_engine.db.models import Repository

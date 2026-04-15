@@ -9,16 +9,22 @@ from __future__ import annotations
 
 import copy
 import importlib
+import logging
+import os
+import subprocess
 from pathlib import Path
 
 import yaml
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from .plugin import PluginRegistry
 from .auth import POCAuthMiddleware, User
 from .db import init_db, create_tables, get_session_factory
 from .routes import register_routes
 from .routes.prov import register_prov_routes
+
+_log = logging.getLogger("dossier.app")
 
 
 # System user used by the worker and side effects
@@ -108,6 +114,44 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
     app.state.registry = registry
     app.state.config = config
 
+    # --- CORS ---
+    # Allow all origins in development. In production, restrict to
+    # the frontend's actual origin(s) via config:
+    #   cors:
+    #     allowed_origins: ["https://app.example.be"]
+    cors_config = config.get("cors", {})
+    allowed_origins = cors_config.get("allowed_origins", ["*"])
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=allowed_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    # --- Health check ---
+    @app.get("/health", tags=["system"])
+    async def health():
+        """Liveness probe. Returns 200 if the process is up.
+
+        For a readiness probe that checks the DB connection, use
+        /health/ready (below)."""
+        return {"status": "ok"}
+
+    @app.get("/health/ready", tags=["system"])
+    async def health_ready():
+        """Readiness probe. Returns 200 if the DB connection works."""
+        try:
+            session_factory = get_session_factory()
+            async with session_factory() as session:
+                from sqlalchemy import text
+                await session.execute(text("SELECT 1"))
+            return {"status": "ready"}
+        except Exception as e:
+            from fastapi import HTTPException
+            raise HTTPException(503, detail=f"Database not ready: {e}")
+
+    # --- Startup: DB init + Alembic migrations ---
     @app.on_event("startup")
     async def startup():
         db_url = config.get("database", {}).get("url")
@@ -116,7 +160,29 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
                 "database.url is required in config (Postgres connection string)"
             )
         await init_db(db_url)
-        await create_tables()
+
+        # Run Alembic migrations to HEAD via subprocess.
+        # Subprocess is needed because alembic's env.py calls
+        # asyncio.run() internally, which can't nest inside
+        # uvicorn's already-running event loop.
+        alembic_ini = Path(__file__).parent.parent / "alembic.ini"
+        if alembic_ini.exists():
+            env = {**os.environ, "DOSSIER_DB_URL": db_url}
+            result = subprocess.run(
+                ["python3", "-m", "alembic", "upgrade", "head"],
+                cwd=str(alembic_ini.parent),
+                capture_output=True, text=True, env=env,
+            )
+            if result.returncode == 0:
+                _log.info("Alembic migrations applied successfully")
+            else:
+                _log.warning(
+                    f"Alembic migration failed (rc={result.returncode}), "
+                    f"falling back to create_tables: {result.stderr}"
+                )
+                await create_tables()
+        else:
+            await create_tables()
 
     # Register routes
     global_access = config.get("global_access", [])

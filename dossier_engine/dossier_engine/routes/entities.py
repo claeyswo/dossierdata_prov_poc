@@ -55,7 +55,7 @@ def register(app: FastAPI, *, get_user, global_access) -> None:
         user: User = Depends(get_user),
     ):
         session_factory = get_session_factory()
-        async with session_factory() as session:
+        async with session_factory() as session, session.begin():
             repo = Repository(session)
             await _load_with_access_check(
                 repo, dossier_id, entity_type, user, global_access,
@@ -92,7 +92,7 @@ def register(app: FastAPI, *, get_user, global_access) -> None:
         user: User = Depends(get_user),
     ):
         session_factory = get_session_factory()
-        async with session_factory() as session:
+        async with session_factory() as session, session.begin():
             repo = Repository(session)
             await _load_with_access_check(
                 repo, dossier_id, entity_type, user, global_access,
@@ -132,7 +132,7 @@ def register(app: FastAPI, *, get_user, global_access) -> None:
         user: User = Depends(get_user),
     ):
         session_factory = get_session_factory()
-        async with session_factory() as session:
+        async with session_factory() as session, session.begin():
             repo = Repository(session)
             await _load_with_access_check(
                 repo, dossier_id, entity_type, user, global_access,

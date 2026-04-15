@@ -35,7 +35,10 @@ pip install -e dossier_common/ -e file_service/ -e dossier_engine/ \
 
 # Run the dossier API (launch cwd does not matter — the engine's
 # only filesystem path, file_service.storage_root, resolves against
-# the config file's own directory)
+# the config file's own directory).
+# On first launch, the startup hook runs Alembic migrations to
+# create the schema. On subsequent launches it applies any pending
+# migrations automatically.
 uvicorn dossier_app.main:app --reload --port 8000
 
 # Run the file service (separate process, separate port)
@@ -50,6 +53,61 @@ python -m dossier_engine.worker --once
 # Open Swagger docs
 open http://localhost:8000/docs
 ```
+
+## Database & Schema Management
+
+The database schema is managed by **Alembic** migrations. The migration
+files live under `dossier_engine/alembic/versions/`.
+
+### How it works
+
+On API startup, the app runs `alembic upgrade head` via subprocess. This:
+- Creates all tables from scratch on a fresh database
+- Applies any pending migrations on an existing database
+- Is idempotent — running it twice does nothing
+
+The worker does NOT run migrations. It only connects to the database
+and expects the schema to already exist. Always start the API before
+the worker (or run `alembic upgrade head` manually first).
+
+### Manual migration commands
+
+```bash
+cd dossier_engine/
+
+# Apply all pending migrations
+alembic upgrade head
+
+# Check current version
+alembic current
+
+# Show migration history
+alembic history
+
+# Generate a new migration after changing models.py
+alembic revision --autogenerate -m "add_foo_column"
+
+# Downgrade one step (use with caution)
+alembic downgrade -1
+```
+
+### Environment variable
+
+The database URL can be overridden via `DOSSIER_DB_URL`:
+
+```bash
+export DOSSIER_DB_URL="postgresql+asyncpg://user:pass@prod-host:5432/dossiers"
+alembic upgrade head
+```
+
+If not set, alembic reads the URL from `alembic.ini` (which defaults
+to the local development database).
+
+### Current migration
+
+| Revision | Description |
+|---|---|
+| `9d887db892c9` | Initial schema — 7 tables, all indexes, partial JSONB indexes for worker poll |
 
 ## Architecture
 
@@ -162,8 +220,22 @@ compatible ranges `>=0.1.0,<0.2.0`, the app pins strict `==0.1.0`):
 | `GET` | `/dossiers/{id}/prov` | PROV-JSON export |
 | `GET` | `/dossiers/{id}/prov/graph/timeline` | Timeline visualization |
 | `GET` | `/dossiers/{id}/prov/graph/columns` | Column layout visualization |
+| `GET` | `/health` | Liveness probe (always 200 if process is up) |
+| `GET` | `/health/ready` | Readiness probe (checks DB connection, 503 if down) |
 
 Graph query parameters: `?include_system_activities=true`, `?include_tasks=true`
+
+### CORS
+
+The API includes CORS middleware. By default all origins are allowed
+(development mode). To restrict in production, add to `config.yaml`:
+
+```yaml
+cors:
+  allowed_origins:
+    - "https://app.example.be"
+    - "https://admin.example.be"
+```
 
 ## Request Format
 
@@ -376,10 +448,10 @@ Both the dossier API (port 8000) and the file service (port 8001) must be up, an
 pkill -9 -f uvicorn
 sleep 1
 
-# 2. Wipe the database (Postgres schema) and the file storage. The
-#    file storage lives next to the config file inside the dossier_app
-#    package — that's where the engine's config-relative path resolver
-#    anchors it.
+# 2. Wipe the database (Postgres schema) and the file storage.
+#    On the next API launch, Alembic will recreate all tables from
+#    the initial migration. The file storage lives next to the config
+#    file inside the dossier_app package.
 psql -h 127.0.0.1 -U dossier dossiers \
   -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public; GRANT ALL ON SCHEMA public TO dossier;"
 rm -rf /home/claude/toelatingen/dossier_app/dossier_app/file_storage
@@ -393,12 +465,12 @@ setsid python3 -m uvicorn dossier_app.main:app --port 8000 \
   </dev/null >/tmp/dossier.log 2>&1 &
 setsid python3 -m uvicorn file_service.app:app --port 8001 \
   </dev/null >/tmp/files.log 2>&1 &
-sleep 4
+sleep 6   # allow time for Alembic migrations to run on first start
 
-# 4. Confirm both services are alive
-curl -s -o /dev/null -w "dossier:%{http_code}\n" http://localhost:8000/dossiers
-curl -s -o /dev/null -w "files:%{http_code}\n"   http://localhost:8001/health
-# Expected: dossier:401, files:200
+# 4. Confirm both services are alive and the DB is ready
+curl -s http://localhost:8000/health        # {"status":"ok"}
+curl -s http://localhost:8000/health/ready   # {"status":"ready"}
+curl -s http://localhost:8001/health         # {"status":"ok"}
 
 # 5. Run the suite
 bash /home/claude/toelatingen/test_requests.sh > /tmp/test_run.log 2>&1

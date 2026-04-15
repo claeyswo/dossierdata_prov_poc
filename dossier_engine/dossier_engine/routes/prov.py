@@ -45,7 +45,7 @@ def register_prov_routes(app, registry: PluginRegistry, get_user, global_access:
         user: User = Depends(get_user),
     ):
         session_factory = get_session_factory()
-        async with session_factory() as session:
+        async with session_factory() as session, session.begin():
             repo = Repository(session)
 
             dossier = await repo.get_dossier(dossier_id)
@@ -253,7 +253,7 @@ def register_prov_routes(app, registry: PluginRegistry, get_user, global_access:
         user: User = Depends(get_user),
     ):
         session_factory = get_session_factory()
-        async with session_factory() as session:
+        async with session_factory() as session, session.begin():
             repo = Repository(session)
 
             dossier = await repo.get_dossier(dossier_id)
