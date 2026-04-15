@@ -28,3 +28,28 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["dossier_engine*"]
+
+[tool.pytest.ini_options]
+# Test discovery scoped to the tests/ directory beside the package.
+# asyncio_mode=auto lets us write `async def test_...` without decorating
+# every test with @pytest.mark.asyncio — the plugin recognises async
+# tests automatically.
+#
+# Loop scopes are "session" because DB-backed fixtures need the async
+# engine (created once at session start) and per-test sessions to share
+# one event loop — otherwise asyncpg raises "cannot perform operation:
+# another operation is in progress" when a connection created in one
+# loop is handed to code running in another. The tradeoff is that async
+# state can in principle leak between tests if a test doesn't clean up
+# after itself; in practice our tests use `async with` blocks for
+# everything that owns resources, so this hasn't bitten us.
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+# Silence the "PytestUnraisableExceptionWarning" noise that SQLAlchemy's
+# connection pool cleanup sometimes produces at teardown — those are
+# not actionable for the test author.
+filterwarnings = [
+    "ignore::pytest.PytestUnraisableExceptionWarning",
+]

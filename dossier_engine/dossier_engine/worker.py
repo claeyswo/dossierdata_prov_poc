@@ -853,6 +853,57 @@ async def worker_loop(config_path: str = "config.yaml", poll_interval: int = 10,
     logger.info("Worker stopped")
 
 
+async def _select_dead_lettered_tasks(
+    session,
+    dossier_id: UUID | None = None,
+    task_entity_id: UUID | None = None,
+) -> list[EntityRow]:
+    """Select dead-lettered tasks (latest version per logical task
+    where `status = 'dead_letter'`), optionally filtered by dossier
+    and/or task entity id.
+
+    Extracted from `requeue_dead_letters` so integration tests can
+    exercise the selection logic against a real database without
+    triggering the config-load / `init_db` bootstrap that the main
+    entry point does. The two callers — `requeue_dead_letters` and
+    the test suite — share the same query shape, so a regression in
+    one is a regression in both.
+
+    The query mirrors `_build_scheduled_task_query`: a `MAX(created_at)
+    per entity_id` subquery identifies the latest version of each
+    logical task, and the outer query joins against it and filters
+    on the JSONB status field. The FOR UPDATE variant isn't used
+    here because the requeue is a single administrative operation —
+    no concurrent-worker locking is needed.
+    """
+    latest_per_entity = (
+        select(
+            EntityRow.entity_id.label("eid"),
+            func.max(EntityRow.created_at).label("latest_at"),
+        )
+        .where(EntityRow.type == "system:task")
+        .group_by(EntityRow.entity_id)
+        .subquery()
+    )
+    stmt = (
+        select(EntityRow)
+        .join(
+            latest_per_entity,
+            (EntityRow.entity_id == latest_per_entity.c.eid)
+            & (EntityRow.created_at == latest_per_entity.c.latest_at),
+        )
+        .where(EntityRow.type == "system:task")
+        .where(EntityRow.content["status"].as_string() == "dead_letter")
+    )
+    if dossier_id is not None:
+        stmt = stmt.where(EntityRow.dossier_id == dossier_id)
+    if task_entity_id is not None:
+        stmt = stmt.where(EntityRow.entity_id == task_entity_id)
+
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
 async def requeue_dead_letters(
     config_path: str,
     dossier_id: UUID | None = None,
@@ -899,37 +950,10 @@ async def requeue_dead_letters(
 
     session_factory = get_session_factory()
 
-    # Find dead-lettered tasks. We want the latest version per logical
-    # task entity (same projection pattern as find_due_tasks) AND the
-    # latest version's status must be dead_letter. Optionally filter
-    # by dossier_id and/or entity_id.
-    latest_per_entity = (
-        select(
-            EntityRow.entity_id.label("eid"),
-            func.max(EntityRow.created_at).label("latest_at"),
-        )
-        .where(EntityRow.type == "system:task")
-        .group_by(EntityRow.entity_id)
-        .subquery()
-    )
-    stmt = (
-        select(EntityRow)
-        .join(
-            latest_per_entity,
-            (EntityRow.entity_id == latest_per_entity.c.eid)
-            & (EntityRow.created_at == latest_per_entity.c.latest_at),
-        )
-        .where(EntityRow.type == "system:task")
-        .where(EntityRow.content["status"].as_string() == "dead_letter")
-    )
-    if dossier_id is not None:
-        stmt = stmt.where(EntityRow.dossier_id == dossier_id)
-    if task_entity_id is not None:
-        stmt = stmt.where(EntityRow.entity_id == task_entity_id)
-
     async with session_factory() as session:
-        result = await session.execute(stmt)
-        dead_letters = list(result.scalars().all())
+        dead_letters = await _select_dead_lettered_tasks(
+            session, dossier_id=dossier_id, task_entity_id=task_entity_id,
+        )
 
     if not dead_letters:
         logger.info("requeue_dead_letters: no dead-lettered tasks match")
