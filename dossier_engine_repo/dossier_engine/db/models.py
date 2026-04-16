@@ -160,6 +160,7 @@ class AgentRow(Base):
     id = Column(Text, primary_key=True)
     type = Column(Text, nullable=False)
     name = Column(Text, nullable=True)
+    uri = Column(Text, nullable=True)  # canonical external IRI for this agent
     properties = Column(JSON_DB, nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
@@ -520,7 +521,7 @@ class Repository:
 
     # --- Agent ---
 
-    async def ensure_agent(self, agent_id: str, agent_type: str, name: str | None, properties: dict | None):
+    async def ensure_agent(self, agent_id: str, agent_type: str, name: str | None, properties: dict | None, uri: str | None = None):
         # Fast path: already ensured this session, nothing to do. This is
         # safe because agents are effectively immutable for the purposes of
         # a single activity execution — name/properties changes are rare
@@ -532,11 +533,13 @@ class Repository:
             # Only write if something actually changed. Bumping `updated_at`
             # on every call was pure overhead — the field has no semantic
             # meaning for the engine.
-            if existing.name != name or existing.properties != properties:
+            if existing.name != name or existing.properties != properties or existing.uri != uri:
                 existing.name = name
                 existing.properties = properties
+                if uri is not None:
+                    existing.uri = uri
                 existing.updated_at = datetime.now(timezone.utc)
         else:
-            row = AgentRow(id=agent_id, type=agent_type, name=name, properties=properties)
+            row = AgentRow(id=agent_id, type=agent_type, name=name, uri=uri, properties=properties)
             self.session.add(row)
         self._ensured_agents.add(agent_id)

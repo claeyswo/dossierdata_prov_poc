@@ -61,6 +61,7 @@ async def create_activity_row(state: ActivityState) -> None:
     """
     await state.repo.ensure_agent(
         state.user.id, state.user.type, state.user.name, state.user.properties,
+        uri=state.user.uri,
     )
 
     state.activity_row = await state.repo.create_activity(

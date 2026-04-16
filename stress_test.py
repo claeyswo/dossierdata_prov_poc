@@ -11,7 +11,7 @@ Usage:
   cd dossier_app && uvicorn main:app --host 0.0.0.0 --port 8000
 
   # Seed 100,000 dossiers directly into the DB (fast, bypasses API):
-  python stress_test.py seed --count 100000 --config dossier_app/dossier_app/config.yaml
+  python stress_test.py seed --count 100000 --config dossier_app_repo/dossier_app/config.yaml
 
   # Write benchmark: 100 dossiers via API, time each step:
   python stress_test.py write --count 100 --base-url http://localhost:8000
@@ -541,7 +541,7 @@ def main():
 
     seed_p = sub.add_parser("seed", help="Seed dossiers directly into DB")
     seed_p.add_argument("--count", type=int, default=1000)
-    seed_p.add_argument("--config", default="dossier_app/dossier_app/config.yaml")
+    seed_p.add_argument("--config", default="dossier_app_repo/dossier_app/config.yaml")
 
     write_p = sub.add_parser("write", help="Write benchmark via API")
     write_p.add_argument("--count", type=int, default=100)

@@ -34,6 +34,7 @@ SYSTEM_USER = User(
     name="Systeem",
     roles=["systeemgebruiker"],
     properties={},
+    uri="https://data.vlaanderen.be/id/agent/system",
 )
 
 
@@ -107,6 +108,7 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
         "name": SYSTEM_USER.name,
         "roles": SYSTEM_USER.roles,
         "properties": SYSTEM_USER.properties,
+        "uri": SYSTEM_USER.uri,
     })
 
     auth_middleware = POCAuthMiddleware(all_poc_users)

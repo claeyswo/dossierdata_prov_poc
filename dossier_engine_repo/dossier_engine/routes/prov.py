@@ -92,11 +92,41 @@ def register_prov_routes(app, registry: PluginRegistry, get_user, global_access:
             # Entity lookup
             entity_by_id = {e.id: e for e in all_entities}
 
+            # Load agent URIs from the agents table for PROV rendering.
+            # The association rows carry agent_id, name, type but not the
+            # canonical URI — that lives on the agent row itself.
+            from ..db.models import AgentRow
+            agent_ids = {a.agent_id for assocs in assoc_by_activity.values() for a in assocs}
+            agent_ids |= {e.attributed_to for e in all_entities if e.attributed_to}
+            agent_rows = {}
+            if agent_ids:
+                agent_result = await session.execute(
+                    select(AgentRow).where(AgentRow.id.in_(agent_ids))
+                )
+                agent_rows = {a.id: a for a in agent_result.scalars().all()}
+
             # Build PROV-JSON using W3C-compliant IRIs
             from ..prov_iris import (
                 prov_prefixes, entity_qname, activity_qname,
                 agent_qname, prov_type_value, agent_type_value,
             )
+
+            def _agent_key(agent_id: str) -> str:
+                """Use the agent's canonical URI if available, otherwise
+                fall back to the dossier-scoped QName."""
+                row = agent_rows.get(agent_id)
+                if row and row.uri:
+                    return row.uri
+                return agent_qname(agent_id)
+
+            def _entity_key(entity) -> str:
+                """Use the actual URI for external entities, otherwise
+                the standard dossier-scoped IRI path."""
+                if entity.type == "external" and entity.content:
+                    ext_uri = entity.content.get("uri")
+                    if ext_uri:
+                        return ext_uri
+                return entity_qname(entity.type, entity.entity_id, entity.id)
 
             prov = {
                 "prefix": prov_prefixes(dossier_id),
@@ -134,13 +164,19 @@ def register_prov_routes(app, registry: PluginRegistry, get_user, global_access:
             agents_seen = set()
             for assocs in assoc_by_activity.values():
                 for assoc in assocs:
-                    agent_key = agent_qname(assoc.agent_id)
-                    if agent_key not in agents_seen:
-                        agents_seen.add(agent_key)
-                        prov["agent"][agent_key] = {
+                    akey = _agent_key(assoc.agent_id)
+                    if akey not in agents_seen:
+                        agents_seen.add(akey)
+                        agent_data = {
                             "prov:label": assoc.agent_name or assoc.agent_id,
                             "prov:type": agent_type_value(assoc.agent_type or "prov:Person"),
                         }
+                        # If the agent has a URI and we're using it as the key,
+                        # also include the internal ID for reference
+                        agent_row = agent_rows.get(assoc.agent_id)
+                        if agent_row and agent_row.uri:
+                            agent_data["oe:agentId"] = assoc.agent_id
+                        prov["agent"][akey] = agent_data
 
             # Activities
             for act in activities:
@@ -165,7 +201,7 @@ def register_prov_routes(app, registry: PluginRegistry, get_user, global_access:
                     assoc_key = f"_:assoc_{assoc.id}"
                     prov["wasAssociatedWith"][assoc_key] = {
                         "prov:activity": act_key,
-                        "prov:agent": agent_qname(assoc.agent_id),
+                        "prov:agent": _agent_key(assoc.agent_id),
                         "prov:hadRole": {
                             "$": assoc.role,
                             "type": "xsd:string",
@@ -176,7 +212,7 @@ def register_prov_routes(app, registry: PluginRegistry, get_user, global_access:
                 for used in used_by_activity.get(act.id, []):
                     entity = entity_by_id.get(used.entity_id)
                     if entity:
-                        ent_key = entity_qname(entity.type, entity.entity_id, entity.id)
+                        ent_key = _entity_key(entity)
                         used_key = f"_:used_{act.id}_{entity.id}"
                         prov["used"][used_key] = {
                             "prov:activity": act_key,
@@ -200,7 +236,7 @@ def register_prov_routes(app, registry: PluginRegistry, get_user, global_access:
 
             # Entities
             for entity in all_entities:
-                ent_key = entity_qname(entity.type, entity.entity_id, entity.id)
+                ent_key = _entity_key(entity)
                 entity_data = {
                     "prov:type": prov_type_value(entity.type),
                     "oe:entityId": str(entity.entity_id),
@@ -226,14 +262,14 @@ def register_prov_routes(app, registry: PluginRegistry, get_user, global_access:
                     attr_key = f"_:attr_{entity.id}"
                     prov["wasAttributedTo"][attr_key] = {
                         "prov:entity": ent_key,
-                        "prov:agent": agent_qname(entity.attributed_to),
+                        "prov:agent": _agent_key(entity.attributed_to),
                     }
 
                 # wasDerivedFrom
                 if entity.derived_from:
                     parent = entity_by_id.get(entity.derived_from)
                     if parent:
-                        parent_key = entity_qname(parent.type, parent.entity_id, parent.id)
+                        parent_key = _entity_key(parent)
                         deriv_key = f"_:deriv_{entity.id}"
                         prov["wasDerivedFrom"][deriv_key] = {
                             "prov:generatedEntity": ent_key,
@@ -570,6 +606,145 @@ def register_prov_routes(app, registry: PluginRegistry, get_user, global_access:
     # Import and register the columns graph
     from .prov_columns import register_columns_graph
     register_columns_graph(app, registry, get_user, global_access)
+
+    # Archive endpoint
+    from fastapi.responses import Response as RawResponse
+
+    @app.get(
+        "/dossiers/{dossier_id}/archive",
+        tags=["prov"],
+        summary="Dossier archive (PDF)",
+        description=(
+            "Generate a self-contained PDF/A archive of the dossier. "
+            "Includes a cover page, provenance timeline (static SVG), "
+            "entity content, and the raw PROV-JSON as an embedded attachment. "
+            "Suitable for long-term archival."
+        ),
+    )
+    async def get_dossier_archive(
+        dossier_id: UUID,
+        user: User = Depends(get_user),
+    ):
+        import tempfile, os
+        session_factory = get_session_factory()
+        async with session_factory() as session, session.begin():
+            repo = Repository(session)
+
+            dossier = await repo.get_dossier(dossier_id)
+            if not dossier:
+                raise HTTPException(404, detail="Dossier not found")
+
+            # Check access
+            await check_dossier_access(repo, dossier_id, user, global_access)
+
+            # Build PROV-JSON (reuse the same logic as the /prov endpoint)
+            plugin = registry.get(dossier.workflow)
+
+            # Inline a minimal PROV-JSON build for embedding
+            from ..prov_iris import prov_prefixes, entity_qname, activity_qname, agent_qname, prov_type_value, agent_type_value
+            from ..db.models import AgentRow
+
+            activities_list = await repo.get_activities_for_dossier(dossier_id)
+            all_ent_result = await session.execute(
+                select(EntityRow).where(EntityRow.dossier_id == dossier_id).order_by(EntityRow.created_at)
+            )
+            all_ents = list(all_ent_result.scalars().all())
+            act_ids = [a.id for a in activities_list]
+            assoc_r = await session.execute(select(AssociationRow).where(AssociationRow.activity_id.in_(act_ids)))
+            assoc_map = {}
+            for a in assoc_r.scalars().all():
+                assoc_map.setdefault(a.activity_id, []).append(a)
+            used_r = await session.execute(select(UsedRow).where(UsedRow.activity_id.in_(act_ids)))
+            used_map = {}
+            for u in used_r.scalars().all():
+                used_map.setdefault(u.activity_id, []).append(u)
+            ent_by_id = {e.id: e for e in all_ents}
+
+            # Agent URIs
+            a_ids = {a.agent_id for aa in assoc_map.values() for a in aa}
+            a_ids |= {e.attributed_to for e in all_ents if e.attributed_to}
+            a_rows = {}
+            if a_ids:
+                ar = await session.execute(select(AgentRow).where(AgentRow.id.in_(a_ids)))
+                a_rows = {a.id: a for a in ar.scalars().all()}
+
+            def _akey(aid):
+                r = a_rows.get(aid)
+                return r.uri if r and r.uri else agent_qname(aid)
+
+            def _ekey(e):
+                if e.type == "external" and e.content:
+                    u = e.content.get("uri")
+                    if u:
+                        return u
+                return entity_qname(e.type, e.entity_id, e.id)
+
+            prov = {"prefix": prov_prefixes(dossier_id), "entity": {}, "activity": {}, "agent": {}, "wasGeneratedBy": {}, "used": {}, "wasAssociatedWith": {}, "wasAttributedTo": {}, "wasDerivedFrom": {}, "wasInformedBy": {}}
+
+            agents_seen = set()
+            for aa in assoc_map.values():
+                for a in aa:
+                    ak = _akey(a.agent_id)
+                    if ak not in agents_seen:
+                        agents_seen.add(ak)
+                        ad = {"prov:label": a.agent_name or a.agent_id, "prov:type": agent_type_value(a.agent_type or "prov:Person")}
+                        ar_row = a_rows.get(a.agent_id)
+                        if ar_row and ar_row.uri:
+                            ad["oe:agentId"] = a.agent_id
+                        prov["agent"][ak] = ad
+
+            for act in activities_list:
+                ak2 = activity_qname(act.id)
+                prov["activity"][ak2] = {"prov:type": prov_type_value(act.type)}
+                if act.started_at:
+                    prov["activity"][ak2]["prov:startedAtTime"] = {"$": act.started_at.isoformat(), "type": "xsd:dateTime"}
+                for a in assoc_map.get(act.id, []):
+                    prov["wasAssociatedWith"][f"_:assoc_{a.id}"] = {"prov:activity": ak2, "prov:agent": _akey(a.agent_id), "prov:hadRole": {"$": a.role, "type": "xsd:string"}}
+                for u in used_map.get(act.id, []):
+                    e = ent_by_id.get(u.entity_id)
+                    if e:
+                        prov["used"][f"_:used_{act.id}_{e.id}"] = {"prov:activity": ak2, "prov:entity": _ekey(e)}
+                if act.informed_by:
+                    ibs = str(act.informed_by)
+                    ik = ibs if ibs.startswith("http") else activity_qname(act.informed_by)
+                    prov["wasInformedBy"][f"_:informed_{act.id}"] = {"prov:informedActivity": ak2, "prov:informantActivity": ik}
+
+            for e in all_ents:
+                ek = _ekey(e)
+                ed = {"prov:type": prov_type_value(e.type), "oe:entityId": str(e.entity_id), "oe:versionId": str(e.id)}
+                if e.created_at:
+                    ed["prov:generatedAtTime"] = {"$": e.created_at.isoformat(), "type": "xsd:dateTime"}
+                prov["entity"][ek] = ed
+                if e.generated_by:
+                    prov["wasGeneratedBy"][f"_:gen_{e.id}"] = {"prov:entity": ek, "prov:activity": activity_qname(e.generated_by)}
+                if e.attributed_to:
+                    prov["wasAttributedTo"][f"_:attr_{e.id}"] = {"prov:entity": ek, "prov:agent": _akey(e.attributed_to)}
+                if e.derived_from:
+                    p = ent_by_id.get(e.derived_from)
+                    if p:
+                        prov["wasDerivedFrom"][f"_:deriv_{e.id}"] = {"prov:generatedEntity": ek, "prov:usedEntity": _ekey(p)}
+
+            prov = {k: v for k, v in prov.items() if v}
+
+            from ..archive import generate_archive
+            file_storage_root = app.state.config.get("file_service", {}).get("storage_root")
+            pdf_bytes = await generate_archive(
+                session, dossier_id, dossier, registry, prov,
+                file_storage_root=file_storage_root,
+            )
+
+            # Write to temp file to avoid bytearray encoding issues
+            tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+            tmp.write(bytes(pdf_bytes) if isinstance(pdf_bytes, bytearray) else pdf_bytes)
+            tmp.close()
+
+            from fastapi.responses import FileResponse
+            return FileResponse(
+                tmp.name,
+                media_type="application/pdf",
+                filename=f"dossier-{str(dossier_id)[:8]}-archief.pdf",
+                background=None,  # don't delete in background
+            )
 
 
 def _build_graph_html(dossier_id: str, workflow: str, nodes_json: str, edges_json: str) -> str:

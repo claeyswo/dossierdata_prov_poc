@@ -169,10 +169,10 @@ class TestParseLocalTriggerId:
 
     def test_cross_dossier_uri_returns_none(self):
         """`informed_by` can carry a cross-dossier IRI like
-        `https://data.vlaanderen.be/id/dossier/{id}/activiteiten/{id}`.
+        `https://data.vlaanderen.be/id/dossier/{id}/activities/{id}`.
         That's not a local reference and should return None so the
         phase skips trigger-scope resolution for cross-dossier chains."""
-        uri = "https://data.vlaanderen.be/id/dossier/11111111-1111-1111-1111-111111111111/activiteiten/22222222-2222-2222-2222-222222222222"
+        uri = "https://data.vlaanderen.be/id/dossier/11111111-1111-1111-1111-111111111111/activities/22222222-2222-2222-2222-222222222222"
         assert _parse_local_trigger_id(uri) is None
 
     def test_garbage_string_returns_none(self):

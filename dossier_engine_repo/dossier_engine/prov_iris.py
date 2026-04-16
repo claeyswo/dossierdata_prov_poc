@@ -10,25 +10,25 @@ Internal format (`type/entity_id@version_id`) stays unchanged in
 the database and the engine. This module only translates at the
 PROV rendering boundary.
 
-IRI structure:
+IRI structure (path segments match API routes for resolvability):
 
     Base namespace (per-dossier):
         https://data.vlaanderen.be/id/dossier/{dossier_id}/
 
     Entity (versioned):
-        dossier:entiteiten/{bare_type}/{entity_id}/{version_id}
-        → https://data.vlaanderen.be/id/dossier/{did}/entiteiten/aanvraag/{eid}/{vid}
+        dossier:entities/{type}/{entity_id}/{version_id}
+        → https://data.vlaanderen.be/id/dossier/{did}/entities/oe:aanvraag/{eid}/{vid}
 
     Activity:
-        dossier:activiteiten/{activity_id}
-        → https://data.vlaanderen.be/id/dossier/{did}/activiteiten/{aid}
+        dossier:activities/{activity_id}
+        → https://data.vlaanderen.be/id/dossier/{did}/activities/{aid}
 
     Agent:
-        dossier:agenten/{agent_id}
-        → https://data.vlaanderen.be/id/dossier/{did}/agenten/{agent_id}
+        dossier:agents/{agent_id}
+        → https://data.vlaanderen.be/id/dossier/{did}/agents/{agent_id}
 
     Cross-dossier (full IRI, no prefix):
-        https://data.vlaanderen.be/id/dossier/{other_did}/activiteiten/{aid}
+        https://data.vlaanderen.be/id/dossier/{other_did}/activities/{aid}
 
 Namespace prefixes:
     prov:    http://www.w3.org/ns/prov#
@@ -83,33 +83,28 @@ def _type_ns(entity_type: str) -> str:
 def entity_qname(entity_type: str, entity_id: UUID | str, version_id: UUID | str) -> str:
     """Build a PROV-JSON qualified entity key.
 
-    Uses the dossier: prefix, so expands to a full IRI under the
-    dossier's base namespace.
+    Path segments match the API route structure so the expanded IRI
+    is resolvable when served at the canonical base URL.
 
     Example:
         entity_qname("oe:aanvraag", eid, vid)
-        → "dossier:entiteiten/aanvraag/{eid}/{vid}"
+        → "dossier:entities/oe:aanvraag/{eid}/{vid}"
     """
-    bare = _strip_ns(entity_type)
-    return f"dossier:entiteiten/{bare}/{entity_id}/{version_id}"
+    return f"dossier:entities/{entity_type}/{entity_id}/{version_id}"
 
 
 def entity_full_iri(dossier_id: UUID | str, entity_type: str, entity_id: UUID | str, version_id: UUID | str) -> str:
-    """Build a full (non-prefixed) entity IRI.
-
-    Used when referencing entities across dossiers.
-    """
-    bare = _strip_ns(entity_type)
+    """Build a full (non-prefixed) entity IRI."""
     base = DOSSIER_BASE.format(dossier_id=dossier_id)
-    return f"{base}entiteiten/{bare}/{entity_id}/{version_id}"
+    return f"{base}entities/{entity_type}/{entity_id}/{version_id}"
 
 
 def activity_qname(activity_id: UUID | str) -> str:
     """Build a PROV-JSON qualified activity key.
 
-    Example: "dossier:activiteiten/{aid}"
+    Example: "dossier:activities/{aid}"
     """
-    return f"dossier:activiteiten/{activity_id}"
+    return f"dossier:activities/{activity_id}"
 
 
 def activity_full_iri(dossier_id: UUID | str, activity_id: UUID | str) -> str:
@@ -118,15 +113,15 @@ def activity_full_iri(dossier_id: UUID | str, activity_id: UUID | str) -> str:
     Used for cross-dossier informed_by references.
     """
     base = DOSSIER_BASE.format(dossier_id=dossier_id)
-    return f"{base}activiteiten/{activity_id}"
+    return f"{base}activities/{activity_id}"
 
 
 def agent_qname(agent_id: str) -> str:
     """Build a PROV-JSON qualified agent key.
 
-    Example: "dossier:agenten/{agent_id}"
+    Example: "dossier:agents/{agent_id}"
     """
-    return f"dossier:agenten/{agent_id}"
+    return f"dossier:agents/{agent_id}"
 
 
 def prov_type_value(entity_type: str) -> dict:

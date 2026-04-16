@@ -18,6 +18,7 @@ class User:
     name: str
     roles: list[str]
     properties: dict[str, str]
+    uri: str | None = None  # canonical external IRI for this agent
 
 
 class POCAuthMiddleware:
@@ -32,6 +33,7 @@ class POCAuthMiddleware:
                 name=u["name"],
                 roles=u.get("roles", []),
                 properties=u.get("properties", {}),
+                uri=u.get("uri"),
             )
 
     async def __call__(self, request: Request) -> User:

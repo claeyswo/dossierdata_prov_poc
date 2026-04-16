@@ -30,8 +30,8 @@ def main():
     )
     parser.add_argument(
         "--config",
-        default="dossier_app/dossier_app/config.yaml",
-        help="Path to config.yaml (default: dossier_app/dossier_app/config.yaml)",
+        default="dossier_app_repo/dossier_app/config.yaml",
+        help="Path to config.yaml (default: dossier_app_repo/dossier_app/config.yaml)",
     )
     parser.add_argument(
         "--dry-run",
