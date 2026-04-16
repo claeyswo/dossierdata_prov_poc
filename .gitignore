@@ -2,3 +2,4 @@ dossiers.db
 __pycache__/
 *.py[codz]
 *$py.class
+*.egg-info

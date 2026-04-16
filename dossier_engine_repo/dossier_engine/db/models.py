@@ -392,7 +392,6 @@ class Repository:
         # Uses ROW_NUMBER() instead of MAX(created_at) to avoid
         # duplicates when two versions share the same timestamp
         # (common within a single activity).
-        from sqlalchemy import over, literal_column
         numbered = (
             select(
                 EntityRow,

@@ -1,9 +1,0 @@
-pyproject.toml
-dossier_common/__init__.py
-dossier_common/signing.py
-dossier_common.egg-info/PKG-INFO
-dossier_common.egg-info/SOURCES.txt
-dossier_common.egg-info/dependency_links.txt
-dossier_common.egg-info/requires.txt
-dossier_common.egg-info/top_level.txt
-tests/test_signing.py

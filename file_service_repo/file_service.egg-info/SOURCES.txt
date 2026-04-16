@@ -1,9 +1,0 @@
-pyproject.toml
-file_service/__init__.py
-file_service/app.py
-file_service.egg-info/PKG-INFO
-file_service.egg-info/SOURCES.txt
-file_service.egg-info/dependency_links.txt
-file_service.egg-info/requires.txt
-file_service.egg-info/top_level.txt
-tests/test_file_service.py
