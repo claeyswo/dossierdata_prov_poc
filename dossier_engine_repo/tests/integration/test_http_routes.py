@@ -104,7 +104,7 @@ def _build_test_app() -> FastAPI:
         {
             "id": "alice", "username": "alice",
             "type": "natuurlijk_persoon", "name": "Alice",
-            "roles": [], "properties": {},
+            "roles": ["oe:reader"], "properties": {},
         },
         {
             "id": "admin", "username": "admin",
@@ -123,7 +123,10 @@ def _build_test_app() -> FastAPI:
     }
     register_routes(
         app, registry, auth,
-        global_access=[{"role": "oe:admin", "activity_view": "all"}],
+        global_access=[
+            {"role": "oe:admin", "view": "all", "activity_view": "all"},
+            {"role": "oe:reader", "view": "all", "activity_view": "all"},
+        ],
     )
     return app
 

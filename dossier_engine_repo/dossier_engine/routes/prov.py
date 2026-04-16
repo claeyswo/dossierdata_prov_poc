@@ -144,20 +144,32 @@ def register_prov_routes(app, registry: PluginRegistry, get_user, global_access:
 
             # Filter activities by activity_view_mode
             visible_entity_ids = set(e.id for e in all_entities)
-            if activity_view_mode != "all":
+            # Unwrap dict form if present.
+            include_types: set = set()
+            base_mode = activity_view_mode
+            if isinstance(activity_view_mode, dict):
+                base_mode = activity_view_mode.get("mode", "own")
+                include_types = set(activity_view_mode.get("include", []))
+
+            if base_mode != "all":
                 filtered_activities = []
                 for act in activities:
-                    if activity_view_mode == "own":
+                    # Include-list always wins.
+                    if include_types and act.type in include_types:
+                        filtered_activities.append(act)
+                    elif base_mode == "own":
                         assocs = assoc_by_activity.get(act.id, [])
                         if any(a.agent_id == user.id for a in assocs):
                             filtered_activities.append(act)
-                    elif activity_view_mode == "related":
+                    elif base_mode == "related":
                         assocs = assoc_by_activity.get(act.id, [])
                         used = used_by_activity.get(act.id, [])
                         is_own = any(a.agent_id == user.id for a in assocs)
                         touches_visible = any(u.entity_id in visible_entity_ids for u in used)
                         if is_own or touches_visible:
                             filtered_activities.append(act)
+                    elif isinstance(base_mode, list) and act.type in base_mode:
+                        filtered_activities.append(act)
                 activities = filtered_activities
 
             # Agents (deduplicated)
@@ -372,17 +384,27 @@ def register_prov_routes(app, registry: PluginRegistry, get_user, global_access:
             # Apply activity_view access filtering
             visible_entity_version_ids = set(e.id for e in all_entities)
 
-            if activity_view_mode != "all":
+            # Unwrap dict form if present.
+            include_types2: set = set()
+            base_mode2 = activity_view_mode
+            if isinstance(activity_view_mode, dict):
+                base_mode2 = activity_view_mode.get("mode", "own")
+                include_types2 = set(activity_view_mode.get("include", []))
+
+            if base_mode2 != "all":
                 for act in activities:
                     if act.id in skipped_activity_ids:
                         continue
                     visible = False
-                    if activity_view_mode == "own":
+                    # Include-list always wins.
+                    if include_types2 and act.type in include_types2:
+                        visible = True
+                    elif base_mode2 == "own":
                         for assoc in assoc_by_activity.get(act.id, []):
                             if assoc.agent_id == user.id:
                                 visible = True
                                 break
-                    elif activity_view_mode == "related":
+                    elif base_mode2 == "related":
                         for used in used_by_activity.get(act.id, []):
                             if used.entity_id in visible_entity_version_ids:
                                 visible = True
@@ -392,6 +414,8 @@ def register_prov_routes(app, registry: PluginRegistry, get_user, global_access:
                                 if assoc.agent_id == user.id:
                                     visible = True
                                     break
+                    elif isinstance(base_mode2, list) and act.type in base_mode2:
+                        visible = True
                     if not visible:
                         skipped_activity_ids.add(act.id)
 

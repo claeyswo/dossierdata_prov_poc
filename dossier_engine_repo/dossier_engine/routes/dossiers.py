@@ -253,29 +253,63 @@ async def _activity_visible(
     repo: Repository,
     activity,
     user: User,
-    activity_view_mode: str,
+    activity_view_mode: str | list[str] | dict,
     visible_entity_version_ids: set,
 ) -> bool:
     """Decide whether the calling user can see this activity in the
     dossier's activity log.
 
     Modes:
-    * `all` — show every activity.
-    * `own` — show only activities where the user is the agent.
-    * `related` — show activities that touched visible entities, plus
-      the user's own activities.
+
+    * ``"all"`` — show every activity.
+    * ``"own"`` — show only activities where the user is the agent.
+    * ``"related"`` — show activities that touched visible entities,
+      plus the user's own activities.
+    * ``list[str]`` — show only activities whose type is in the list.
+    * ``dict`` — combined mode. Requires ``mode`` (one of the string
+      sentinels above) and optional ``include`` (a list of activity
+      type names that are always visible regardless of the base mode).
+
+      Example::
+
+          activity_view:
+            mode: "own"
+            include: ["neemBeslissing", "neemOntvankelijkheidsbeslissing"]
+
+      This means "show my own activities, PLUS always show any
+      neemBeslissing or neemOntvankelijkheidsbeslissing regardless
+      of who performed it."
     """
-    if activity_view_mode == "all":
+    # Unwrap dict form: extract the include-list (if any) and the
+    # base mode, then check includes first (short-circuits the more
+    # expensive agent/related queries for the named types).
+    include: set[str] = set()
+    base_mode = activity_view_mode
+    if isinstance(activity_view_mode, dict):
+        base_mode = activity_view_mode.get("mode", "own")
+        include = set(activity_view_mode.get("include", []))
+
+    # Include-list always wins: if the activity type is listed,
+    # show it unconditionally.
+    if include and activity.type in include:
         return True
 
-    if activity_view_mode == "own":
+    # Fall through to the base mode logic.
+    if base_mode == "all":
+        return True
+
+    if base_mode == "own":
         return await _user_is_agent(session, activity.id, user.id)
 
-    if activity_view_mode == "related":
+    if base_mode == "related":
         used_ids = await repo.get_used_entity_ids_for_activity(activity.id)
         if used_ids & visible_entity_version_ids:
             return True
         return await _user_is_agent(session, activity.id, user.id)
+
+    # List of activity type names — match on the activity's type.
+    if isinstance(base_mode, list):
+        return activity.type in base_mode
 
     return False
 

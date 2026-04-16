@@ -29,7 +29,8 @@ audit:
 # Omit "view" entirely for full access.
 global_access:
   - role: "systeemgebruiker"
+    view: "all"
     activity_view: "all"
-    # no "view" key = see everything
   - role: "beheerder"
+    view: "all"
     activity_view: "all"

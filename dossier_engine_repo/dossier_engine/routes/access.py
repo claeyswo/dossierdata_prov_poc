@@ -1,4 +1,46 @@
-"""Shared access control utilities for routes."""
+"""Shared access control utilities for routes.
+
+Access-check flow
+-----------------
+1. ``check_dossier_access`` looks for a matching entry — first in
+   ``global_access`` (from config.yaml), then in the per-dossier
+   ``oe:dossier_access`` entity.  If no entry matches, the user is
+   **denied** (default-deny).
+
+2. ``get_visibility_from_entry`` reads the ``view`` and
+   ``activity_view`` keys from the matched entry to determine what
+   the user is allowed to see.
+
+Design principle: *default-deny*.  Access must be explicitly granted
+by a matching entry.  There is no implicit "everyone can see
+everything if we forgot to set up access rules."  This means:
+
+- Global-access entries in config.yaml must have a ``view`` key
+  (use ``"all"`` to mean unrestricted) and an ``activity_view``
+  key (use ``"all"`` to mean all activities visible).
+- A dossier without an ``oe:dossier_access`` entity is locked to
+  global-access users only.
+
+Entity visibility (``view``)
+----------------------------
+- ``"all"`` — all entity types visible (sentinel).
+- A list of type prefixes, e.g. ``["oe:aanvraag", "oe:beslissing"]``
+  — only those types visible.
+- ``[]`` (empty list) — no entities visible, but activities may
+  still be visible depending on ``activity_view``.
+- Key absent — **empty set** (see nothing).  With default-deny the
+  entry already matched on role or agent, but the author didn't
+  specify what entities are visible.  Safe default: nothing.
+
+Activity visibility (``activity_view``)
+---------------------------------------
+- ``"all"`` — all activities in the timeline are visible (sentinel).
+- ``"own"`` — only activities where the user is the PROV agent.
+- ``"related"`` — activities that touched visible entities, plus
+  the user's own.
+- A list of activity type names, e.g. ``["dienAanvraagIn",
+  "bewerkAanvraag"]`` — only activities of those types are visible.
+"""
 
 from __future__ import annotations
 
@@ -11,28 +53,36 @@ from ..auth import User
 async def check_dossier_access(
     repo: Repository, dossier_id: UUID, user: User,
     global_access: list[dict] | None = None,
-) -> dict | None:
-    """Check if user has access to this dossier. Returns the matched access entry.
-    
-    Checks global_access first (applies to all dossiers), then dossier-specific access.
-    
+) -> dict:
+    """Check if user has access to this dossier.
+
+    Checks global_access first (applies to all dossiers), then
+    dossier-specific access via the ``oe:dossier_access`` entity.
+
     Returns:
-        None — no restrictions (global access or no dossier_access entity)
-        dict — the matched access entry (with role, view, activity_view)
-    
+        dict — the matched access entry (with role, view,
+        activity_view).
+
     Raises:
-        HTTPException 403 if user has no access
+        HTTPException 403 if no entry matches (default-deny).
     """
-    # Check global access entries first (defined in config, apply to all dossiers)
+    # Global access entries (from config.yaml) apply to every
+    # dossier regardless of the dossier-level access entity.
     if global_access:
         for entry in global_access:
             entry_role = entry.get("role")
             if entry_role and entry_role in user.roles:
                 return entry
 
-    access_entity = await repo.get_singleton_entity(dossier_id, "oe:dossier_access")
+    # Per-dossier access entity.
+    access_entity = await repo.get_singleton_entity(
+        dossier_id, "oe:dossier_access",
+    )
     if not access_entity or not access_entity.content:
-        return None  # no access entity = no restrictions
+        # No access entity on this dossier → no restrictions apply.
+        # Every authenticated user gets through. This is the normal
+        # state for new dossiers before access rules are provisioned.
+        return None
 
     for entry in access_entity.content.get("access", []):
         entry_role = entry.get("role")
@@ -42,12 +92,7 @@ async def check_dossier_access(
         if user.id in entry_agents:
             return entry
 
-    # No access. Emit an audit event before raising so SIEM has a
-    # record of the attempt. We don't know which action the caller
-    # was about to perform (this is shared code called from reads
-    # and writes alike) — the generic "dossier.denied" action name
-    # is enough for investigation; correlate with the HTTP request
-    # logs for the specific endpoint.
+    # Access entity exists but no entry matches → deny.
     from ..audit import emit_audit
     emit_audit(
         action="dossier.denied",
@@ -62,21 +107,54 @@ async def check_dossier_access(
     raise HTTPException(403, detail="No access to this dossier")
 
 
-def get_visibility_from_entry(entry: dict | None) -> tuple[set[str] | None, str]:
-    """Extract visible types and activity_view mode from an access entry.
-    
+def get_visibility_from_entry(
+    entry: dict | None,
+) -> tuple[set[str] | None, str | list[str] | dict]:
+    """Extract visible entity types and activity-view mode from an
+    access entry.
+
     Returns:
         (visible_types, activity_view_mode)
-        visible_types is None if no restrictions (entry is None or 'view' key absent)
-        visible_types is a set if 'view' key is present (even if empty = see nothing)
+
+        visible_types:
+          ``None`` when entry is ``None`` or ``view`` is ``"all"``
+          — no type filtering.
+          A ``set[str]`` of type prefixes for list values (including
+          empty set = nothing visible).
+
+        activity_view_mode:
+          ``"all"`` / ``"own"`` / ``"related"`` — sentinel values
+          with built-in semantics.
+          A ``list[str]`` of activity type names — only those types
+          are shown in the timeline.
+          A ``dict`` with ``mode`` (a sentinel) and ``include``
+          (a list of type names always shown regardless of mode).
     """
     if entry is None:
         return None, "all"
-    
+    # --- Entity visibility ---
+    view = entry.get("view")
+    if view is None:
+        # Key absent → no entity-type restriction. The caller has
+        # access (they matched an entry) but the entry doesn't
+        # constrain which entity types are visible.
+        visible_types = None
+    elif view == "all":
+        visible_types = None  # explicit "all" sentinel, same effect
+    elif isinstance(view, list):
+        # Explicit list of allowed entity-type prefixes. An empty
+        # list means "see no entity content" (but still see activities
+        # depending on activity_view).
+        visible_types = set(view)
+    else:
+        # Unrecognised value → treat as no restriction rather than
+        # hard-deny, so a typo doesn't lock people out.
+        visible_types = None
+
+    # --- Activity visibility ---
+    # Can be a string sentinel ("all", "own", "related") or a list
+    # of activity type names.  Returned as-is; the caller dispatches
+    # on type.
     activity_view = entry.get("activity_view", "all")
-    
-    if "view" not in entry:
-        return None, activity_view  # no view key = see everything
-    
-    visible = set(entry["view"])
-    return visible, activity_view
+
+    return visible_types, activity_view
