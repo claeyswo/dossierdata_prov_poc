@@ -201,8 +201,8 @@ class TestProvJson:
         assert "entity" in prov
         entity_keys = list(prov["entity"].keys())
         assert len(entity_keys) >= 1
-        # The key contains the entity type and IDs
-        assert any("oe:aanvraag" in k for k in entity_keys)
+        # The key contains the entity type (bare, without namespace prefix)
+        assert any("entiteiten/aanvraag/" in k for k in entity_keys)
 
         # Activity section
         assert "activity" in prov

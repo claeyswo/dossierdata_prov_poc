@@ -653,8 +653,9 @@ async def _process_cross_dossier(
         raise ValueError(f"Target activity not found: {target_activity_type}")
 
     source_uri = f"urn:dossier:{dossier_id}"
+    from .prov_iris import activity_full_iri
     informed_by_uri = (
-        f"urn:dossier:{dossier_id}/activity/{task.generated_by}"
+        activity_full_iri(dossier_id, task.generated_by)
         if task.generated_by else None
     )
 
@@ -682,7 +683,7 @@ async def _process_cross_dossier(
     )
     await repo.session.flush()
 
-    result_uri = f"urn:dossier:{target_dossier_id}/activity/{result_activity_id}"
+    result_uri = activity_full_iri(target_dossier_id, result_activity_id)
     await complete_task(
         repo, plugin, dossier_id, task,
         status="completed",

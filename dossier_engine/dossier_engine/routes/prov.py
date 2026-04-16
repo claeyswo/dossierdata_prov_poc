@@ -53,7 +53,6 @@ def register_prov_routes(app, registry: PluginRegistry, get_user, global_access:
                 raise HTTPException(404, detail="Dossier not found")
 
             plugin = registry.get(dossier.workflow)
-            prefix = "oe"
 
             # Check access + determine visibility
             access_entry = await check_dossier_access(repo, dossier_id, user, global_access)
@@ -93,14 +92,14 @@ def register_prov_routes(app, registry: PluginRegistry, get_user, global_access:
             # Entity lookup
             entity_by_id = {e.id: e for e in all_entities}
 
-            # Build PROV-JSON
+            # Build PROV-JSON using W3C-compliant IRIs
+            from ..prov_iris import (
+                prov_prefixes, entity_qname, activity_qname,
+                agent_qname, prov_type_value, agent_type_value,
+            )
+
             prov = {
-                "prefix": {
-                    "prov": "http://www.w3.org/ns/prov#",
-                    "xsd": "http://www.w3.org/2001/XMLSchema#",
-                    prefix: f"https://data.vlaanderen.be/ns/{prefix}/",
-                    "dossier": f"https://data.vlaanderen.be/id/dossier/{dossier_id}/",
-                },
+                "prefix": prov_prefixes(dossier_id),
                 "entity": {},
                 "activity": {},
                 "agent": {},
@@ -135,19 +134,19 @@ def register_prov_routes(app, registry: PluginRegistry, get_user, global_access:
             agents_seen = set()
             for assocs in assoc_by_activity.values():
                 for assoc in assocs:
-                    agent_key = f"{prefix}:agent/{assoc.agent_id}"
+                    agent_key = agent_qname(assoc.agent_id)
                     if agent_key not in agents_seen:
                         agents_seen.add(agent_key)
                         prov["agent"][agent_key] = {
                             "prov:label": assoc.agent_name or assoc.agent_id,
-                            "prov:type": {"$": assoc.agent_type or "prov:Person", "type": "xsd:QName"},
+                            "prov:type": agent_type_value(assoc.agent_type or "prov:Person"),
                         }
 
             # Activities
             for act in activities:
-                act_key = f"dossier:activiteit/{act.id}"
+                act_key = activity_qname(act.id)
                 act_data = {
-                    f"{prefix}:type": act.type,
+                    "prov:type": prov_type_value(act.type),
                 }
                 if act.started_at:
                     act_data["prov:startedAtTime"] = {
@@ -166,7 +165,7 @@ def register_prov_routes(app, registry: PluginRegistry, get_user, global_access:
                     assoc_key = f"_:assoc_{assoc.id}"
                     prov["wasAssociatedWith"][assoc_key] = {
                         "prov:activity": act_key,
-                        "prov:agent": f"{prefix}:agent/{assoc.agent_id}",
+                        "prov:agent": agent_qname(assoc.agent_id),
                         "prov:hadRole": {
                             "$": assoc.role,
                             "type": "xsd:string",
@@ -177,60 +176,67 @@ def register_prov_routes(app, registry: PluginRegistry, get_user, global_access:
                 for used in used_by_activity.get(act.id, []):
                     entity = entity_by_id.get(used.entity_id)
                     if entity:
-                        entity_key = f"{prefix}:{entity.type}/{entity.entity_id}@{entity.id}"
+                        ent_key = entity_qname(entity.type, entity.entity_id, entity.id)
                         used_key = f"_:used_{act.id}_{entity.id}"
                         prov["used"][used_key] = {
                             "prov:activity": act_key,
-                            "prov:entity": entity_key,
+                            "prov:entity": ent_key,
                         }
 
                 # wasInformedBy
                 if act.informed_by:
                     inform_key = f"_:informed_{act.id}"
+                    informed_by_str = str(act.informed_by)
+                    if informed_by_str.startswith("http"):
+                        # Cross-dossier: full IRI, no prefix
+                        informant_key = informed_by_str
+                    else:
+                        # Local activity UUID
+                        informant_key = activity_qname(act.informed_by)
                     prov["wasInformedBy"][inform_key] = {
                         "prov:informedActivity": act_key,
-                        "prov:informantActivity": f"dossier:activiteit/{act.informed_by}",
+                        "prov:informantActivity": informant_key,
                     }
 
             # Entities
             for entity in all_entities:
-                entity_key = f"{prefix}:{entity.type}/{entity.entity_id}@{entity.id}"
+                ent_key = entity_qname(entity.type, entity.entity_id, entity.id)
                 entity_data = {
-                    f"{prefix}:type": entity.type,
-                    f"{prefix}:entityId": str(entity.entity_id),
-                    f"{prefix}:versionId": str(entity.id),
+                    "prov:type": prov_type_value(entity.type),
+                    "oe:entityId": str(entity.entity_id),
+                    "oe:versionId": str(entity.id),
                 }
                 if entity.created_at:
                     entity_data["prov:generatedAtTime"] = {
                         "$": entity.created_at.isoformat(),
                         "type": "xsd:dateTime",
                     }
-                prov["entity"][entity_key] = entity_data
+                prov["entity"][ent_key] = entity_data
 
-                # wasGeneratedBy (skip for external entities with no generating activity)
+                # wasGeneratedBy
                 if entity.generated_by:
                     gen_key = f"_:gen_{entity.id}"
                     prov["wasGeneratedBy"][gen_key] = {
-                        "prov:entity": entity_key,
-                        "prov:activity": f"dossier:activiteit/{entity.generated_by}",
+                        "prov:entity": ent_key,
+                        "prov:activity": activity_qname(entity.generated_by),
                     }
 
                 # wasAttributedTo
                 if entity.attributed_to:
                     attr_key = f"_:attr_{entity.id}"
                     prov["wasAttributedTo"][attr_key] = {
-                        "prov:entity": entity_key,
-                        "prov:agent": f"{prefix}:agent/{entity.attributed_to}",
+                        "prov:entity": ent_key,
+                        "prov:agent": agent_qname(entity.attributed_to),
                     }
 
                 # wasDerivedFrom
                 if entity.derived_from:
                     parent = entity_by_id.get(entity.derived_from)
                     if parent:
-                        parent_key = f"{prefix}:{parent.type}/{parent.entity_id}@{parent.id}"
+                        parent_key = entity_qname(parent.type, parent.entity_id, parent.id)
                         deriv_key = f"_:deriv_{entity.id}"
                         prov["wasDerivedFrom"][deriv_key] = {
-                            "prov:generatedEntity": entity_key,
+                            "prov:generatedEntity": ent_key,
                             "prov:usedEntity": parent_key,
                         }
 
