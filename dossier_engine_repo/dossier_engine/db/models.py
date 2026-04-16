@@ -47,7 +47,7 @@ class DossierRow(Base):
     id = Column(UUID_DB(), primary_key=True)
     workflow = Column(Text, nullable=False)
     cached_status = Column(Text, nullable=True)  # denormalized, updated per activity
-    eligible_activities = Column(Text, nullable=True)  # JSON list of activity names, updated per activity
+    eligible_activities = Column(JSON_DB, nullable=True)  # JSON list of activity names, updated per activity
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     activities = relationship("ActivityRow", back_populates="dossier", order_by="ActivityRow.started_at")
@@ -202,7 +202,7 @@ class AgentRow(Base):
 class Repository:
     """Database operations. All writes are INSERTs (append-only)."""
 
-    def __init__(self, session: Session):
+    def __init__(self, session: AsyncSession):
         self.session = session
         # Session-scoped cache: agents that have already been ensured in this
         # session. Lets `ensure_agent` short-circuit after the first call per
@@ -388,20 +388,26 @@ class Repository:
         return result.scalar_one_or_none()
 
     async def get_all_latest_entities(self, dossier_id: UUID) -> list[EntityRow]:
-        # Get the latest version of each logical entity
-        subq = (
+        # Get the latest version of each logical entity.
+        # Uses ROW_NUMBER() instead of MAX(created_at) to avoid
+        # duplicates when two versions share the same timestamp
+        # (common within a single activity).
+        from sqlalchemy import over, literal_column
+        numbered = (
             select(
-                EntityRow.entity_id,
-                func.max(EntityRow.created_at).label("max_created")
+                EntityRow,
+                func.row_number().over(
+                    partition_by=EntityRow.entity_id,
+                    order_by=EntityRow.created_at.desc(),
+                ).label("rn"),
             )
             .where(EntityRow.dossier_id == dossier_id)
-            .group_by(EntityRow.entity_id)
             .subquery()
         )
         result = await self.session.execute(
             select(EntityRow)
-            .join(subq, (EntityRow.entity_id == subq.c.entity_id) & (EntityRow.created_at == subq.c.max_created))
-            .where(EntityRow.dossier_id == dossier_id)
+            .join(numbered, EntityRow.id == numbered.c.id)
+            .where(numbered.c.rn == 1)
         )
         return list(result.scalars().all())
 
@@ -420,26 +426,24 @@ class Repository:
         """Return the latest version of each distinct logical entity of this
         type in the dossier. For singleton types the list has at most one
         element. For multi-cardinality types, one element per entity_id."""
-        # Subquery: max(created_at) per entity_id for this type
-        subq = (
+        # Uses ROW_NUMBER() instead of MAX(created_at) to avoid
+        # duplicates when two versions share the same timestamp.
+        numbered = (
             select(
-                EntityRow.entity_id,
-                func.max(EntityRow.created_at).label("max_created"),
+                EntityRow,
+                func.row_number().over(
+                    partition_by=EntityRow.entity_id,
+                    order_by=EntityRow.created_at.desc(),
+                ).label("rn"),
             )
             .where(EntityRow.dossier_id == dossier_id)
             .where(EntityRow.type == entity_type)
-            .group_by(EntityRow.entity_id)
             .subquery()
         )
         result = await self.session.execute(
             select(EntityRow)
-            .join(
-                subq,
-                (EntityRow.entity_id == subq.c.entity_id)
-                & (EntityRow.created_at == subq.c.max_created),
-            )
-            .where(EntityRow.dossier_id == dossier_id)
-            .where(EntityRow.type == entity_type)
+            .join(numbered, EntityRow.id == numbered.c.id)
+            .where(numbered.c.rn == 1)
             .order_by(EntityRow.created_at)
         )
         return list(result.scalars().all())

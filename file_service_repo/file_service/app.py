@@ -18,7 +18,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import yaml
-from fastapi import FastAPI, UploadFile, File, HTTPException, Query
+from fastapi import FastAPI, Header, UploadFile, File, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
 
 from dossier_common.signing import verify_token
@@ -66,7 +66,13 @@ def get_config():
 
 def get_signing_key() -> str:
     config = get_config()
-    return config.get("signing_key", "poc-signing-key-change-in-production")
+    key = config.get("signing_key")
+    if not key:
+        raise RuntimeError(
+            "file_service.signing_key is not configured. "
+            "Set it in config.yaml under file_service.signing_key."
+        )
+    return key
 
 
 def get_storage_root() -> Path:
@@ -84,6 +90,40 @@ def get_storage_root() -> Path:
         root = (config_dir / root).resolve()
     root.mkdir(parents=True, exist_ok=True)
     return root
+
+
+def _get_internal_api_key() -> str:
+    """Return the shared secret for internal endpoints.
+
+    The worker passes this as ``Authorization: Bearer <key>`` when
+    calling ``/internal/move``. The file service rejects requests
+    without a valid key. The key MUST be configured — there is no
+    fallback.
+    """
+    config = get_config()
+    key = config.get("internal_api_key")
+    if not key:
+        raise RuntimeError(
+            "file_service.internal_api_key is not configured. "
+            "Set it in config.yaml under file_service.internal_api_key."
+        )
+    return key
+
+
+def _verify_internal_auth(authorization: str | None) -> None:
+    """Verify the Authorization header against the internal API key."""
+    if not authorization:
+        raise HTTPException(403, detail="Missing Authorization header")
+    parts = authorization.split(" ", 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        raise HTTPException(403, detail="Invalid Authorization header format")
+    try:
+        expected = _get_internal_api_key()
+    except RuntimeError:
+        raise HTTPException(500, detail="Internal API key not configured")
+    import hmac
+    if not hmac.compare_digest(parts[1], expected):
+        raise HTTPException(403, detail="Invalid internal API key")
 
 
 # --- Upload endpoint ---
@@ -222,10 +262,13 @@ async def download_file(
 async def move_file(
     file_id: str = Query(...),
     dossier_id: str = Query(...),
+    authorization: str | None = Header(None),
 ):
     """Move file from temp to permanent dossier location.
-    Internal endpoint — should only be accessible from the worker on the internal network.
+    Internal endpoint — requires a valid internal API key via
+    ``Authorization: Bearer <key>``.
     """
+    _verify_internal_auth(authorization)
     root = get_storage_root()
     temp_path = root / "temp" / file_id
     temp_meta = root / "temp" / f"{file_id}.meta"

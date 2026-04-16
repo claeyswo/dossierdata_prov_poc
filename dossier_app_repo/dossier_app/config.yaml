@@ -9,6 +9,7 @@ auth:
 
 file_service:
   signing_key: "poc-signing-key-change-in-production"
+  internal_api_key: "poc-internal-key-change-in-production"
   url: "http://localhost:8001"
   storage_root: "./file_storage"
 

@@ -1,0 +1,12 @@
+Metadata-Version: 2.4
+Name: dossier-toelatingen
+Version: 0.1.0
+Summary: Toelatingen beschermd erfgoed workflow plugin for dossier-engine
+Requires-Python: >=3.11
+Requires-Dist: pydantic>=2.0.0
+Requires-Dist: pyyaml>=6.0
+Requires-Dist: aiohttp>=3.9.0
+Requires-Dist: dossier-engine<0.2.0,>=0.1.0
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0.0; extra == "dev"
+Requires-Dist: pytest-asyncio>=0.23.0; extra == "dev"

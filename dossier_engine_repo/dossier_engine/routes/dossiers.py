@@ -37,7 +37,6 @@ The detail endpoint does a fair bit of work:
 
 from __future__ import annotations
 
-import json as _json
 from typing import Optional
 from uuid import UUID
 
@@ -100,9 +99,8 @@ def register(app: FastAPI, *, registry, get_user, global_access) -> None:
                 status = await derive_status(repo, dossier_id)
 
             if dossier.eligible_activities is not None:
-                try:
-                    eligible = _json.loads(dossier.eligible_activities)
-                except (ValueError, TypeError):
+                eligible = dossier.eligible_activities
+                if not isinstance(eligible, list):
                     eligible = await compute_eligible_activities(
                         plugin, repo, dossier_id,
                     )
@@ -120,9 +118,12 @@ def register(app: FastAPI, *, registry, get_user, global_access) -> None:
             # so each token carries the right scope.
             entities = await repo.get_all_latest_entities(dossier_id)
             file_config = app.state.config.get("file_service", {})
-            signing_key = file_config.get(
-                "signing_key", "poc-signing-key-change-in-production",
-            )
+            signing_key = file_config.get("signing_key")
+            if not signing_key:
+                raise HTTPException(
+                    500,
+                    detail="file_service.signing_key is not configured",
+                )
             file_service_url = file_config.get("url", "http://localhost:8001")
 
             def _make_signer(dossier_id_str: str, user_id: str):

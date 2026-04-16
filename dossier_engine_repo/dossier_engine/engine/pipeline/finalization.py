@@ -25,7 +25,6 @@ the orchestrator does three final things:
 
 from __future__ import annotations
 
-import json
 import logging
 
 from ..state import ActivityState
@@ -168,7 +167,7 @@ async def finalize_dossier(state: ActivityState) -> None:
     dossier_row = await state.repo.get_dossier(state.dossier_id)
     if dossier_row is not None:
         dossier_row.cached_status = state.current_status
-        dossier_row.eligible_activities = json.dumps(eligible)
+        dossier_row.eligible_activities = eligible
 
     # 20. User-filtered allowed list for the response.
     state.allowed_activities = await filter_by_user_auth(

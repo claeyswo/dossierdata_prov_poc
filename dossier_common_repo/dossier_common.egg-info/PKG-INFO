@@ -1,0 +1,7 @@
+Metadata-Version: 2.4
+Name: dossier-common
+Version: 0.1.0
+Summary: Shared utilities for the dossier platform (signing, and whatever else becomes broadly useful)
+Requires-Python: >=3.11
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0.0; extra == "dev"

@@ -53,9 +53,13 @@ def register(app: FastAPI, *, get_user) -> None:
         authenticated. Returns a `file_id` and `upload_url` for the
         client to POST the file bytes to."""
         file_config = app.state.config.get("file_service", {})
-        signing_key = file_config.get(
-            "signing_key", "poc-signing-key-change-in-production",
-        )
+        signing_key = file_config.get("signing_key")
+        if not signing_key:
+            from fastapi import HTTPException
+            raise HTTPException(
+                500,
+                detail="file_service.signing_key is not configured",
+            )
         file_service_url = file_config.get("url", "http://localhost:8001")
 
         file_id = str(uuid4())

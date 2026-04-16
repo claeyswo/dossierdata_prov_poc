@@ -1,0 +1,9 @@
+pyproject.toml
+dossier_app/__init__.py
+dossier_app/config.yaml
+dossier_app/main.py
+dossier_app.egg-info/PKG-INFO
+dossier_app.egg-info/SOURCES.txt
+dossier_app.egg-info/dependency_links.txt
+dossier_app.egg-info/requires.txt
+dossier_app.egg-info/top_level.txt

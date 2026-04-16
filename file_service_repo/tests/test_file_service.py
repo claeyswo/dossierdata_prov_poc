@@ -38,6 +38,7 @@ import file_service.app as fs_module
 
 
 SIGNING_KEY = "test-file-signing-key"
+INTERNAL_API_KEY = "test-internal-api-key"
 
 
 @pytest_asyncio.fixture
@@ -50,6 +51,7 @@ async def file_client(tmp_path):
         return {
             "signing_key": SIGNING_KEY,
             "storage_root": str(tmp_path / "storage"),
+            "internal_api_key": INTERNAL_API_KEY,
         }
 
     fs_module.get_config = _test_config
@@ -236,6 +238,7 @@ class TestInternalMove:
         r = await file_client.post(
             "/internal/move",
             params={"file_id": fid, "dossier_id": did},
+            headers={"Authorization": f"Bearer {INTERNAL_API_KEY}"},
         )
         assert r.status_code == 200
         assert r.json()["moved"] is True
@@ -256,10 +259,12 @@ class TestInternalMove:
         await file_client.post(
             "/internal/move",
             params={"file_id": fid, "dossier_id": did},
+            headers={"Authorization": f"Bearer {INTERNAL_API_KEY}"},
         )
         r = await file_client.post(
             "/internal/move",
             params={"file_id": fid, "dossier_id": did},
+            headers={"Authorization": f"Bearer {INTERNAL_API_KEY}"},
         )
         assert r.status_code == 200
         assert r.json()["already_permanent"] is True
@@ -269,5 +274,23 @@ class TestInternalMove:
         r = await file_client.post(
             "/internal/move",
             params={"file_id": str(uuid4()), "dossier_id": str(uuid4())},
+            headers={"Authorization": f"Bearer {INTERNAL_API_KEY}"},
         )
         assert r.status_code == 404
+
+    async def test_missing_auth_returns_403(self, file_client):
+        """Calling /internal/move without Authorization header → 403."""
+        r = await file_client.post(
+            "/internal/move",
+            params={"file_id": str(uuid4()), "dossier_id": str(uuid4())},
+        )
+        assert r.status_code == 403
+
+    async def test_wrong_key_returns_403(self, file_client):
+        """Calling /internal/move with a wrong API key → 403."""
+        r = await file_client.post(
+            "/internal/move",
+            params={"file_id": str(uuid4()), "dossier_id": str(uuid4())},
+            headers={"Authorization": "Bearer wrong-key"},
+        )
+        assert r.status_code == 403
