@@ -34,7 +34,7 @@ SYSTEM_USER = User(
     name="Systeem",
     roles=["systeemgebruiker"],
     properties={},
-    uri="https://data.vlaanderen.be/id/agent/system",
+    uri="https://id.erfgoed.net/agenten/system",
 )
 
 

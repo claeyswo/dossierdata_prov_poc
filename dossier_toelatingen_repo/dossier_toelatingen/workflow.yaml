@@ -17,7 +17,7 @@ poc_users:
     username: "claeyswo"
     type: "persoon"
     name: "Wouter Claeys"
-    uri: "https://data.vlaanderen.be/id/agent/OVO000104"
+    uri: "https://id.erfgoed.net/agenten/OVO000104"
     roles: ["beheerder"]
     properties:
       ovo_code: "OVO000104"
@@ -26,7 +26,7 @@ poc_users:
     username: "jan.aanvrager"
     type: "persoon"
     name: "Jan Peeters"
-    uri: "https://data.vlaanderen.be/id/persoon/85010100123"
+    uri: "https://id.erfgoed.net/personen/85010100123"
     roles: ["85010100123"]
     properties:
       rrn: "85010100123"
@@ -35,7 +35,7 @@ poc_users:
     username: "firma.acme"
     type: "persoon"
     name: "ACME BV"
-    uri: "https://data.vlaanderen.be/id/organisatie/0123456789"
+    uri: "https://id.erfgoed.net/organisaties/0123456789"
     roles: ["kbo-toevoeger:0123456789"]
     properties:
       kbo: "0123456789"
@@ -44,8 +44,8 @@ poc_users:
     username: "marie.brugge"
     type: "medewerker"
     name: "Marie Vandenbroeck"
-    uri: "https://data.vlaanderen.be/id/agent/marie.brugge"
-    roles: ["behandelaar", "beslisser", "gemeente-toevoeger:https://data.vlaanderen.be/id/organisatie/brugge"]
+    uri: "https://id.erfgoed.net/agenten/marie.brugge"
+    roles: ["behandelaar", "beslisser", "gemeente-toevoeger:https://id.erfgoed.net/organisaties/brugge"]
     properties:
       gemeente: "Brugge"
 
@@ -53,8 +53,8 @@ poc_users:
     username: "benjamma"
     type: "medewerker"
     name: "Matthias Benjamins"
-    uri: "https://data.vlaanderen.be/id/agent/benjamma"
-    roles: ["behandelaar", "gemeente-toevoeger:https://data.vlaanderen.be/id/organisatie/oe"]
+    uri: "https://id.erfgoed.net/agenten/benjamma"
+    roles: ["behandelaar", "gemeente-toevoeger:https://id.erfgoed.net/organisaties/oe"]
     properties:
       organisatie: "oe"
 
@@ -62,8 +62,8 @@ poc_users:
     username: "sophie.tekent"
     type: "medewerker"
     name: "Sophie Marchand"
-    uri: "https://data.vlaanderen.be/id/agent/sophie.tekent"
-    roles: ["beslisser", "gemeente-toevoeger:https://data.vlaanderen.be/id/organisatie/oe", "behandelaar"]
+    uri: "https://id.erfgoed.net/agenten/sophie.tekent"
+    roles: ["beslisser", "gemeente-toevoeger:https://id.erfgoed.net/organisaties/oe", "behandelaar"]
     properties:
       organisatie: "oe"
 

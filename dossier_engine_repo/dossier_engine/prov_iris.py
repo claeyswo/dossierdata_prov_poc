@@ -13,28 +13,28 @@ PROV rendering boundary.
 IRI structure (path segments match API routes for resolvability):
 
     Base namespace (per-dossier):
-        https://data.vlaanderen.be/id/dossier/{dossier_id}/
+        https://id.erfgoed.net/dossiers/{dossier_id}/
 
     Entity (versioned):
         dossier:entities/{type}/{entity_id}/{version_id}
-        → https://data.vlaanderen.be/id/dossier/{did}/entities/oe:aanvraag/{eid}/{vid}
+        → https://id.erfgoed.net/dossiers/{did}/entities/oe:aanvraag/{eid}/{vid}
 
     Activity:
         dossier:activities/{activity_id}
-        → https://data.vlaanderen.be/id/dossier/{did}/activities/{aid}
+        → https://id.erfgoed.net/dossiers/{did}/activities/{aid}
 
     Agent:
         dossier:agents/{agent_id}
-        → https://data.vlaanderen.be/id/dossier/{did}/agents/{agent_id}
+        → https://id.erfgoed.net/dossiers/{did}/agents/{agent_id}
 
     Cross-dossier (full IRI, no prefix):
-        https://data.vlaanderen.be/id/dossier/{other_did}/activities/{aid}
+        https://id.erfgoed.net/dossiers/{other_did}/activities/{aid}
 
 Namespace prefixes:
     prov:    http://www.w3.org/ns/prov#
     xsd:     http://www.w3.org/2001/XMLSchema#
-    oe:      https://data.vlaanderen.be/ns/oe/
-    dossier: https://data.vlaanderen.be/id/dossier/{dossier_id}/
+    oe:      https://id.erfgoed.net/vocab/ontology#
+    dossier: https://id.erfgoed.net/dossiers/{dossier_id}/
 """
 
 from __future__ import annotations
@@ -42,8 +42,8 @@ from __future__ import annotations
 from uuid import UUID
 
 # Base URI templates
-DOSSIER_BASE = "https://data.vlaanderen.be/id/dossier/{dossier_id}/"
-OE_NS = "https://data.vlaanderen.be/ns/oe/"
+DOSSIER_BASE = "https://id.erfgoed.net/dossiers/{dossier_id}/"
+OE_NS = "https://id.erfgoed.net/vocab/ontology#"
 
 
 def prov_prefixes(dossier_id: UUID | str) -> dict:

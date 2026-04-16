@@ -30,8 +30,8 @@ su -c "psql -d dossiers -c \"GRANT ALL ON SCHEMA public TO dossier;\"" postgres
 
 ```bash
 # Install all five projects in editable mode (one-time setup)
-pip install -e dossier_common/ -e file_service/ -e dossier_engine/ \
-            -e dossier_toelatingen/ -e dossier_app/
+pip install -e dossier_common_repo/ -e file_service_repo/ -e dossier_engine_repo/ \
+            -e dossier_toelatingen_repo/ -e dossier_app_repo/
 
 # Run the dossier API (launch cwd does not matter — the engine's
 # only filesystem path, file_service.storage_root, resolves against
@@ -57,7 +57,7 @@ open http://localhost:8000/docs
 ## Database & Schema Management
 
 The database schema is managed by **Alembic** migrations. The migration
-files live under `dossier_engine/alembic/versions/`.
+files live under `dossier_engine_repo/alembic/versions/`.
 
 ### How it works
 
@@ -73,7 +73,7 @@ the worker (or run `alembic upgrade head` manually first).
 ### Manual migration commands
 
 ```bash
-cd dossier_engine/
+cd dossier_engine_repo/
 
 # Apply all pending migrations
 alembic upgrade head
@@ -155,7 +155,7 @@ compatible ranges `>=0.1.0,<0.2.0`, the app pins strict `==0.1.0`):
             dossier_app
 ```
 
-### Engine internals (under `dossier_engine/`)
+### Engine internals (under `dossier_engine_repo/`)
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
@@ -190,7 +190,7 @@ compatible ranges `>=0.1.0,<0.2.0`, the app pins strict `==0.1.0`):
 └──────────────────────────────────────────────────────────────┘
 ```
 
-### Plugin internals (under `dossier_toelatingen/`)
+### Plugin internals (under `dossier_toelatingen_repo/`)
 
 ```
 ✓ workflow.yaml (activities, entities, roles, rules)
@@ -220,6 +220,7 @@ compatible ranges `>=0.1.0,<0.2.0`, the app pins strict `==0.1.0`):
 | `GET` | `/dossiers/{id}/prov` | PROV-JSON export |
 | `GET` | `/dossiers/{id}/prov/graph/timeline` | Timeline visualization |
 | `GET` | `/dossiers/{id}/prov/graph/columns` | Column layout visualization |
+| `GET` | `/dossiers/{id}/archive` | PDF/A-3b archive (self-contained, with embedded PROV-JSON and bijlagen) |
 | `GET` | `/health` | Liveness probe (always 200 if process is up) |
 | `GET` | `/health/ready` | Readiness probe (checks DB connection, 503 if down) |
 
@@ -301,7 +302,7 @@ python -m dossier_engine.worker --interval 5    # custom poll interval
 python -m dossier_engine.worker --help          # full options
 ```
 
-The worker is production-ready and safe to deploy redundantly. Every significant piece of its behavior went through a dedicated hardening pass — see `dossier_engine/dossier_engine/worker.py` for source.
+The worker is production-ready and safe to deploy redundantly. Every significant piece of its behavior went through a dedicated hardening pass — see `dossier_engine_repo/dossier_engine/worker.py` for source.
 
 **Concurrency model.** Multiple workers can run against the same database. The poll query is `SELECT ... LIMIT 5 FOR UPDATE OF entities SKIP LOCKED` — each worker tries to claim up to 5 candidate tasks, Postgres locks them for the duration of the claiming transaction, and any other worker's concurrent claim attempts skip over locked rows entirely. The lock persists from the claim through the task execution to the commit, so no two workers ever execute the same task version. When one worker commits (success, cancellation, retry, or dead-letter), the lock releases and the next worker's next claim sees the updated status. No leader election, no leases, no external coordination — Postgres handles it.
 
@@ -415,6 +416,72 @@ For the full attempt history of a specific task (who failed, when, what error), 
 
 **Running multiple workers.** On Postgres with `FOR UPDATE OF entities SKIP LOCKED`, concurrent workers are safe by construction. Run as many as your task throughput requires. A sensible starting point is one worker per CPU core for CPU-bound task functions, or a few workers per core for IO-bound ones. All workers connect to the same Postgres instance; no other coordination is needed.
 
+## Dossier Archive (PDF/A-3b)
+
+The `GET /dossiers/{id}/archive` endpoint produces a self-contained PDF/A-3b archive suitable for long-term (30+ year) retention. The archive contains:
+
+- **Cover page** — dossier metadata, workflow, status, creation date, all involved agents with their canonical URIs, and a full activity timeline.
+- **Provenance timeline** — a static SVG rendered server-side (pure Python, no D3 or browser required) showing activity columns and entity version markers.
+- **Entity version history** — every version of every entity type (external, domain, and system entities) with full JSON content, derivation references, timestamps, and tombstone markers.
+- **PROV-JSON pages** — the complete W3C PROV-JSON export printed as readable text.
+- **Embedded `prov.json`** — the same PROV-JSON as a PDF/A-3 attachment for machine extraction.
+- **Embedded bijlagen** — all file attachments referenced by any entity's `bijlagen` array, embedded as PDF/A-3 attachments alongside `prov.json`.
+
+Embedded files are accessible through the attachments panel of any PDF/A-3-aware viewer (Evince: sidebar paperclip; Okular: Tools → Embedded Files; Adobe Reader: left panel → paperclip). The XMP metadata declares `pdfaid:part=3` and `pdfaid:conformance=B`.
+
+For strict PDF/A validation (veraPDF), an ICC output intent profile must be added — fpdf2 does not generate one natively. In production, post-process with Ghostscript:
+
+```bash
+gs -dPDFA=3 -dBATCH -dNOPAUSE -dNOOUTERSAVE \
+   -sColorConversionStrategy=RGB -sDEVICE=pdfwrite \
+   -sPDFACompatibilityPolicy=1 \
+   -sOutputFile=archive_pdfa.pdf archive.pdf
+```
+
+## Data Migrations
+
+The engine includes a framework for one-shot data migrations that operate on existing entity content. Migrations are executed as PROV activities (one `systemAction` per dossier) so the transformation itself is recorded in the provenance graph. The framework is idempotent: once applied to a dossier, a `system:note` entity with the migration UUID is created, and re-running skips that dossier.
+
+Each migration is a `DataMigration` instance declaring the target type, a transform function, and optional filter/workflow scoping. Because the disjoint invariant forbids listing the same entity in both `used` and `generated`, migrations only `generate` new versions with a `derivedFrom` reference to the prior version — no `used` items.
+
+### Writing a migration
+
+Add new migrations to the END of the `MIGRATIONS` list in `dossier_toelatingen_repo/dossier_toelatingen/data_migrations/__init__.py`. Never reorder or remove existing entries.
+
+```python
+from dossier_engine.migrations import DataMigration
+
+def _add_classificatie(content: dict) -> dict | None:
+    if "classificatie" in content:
+        return None  # already has the field, no-op
+    return {**content, "classificatie": None, "urgentie": None}
+
+MIGRATIONS = [
+    DataMigration(
+        id="f47ac10b-58cc-4372-a567-0e02b2c3d479",  # new UUID per migration
+        message="Add classificatie and urgentie to aanvraag (v1→v2 backfill)",
+        target_type="oe:aanvraag",
+        transform=_add_classificatie,
+        workflow="toelatingen",
+    ),
+]
+```
+
+### Running migrations
+
+```bash
+# Dry run — shows what would change, writes nothing
+python -m dossier_toelatingen.data_migrations --dry-run
+
+# Apply pending migrations
+python -m dossier_toelatingen.data_migrations
+
+# Custom config path
+python -m dossier_toelatingen.data_migrations --config path/to/config.yaml
+```
+
+Each migration runs in its own per-dossier transaction, so a failure on one dossier does not roll back others. The summary output reports applied/skipped/errors per migration.
+
 ## Test Flows
 
 The test script (`test_requests.sh`) creates 9 dossiers:
@@ -454,7 +521,7 @@ sleep 1
 #    file inside the dossier_app package.
 psql -h 127.0.0.1 -U dossier dossiers \
   -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public; GRANT ALL ON SCHEMA public TO dossier;"
-rm -rf /home/claude/toelatingen/dossier_app/dossier_app/file_storage
+rm -rf /home/claude/toelatingen/dossier_app_repo/dossier_app/file_storage
 
 # 3. Launch both services. Launch cwd doesn't matter because every
 #    project is pip-installed (editable). /tmp is a convenient
@@ -505,7 +572,7 @@ Environment troubleshooting notes (deleted-inode gotchas, process-group kills in
 
 ## Adding a New Workflow
 
-1. Create a new plugin package (copy `dossier_toelatingen/` as template)
+1. Create a new plugin package (copy `dossier_toelatingen_repo/` as template)
 2. Define entities, workflow.yaml, handlers, validators, tasks, relation_validators
 3. Add to `config.yaml`:
    ```yaml

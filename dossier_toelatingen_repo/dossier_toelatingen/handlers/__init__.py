@@ -111,9 +111,9 @@ async def set_verantwoordelijke_organisatie(context: ActivityContext, content: d
 
     # POC: simple mapping. In production: lookup in organisation registry.
     if aanvraag.gemeente == "Brugge":
-        org_uri = "https://data.vlaanderen.be/id/organisatie/brugge"
+        org_uri = "https://id.erfgoed.net/organisaties/brugge"
     else:
-        org_uri = "https://data.vlaanderen.be/id/organisatie/oe"
+        org_uri = "https://id.erfgoed.net/organisaties/oe"
 
     return HandlerResult(
         content={"uri": org_uri},
@@ -131,7 +131,7 @@ async def set_system_fields(context: ActivityContext, content: dict | None) -> H
     return HandlerResult(
         content={
             "datum": datetime.now(timezone.utc).isoformat(),
-            "aanmaker": f"https://data.vlaanderen.be/id/agent/{aanmaker}",
+            "aanmaker": f"https://id.erfgoed.net/agenten/{aanmaker}",
         },
         status=None,
     )
@@ -212,12 +212,12 @@ async def duid_behandelaar_aan(context: ActivityContext, content: dict | None) -
     """
     verantw: VerantwoordelijkeOrganisatie | None = context.get_typed("oe:verantwoordelijke_organisatie")
 
-    if verantw and verantw.uri == "https://data.vlaanderen.be/id/organisatie/oe":
+    if verantw and verantw.uri == "https://id.erfgoed.net/organisaties/oe":
         behandelaar_uri = f"{verantw.uri}/behandelaar/benjamma"
     elif verantw:
         behandelaar_uri = verantw.uri
     else:
-        behandelaar_uri = "https://data.vlaanderen.be/id/organisatie/onbekend"
+        behandelaar_uri = "https://id.erfgoed.net/organisaties/onbekend"
 
     return HandlerResult(
         content={"uri": behandelaar_uri},

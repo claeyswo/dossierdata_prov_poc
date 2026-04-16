@@ -424,7 +424,7 @@ class TestDuidBehandelaarAan:
             repo=repo, dossier_id=D1,
             used_entities={
                 "oe:verantwoordelijke_organisatie": SimpleNamespace(
-                    content={"uri": "https://data.vlaanderen.be/id/organisatie/oe"},
+                    content={"uri": "https://id.erfgoed.net/organisaties/oe"},
                     schema_version=None,
                 ),
             },
@@ -449,7 +449,7 @@ class TestDuidBehandelaarAan:
             repo=repo, dossier_id=D1,
             used_entities={
                 "oe:verantwoordelijke_organisatie": SimpleNamespace(
-                    content={"uri": "https://data.vlaanderen.be/id/organisatie/brugge"},
+                    content={"uri": "https://id.erfgoed.net/organisaties/brugge"},
                     schema_version=None,
                 ),
             },
@@ -461,7 +461,7 @@ class TestDuidBehandelaarAan:
             }),
         )
         result = await duid_behandelaar_aan(ctx, None)
-        assert result.generated[0]["content"]["uri"] == "https://data.vlaanderen.be/id/organisatie/brugge"
+        assert result.generated[0]["content"]["uri"] == "https://id.erfgoed.net/organisaties/brugge"
 
     async def test_no_org_assigns_onbekend(self, repo):
         """No verantwoordelijke_organisatie → fallback to
