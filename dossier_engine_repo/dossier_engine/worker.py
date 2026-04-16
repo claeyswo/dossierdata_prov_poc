@@ -550,6 +550,7 @@ async def _process_recorded(
         resolved = {e.type: e for e in all_latest}
         ctx = ActivityContext(
             repo, dossier_id, resolved, plugin.entity_models, plugin=plugin,
+            triggering_activity_id=task.generated_by,
         )
         await fn(ctx)
     else:

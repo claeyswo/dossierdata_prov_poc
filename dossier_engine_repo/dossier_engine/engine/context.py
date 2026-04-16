@@ -57,6 +57,13 @@ class ActivityContext:
     Provides typed access to the entities the current activity has used,
     plus a few helpers that hide the cardinality-vs-singleton distinction
     so handlers don't have to think about it.
+
+    For recorded task handlers, `triggering_activity_id` is set to the
+    activity that scheduled the task (the task entity's `generated_by`).
+    Task handlers that need to operate on the exact entity versions that
+    existed at the time the task was scheduled — rather than on the
+    current latest versions — can use this to walk back via
+    `repo.get_entities_generated_by_activity(...)`.
     """
 
     def __init__(
@@ -66,12 +73,14 @@ class ActivityContext:
         used_entities: dict[str, EntityRow],
         entity_models: dict[str, Any] | None = None,
         plugin: Plugin | None = None,
+        triggering_activity_id: UUID | None = None,
     ):
         self.repo = repo
         self.dossier_id = dossier_id
         self._used_entities = used_entities
         self._entity_models = entity_models or {}
         self._plugin = plugin
+        self.triggering_activity_id = triggering_activity_id
 
     def get_used_entity(self, entity_type: str) -> EntityRow | None:
         return self._used_entities.get(entity_type)
