@@ -30,6 +30,7 @@ from .app import load_config_and_registry, SYSTEM_USER
 from .db import init_db, get_session_factory
 from .db.models import EntityRow, Repository
 from .engine import ActivityContext, Caller, execute_activity
+from .engine.refs import EntityRef
 from .sentry_integration import (
     init_sentry,
     capture_task_retry,
@@ -399,8 +400,12 @@ async def complete_task(
     # The logical entity_id stays the same — we're creating a
     # revision, not a new logical task.
     new_task_version_id = uuid4()
-    prev_task_ref = f"system:task/{task.entity_id}@{task.id}"
-    new_task_ref = f"system:task/{task.entity_id}@{new_task_version_id}"
+    prev_task_ref = str(EntityRef(
+        type="system:task", entity_id=task.entity_id, version_id=task.id,
+    ))
+    new_task_ref = str(EntityRef(
+        type="system:task", entity_id=task.entity_id, version_id=new_task_version_id,
+    ))
 
     # Build the explanatory note. It's a new logical entity, not a
     # revision of anything, so both the entity_id and version_id are
@@ -409,7 +414,11 @@ async def complete_task(
     note_text = f"Task {status}: {fn_name}" if fn_name else f"Task {status}"
     new_note_entity_id = uuid4()
     new_note_version_id = uuid4()
-    note_ref = f"system:note/{new_note_entity_id}@{new_note_version_id}"
+    note_ref = str(EntityRef(
+        type="system:note",
+        entity_id=new_note_entity_id,
+        version_id=new_note_version_id,
+    ))
 
     systemaction_def = plugin.find_activity_def("systemAction")
     if not systemaction_def:
@@ -695,7 +704,11 @@ async def _process_cross_dossier(
         generates = target_act_def.get("generates", [])
         if generates:
             generated_items = [{
-                "entity": f"{generates[0]}/{uuid4()}@{uuid4()}",
+                "entity": str(EntityRef(
+                    type=generates[0],
+                    entity_id=uuid4(),
+                    version_id=uuid4(),
+                )),
                 "content": task_result.content,
             }]
 
@@ -1078,13 +1091,17 @@ async def requeue_dead_letters(
                     new_content["next_attempt_at"] = None
                     new_version_id = uuid4()
                     generated_items.append({
-                        "entity": (
-                            f"system:task/{task.entity_id}@{new_version_id}"
-                        ),
+                        "entity": str(EntityRef(
+                            type="system:task",
+                            entity_id=task.entity_id,
+                            version_id=new_version_id,
+                        )),
                         "content": new_content,
-                        "derivedFrom": (
-                            f"system:task/{task.entity_id}@{task.id}"
-                        ),
+                        "derivedFrom": str(EntityRef(
+                            type="system:task",
+                            entity_id=task.entity_id,
+                            version_id=task.id,
+                        )),
                     })
                     task_refs_for_note.append(str(task.entity_id))
 
@@ -1099,9 +1116,11 @@ async def requeue_dead_letters(
                     scope_desc.append(f"task={task_entity_id}")
                 scope_str = ", ".join(scope_desc) if scope_desc else "all dossiers"
                 generated_items.append({
-                    "entity": (
-                        f"system:note/{note_entity_id}@{note_version_id}"
-                    ),
+                    "entity": str(EntityRef(
+                        type="system:note",
+                        entity_id=note_entity_id,
+                        version_id=note_version_id,
+                    )),
                     "content": {
                         "text": (
                             f"Operator requeue of {len(tasks)} dead-lettered "

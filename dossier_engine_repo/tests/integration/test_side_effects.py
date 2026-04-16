@@ -265,17 +265,19 @@ class TestExecuteSideEffects:
 
         assert called == [True]
 
-        # Side effect activity row exists with informed_by = trigger
+        # Side effect activity row exists with informed_by_activity_id = trigger
         result = await repo.session.execute(
             text(
-                "SELECT informed_by FROM activities "
+                "SELECT informed_by_activity_id FROM activities "
                 "WHERE dossier_id = :d AND type = 'runMe'"
             ),
             {"d": D1},
         )
         row = result.fetchone()
         assert row is not None
-        assert row[0] == str(trigger)
+        # Trigger is a UUID; side_effects writes str(trigger), which
+        # create_activity classifies into informed_by_activity_id.
+        assert row[0] == trigger
 
     async def test_handler_result_status_stamped(self, repo):
         """When the handler returns HandlerResult.status, it

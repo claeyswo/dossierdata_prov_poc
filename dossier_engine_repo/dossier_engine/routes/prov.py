@@ -220,18 +220,21 @@ def register_prov_routes(app, registry: PluginRegistry, get_user, global_access:
                         }
 
                 # wasInformedBy
-                if act.informed_by:
+                if act.informed_by_uri is not None:
+                    # Cross-dossier: full IRI, no prefix expansion.
                     inform_key = f"_:informed_{act.id}"
-                    informed_by_str = str(act.informed_by)
-                    if informed_by_str.startswith("http"):
-                        # Cross-dossier: full IRI, no prefix
-                        informant_key = informed_by_str
-                    else:
-                        # Local activity UUID
-                        informant_key = activity_qname(act.informed_by)
                     prov["wasInformedBy"][inform_key] = {
                         "prov:informedActivity": act_key,
-                        "prov:informantActivity": informant_key,
+                        "prov:informantActivity": act.informed_by_uri,
+                    }
+                elif act.informed_by_activity_id is not None:
+                    # Local activity: expand to the dossier QName.
+                    inform_key = f"_:informed_{act.id}"
+                    prov["wasInformedBy"][inform_key] = {
+                        "prov:informedActivity": act_key,
+                        "prov:informantActivity": activity_qname(
+                            act.informed_by_activity_id
+                        ),
                     }
 
             # Entities

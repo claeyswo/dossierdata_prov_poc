@@ -41,30 +41,33 @@ from uuid import UUID
 import pytest
 from pydantic import BaseModel
 
-from dossier_engine.engine.refs import parse_entity_ref, is_external_uri
+from dossier_engine.engine.refs import EntityRef, is_external_uri
 from dossier_engine.plugin import Plugin, PluginRegistry
 
 
 # --------------------------------------------------------------------
-# parse_entity_ref / is_external_uri
+# EntityRef.parse / is_external_uri
 # --------------------------------------------------------------------
 
 
-class TestParseEntityRef:
+class TestEntityRefParse:
+    """Parsing the canonical `prefix:type/entity_id@version_id` form
+    into a typed EntityRef. Non-canonical inputs return None — callers
+    treat that as 'external URI or not a ref'."""
 
     def test_canonical_ref_parses(self):
-        """The base case: a well-formed `prefix:type/uuid@uuid`
-        ref parses into a dict with prefix, id, version."""
+        """A well-formed `prefix:type/uuid@uuid` parses into an
+        EntityRef with the three typed fields populated."""
         ref = (
             "oe:aanvraag/"
             "e1000000-0000-0000-0000-000000000001@"
             "f1000000-0000-0000-0000-000000000001"
         )
-        result = parse_entity_ref(ref)
+        result = EntityRef.parse(ref)
         assert result is not None
-        assert result["prefix"] == "oe:aanvraag"
-        assert result["id"] == UUID("e1000000-0000-0000-0000-000000000001")
-        assert result["version"] == UUID("f1000000-0000-0000-0000-000000000001")
+        assert result.type == "oe:aanvraag"
+        assert result.entity_id == UUID("e1000000-0000-0000-0000-000000000001")
+        assert result.version_id == UUID("f1000000-0000-0000-0000-000000000001")
 
     def test_system_prefix_parses(self):
         """Prefixes with underscores in the type segment (like
@@ -73,22 +76,26 @@ class TestParseEntityRef:
         eid = UUID("11111111-1111-1111-1111-111111111111")
         vid = UUID("22222222-2222-2222-2222-222222222222")
         ref = f"system:task/{eid}@{vid}"
-        result = parse_entity_ref(ref)
+        result = EntityRef.parse(ref)
         assert result is not None
-        assert result["prefix"] == "system:task"
-        assert result["id"] == eid
-        assert result["version"] == vid
+        assert result.type == "system:task"
+        assert result.entity_id == eid
+        assert result.version_id == vid
 
     def test_https_url_returns_none(self):
         """A full URL is not a canonical ref and returns None.
         The caller should treat None as 'external URI'."""
-        assert parse_entity_ref("https://example.org/foo") is None
+        assert EntityRef.parse("https://example.org/foo") is None
 
     def test_bare_string_returns_none(self):
         """Something that doesn't even have a type/uuid shape
         just returns None."""
-        assert parse_entity_ref("not-a-ref") is None
-        assert parse_entity_ref("") is None
+        assert EntityRef.parse("not-a-ref") is None
+        assert EntityRef.parse("") is None
+
+    def test_none_input_returns_none(self):
+        """Parse accepts None (saves a guard at every call site)."""
+        assert EntityRef.parse(None) is None
 
     def test_uppercase_prefix_rejected(self):
         """The regex is case-sensitive on the prefix: uppercase
@@ -96,29 +103,49 @@ class TestParseEntityRef:
         external. This is documented current behavior — locking
         it in so a future refactor has to update the test to
         relax the regex."""
-        # Otherwise valid ref but with an uppercase character
         ref = (
             "OE:aanvraag/"
             "e1000000-0000-0000-0000-000000000001@"
             "f1000000-0000-0000-0000-000000000001"
         )
-        assert parse_entity_ref(ref) is None
+        assert EntityRef.parse(ref) is None
 
     def test_missing_version_rejected(self):
         """A ref with only prefix/id (no @version) doesn't match
         the canonical form."""
-        assert parse_entity_ref(
+        assert EntityRef.parse(
             "oe:aanvraag/e1000000-0000-0000-0000-000000000001"
         ) is None
 
     def test_missing_at_separator_rejected(self):
         """`prefix/id-version` without the @ separator doesn't
         match."""
-        assert parse_entity_ref(
+        assert EntityRef.parse(
             "oe:aanvraag/"
             "e1000000-0000-0000-0000-000000000001-"
             "f1000000-0000-0000-0000-000000000001"
         ) is None
+
+    def test_str_roundtrip(self):
+        """str(EntityRef(...)) produces the canonical string;
+        parsing that string back yields an equal EntityRef. This
+        is the invariant that lets us use EntityRef as the single
+        source of truth for the wire format."""
+        eid = UUID("33333333-3333-3333-3333-333333333333")
+        vid = UUID("44444444-4444-4444-4444-444444444444")
+        original = EntityRef(type="oe:aanvraag", entity_id=eid, version_id=vid)
+        roundtripped = EntityRef.parse(str(original))
+        assert roundtripped == original
+
+    def test_entityref_is_hashable(self):
+        """Frozen dataclass → hashable → usable as dict key / set
+        element. Relied on by invariant checks that dedupe refs."""
+        eid = UUID("55555555-5555-5555-5555-555555555555")
+        vid = UUID("66666666-6666-6666-6666-666666666666")
+        ref = EntityRef(type="oe:aanvraag", entity_id=eid, version_id=vid)
+        assert {ref} == {ref}  # no TypeError
+        d = {ref: "value"}
+        assert d[ref] == "value"
 
 
 class TestIsExternalUri:

@@ -20,7 +20,7 @@ from typing import Optional
 from uuid import UUID
 
 from sqlalchemy import (
-    Column, DateTime, ForeignKey, Index, Text,
+    CheckConstraint, Column, DateTime, ForeignKey, Index, Text,
     distinct, func, select, update,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PGUUID
@@ -60,7 +60,20 @@ class ActivityRow(Base):
     id = Column(UUID_DB(), primary_key=True)
     dossier_id = Column(UUID_DB(), ForeignKey("dossiers.id"), nullable=False)
     type = Column(Text, nullable=False)
-    informed_by = Column(Text, nullable=True)  # local UUID or cross-dossier URI
+    # Split `informed_by` into two typed columns with disjoint semantics:
+    # - informed_by_activity_id: local (same-dossier) activity UUID
+    # - informed_by_uri:         full IRI, used for cross-dossier references
+    # At most one of the two is set per row (enforced by check constraint).
+    # Readers should use the `informed_by` property for the stringified
+    # value when they don't care about the discriminator, or access the
+    # columns directly when they need the type back. There's no single
+    # `informed_by: Text` column any more — the column was removed
+    # because every reader had to split on "is it a UUID or a URI?"
+    # anyway, which meant stringly-typed conditionals scattered
+    # everywhere. Split columns push that decision to the writers
+    # (one place) and let readers stay typed.
+    informed_by_activity_id = Column(UUID_DB(), nullable=True)
+    informed_by_uri = Column(Text, nullable=True)
     computed_status = Column(Text, nullable=True)  # stored when handler computes status
     started_at = Column(DateTime(timezone=True), nullable=False)
     ended_at = Column(DateTime(timezone=True), nullable=True)
@@ -70,10 +83,26 @@ class ActivityRow(Base):
     associations = relationship("AssociationRow", back_populates="activity")
     used_entities = relationship("UsedRow", back_populates="activity")
 
+    @property
+    def informed_by(self) -> str | None:
+        """Display form of the informant. Returns the URI for
+        cross-dossier references, the stringified UUID for local
+        references, or None. Back-compat read shim for call sites
+        that just want the old behaviour."""
+        if self.informed_by_uri is not None:
+            return self.informed_by_uri
+        if self.informed_by_activity_id is not None:
+            return str(self.informed_by_activity_id)
+        return None
+
     __table_args__ = (
         Index("ix_activities_dossier_id", "dossier_id"),
         Index("ix_activities_type", "type"),
         Index("ix_activities_dossier_type", "dossier_id", "type"),
+        CheckConstraint(
+            "(informed_by_activity_id IS NULL) OR (informed_by_uri IS NULL)",
+            name="ck_activities_informed_by_one_of",
+        ),
     )
 
 
@@ -263,13 +292,30 @@ class Repository:
         informed_by: str | None = None,
         computed_status: str | None = None,
     ) -> ActivityRow:
+        # Classify `informed_by` once, here, rather than at every read
+        # site. Callers pass a single string; we map it to the right
+        # column. Rules:
+        #   - None           → both columns NULL (no informant)
+        #   - UUID-shaped    → informed_by_activity_id (same-dossier ref)
+        #   - anything else  → informed_by_uri (cross-dossier IRI)
+        # Strings that look like UUIDs but are actually URIs won't
+        # happen in practice — IRIs always contain slashes.
+        informed_by_activity_id = None
+        informed_by_uri = None
+        if informed_by is not None:
+            try:
+                informed_by_activity_id = UUID(informed_by)
+            except (ValueError, AttributeError):
+                informed_by_uri = informed_by
+
         row = ActivityRow(
             id=activity_id,
             dossier_id=dossier_id,
             type=type,
             started_at=started_at,
             ended_at=ended_at,
-            informed_by=informed_by,
+            informed_by_activity_id=informed_by_activity_id,
+            informed_by_uri=informed_by_uri,
             computed_status=computed_status,
         )
         self.session.add(row)

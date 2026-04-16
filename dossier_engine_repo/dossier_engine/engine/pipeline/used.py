@@ -21,7 +21,7 @@ from uuid import UUID
 
 from ..errors import ActivityError
 from ..lookups import lookup_singleton, resolve_from_prefetched
-from ..refs import is_external_uri, parse_entity_ref
+from ..refs import EntityRef, is_external_uri
 from ..state import ActivityState, Caller
 
 
@@ -78,12 +78,12 @@ async def _resolve_explicit(state: ActivityState) -> None:
             })
             continue
 
-        parsed = parse_entity_ref(entity_ref)
-        if not parsed:
+        parsed = EntityRef.parse(entity_ref)
+        if parsed is None:
             raise ActivityError(422, f"Invalid entity reference: {entity_ref}")
 
-        entity_type = parsed["prefix"]
-        existing_entity = await state.repo.get_entity(parsed["version"])
+        entity_type = parsed.type
+        existing_entity = await state.repo.get_entity(parsed.version_id)
         if not existing_entity:
             raise ActivityError(422, f"Entity not found: {entity_ref}")
         if existing_entity.dossier_id != state.dossier_id:
@@ -93,7 +93,7 @@ async def _resolve_explicit(state: ActivityState) -> None:
 
         state.used_refs.append({
             "entity": entity_ref,
-            "version_id": parsed["version"],
+            "version_id": parsed.version_id,
             "type": entity_type,
         })
         state.resolved_entities[entity_type] = existing_entity
@@ -174,7 +174,11 @@ async def _auto_resolve_for_system_caller(state: ActivityState) -> None:
         if entity is not None:
             state.resolved_entities[etype] = entity
             state.used_refs.append({
-                "entity": f"{etype}/{entity.entity_id}@{entity.id}",
+                "entity": str(EntityRef(
+                    type=etype,
+                    entity_id=entity.entity_id,
+                    version_id=entity.id,
+                )),
                 "version_id": entity.id,
                 "type": etype,
                 "auto_resolved": True,

@@ -36,6 +36,7 @@ from __future__ import annotations
 import uuid as uuid_mod
 from uuid import uuid4
 
+from ..refs import EntityRef
 from ..state import ActivityState
 
 
@@ -128,7 +129,11 @@ async def persist_outputs(state: ActivityState) -> None:
         )
 
         response_item = {
-            "entity": gen.get("ref") or f"{gen['type']}/{gen['entity_id']}@{gen['version_id']}",
+            "entity": gen.get("ref") or str(EntityRef(
+                type=gen["type"],
+                entity_id=gen["entity_id"],
+                version_id=gen["version_id"],
+            )),
             "type": gen["type"],
             "content": gen["content"],
         }

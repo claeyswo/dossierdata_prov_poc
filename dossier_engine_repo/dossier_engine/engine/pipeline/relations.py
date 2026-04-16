@@ -37,7 +37,7 @@ implement the sub-phases.
 from __future__ import annotations
 
 from ..errors import ActivityError
-from ..refs import is_external_uri, parse_entity_ref
+from ..refs import EntityRef
 from ..state import ActivityState
 from ...plugin import Plugin
 
@@ -116,19 +116,19 @@ async def _parse_and_resolve(state: ActivityState, allowed: set[str]) -> None:
                 f"relation type '{rel_type}'. Allowed: {sorted(allowed)}",
             )
 
-        if is_external_uri(rel_ref):
+        parsed = EntityRef.parse(rel_ref)
+        if parsed is None:
+            # Not a canonical ref — either an external URI or malformed.
+            # Relations can't reference externals; external URIs reaching
+            # this point means the caller passed something outside the
+            # relations protocol.
             raise ActivityError(
                 422,
-                f"Relations cannot reference external URIs: {rel_ref}",
+                f"Invalid entity reference in relation: {rel_ref} "
+                f"(relations cannot reference external URIs)",
             )
 
-        parsed = parse_entity_ref(rel_ref)
-        if not parsed:
-            raise ActivityError(
-                422, f"Invalid entity reference in relation: {rel_ref}",
-            )
-
-        rel_entity = await state.repo.get_entity(parsed["version"])
+        rel_entity = await state.repo.get_entity(parsed.version_id)
         if rel_entity is None or rel_entity.dossier_id != state.dossier_id:
             raise ActivityError(
                 422, f"Relation entity not found in dossier: {rel_ref}",

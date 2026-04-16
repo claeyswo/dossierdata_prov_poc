@@ -100,12 +100,11 @@ def register_columns_graph(app, registry, get_user, global_access=None):
             # --- Classify activities ---
 
             def resolve_parent(act):
-                if act.informed_by:
-                    try:
-                        pid = UUID(str(act.informed_by))
-                        return activity_by_id.get(pid)
-                    except (ValueError, AttributeError):
-                        pass
+                # Local parent → a same-dossier activity UUID.
+                # Cross-dossier informants have informed_by_uri set
+                # instead and don't participate in this layout.
+                if act.informed_by_activity_id is not None:
+                    return activity_by_id.get(act.informed_by_activity_id)
                 return None
 
             def find_root(act):

@@ -17,7 +17,7 @@ from ..plugin import Plugin
 from .context import ActivityContext, HandlerResult, TaskResult, _PendingEntity
 from .errors import ActivityError, CardinalityError
 from .lookups import lookup_singleton, resolve_from_trigger, resolve_from_prefetched
-from .refs import ENTITY_REF_PATTERN, parse_entity_ref, is_external_uri
+from .refs import ENTITY_REF_PATTERN, EntityRef, is_external_uri
 from .pipeline.authorization import authorize_activity, validate_workflow_rules, _resolve_field
 from .pipeline.eligibility import (
     compute_eligible_activities,

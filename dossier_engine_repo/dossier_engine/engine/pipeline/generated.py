@@ -30,7 +30,7 @@ from uuid import UUID
 from ...db.models import EntityRow
 from ..context import _PendingEntity
 from ..errors import ActivityError
-from ..refs import is_external_uri, parse_entity_ref
+from ..refs import EntityRef, is_external_uri
 from ..state import ActivityState
 
 
@@ -70,14 +70,14 @@ async def process_generated(state: ActivityState) -> None:
         if not content:
             raise ActivityError(422, f"Generated item must have content: {entity_ref}")
 
-        parsed = parse_entity_ref(entity_ref)
-        if not parsed:
+        parsed = EntityRef.parse(entity_ref)
+        if parsed is None:
             raise ActivityError(
                 422, f"Invalid entity reference for generated item: {entity_ref}",
             )
 
-        entity_type = parsed["prefix"]
-        entity_logical_id = parsed["id"]
+        entity_type = parsed.type
+        entity_logical_id = parsed.entity_id
 
         if allowed_types and entity_type not in allowed_types:
             raise ActivityError(
@@ -103,13 +103,11 @@ async def process_generated(state: ActivityState) -> None:
         _validate_content(state, entity_type, new_schema_version, content)
 
         state.generated.append({
-            "version_id": parsed["version"],
-            "entity_id": parsed["id"],
+            "version_id": parsed.version_id,
+            "entity_id": parsed.entity_id,
             "type": entity_type,
             "content": content,
-            "derived_from": (
-                UUID(derived_from_ref.split("@")[1]) if derived_from_ref else None
-            ),
+            "derived_from": _parse_derived_from_version(derived_from_ref),
             "ref": entity_ref,
             "schema_version": new_schema_version,
         })
@@ -117,8 +115,8 @@ async def process_generated(state: ActivityState) -> None:
         # Make the pending entity visible to handlers via context.get_typed.
         state.resolved_entities[entity_type] = _PendingEntity(
             content=content,
-            entity_id=parsed["id"],
-            id=parsed["version"],
+            entity_id=parsed.entity_id,
+            id=parsed.version_id,
             attributed_to=state.user.id,
             schema_version=new_schema_version,
         )
@@ -241,10 +239,10 @@ def _parse_derived_from_version(derived_from_ref: str | None) -> UUID | None:
     """
     if derived_from_ref is None:
         return None
-    try:
-        return UUID(derived_from_ref.split("@")[1])
-    except (IndexError, ValueError):
+    parsed = EntityRef.parse(derived_from_ref)
+    if parsed is None:
         raise ActivityError(422, f"Malformed derivedFrom reference: {derived_from_ref}")
+    return parsed.version_id
 
 
 def _latest_version_payload(
@@ -253,7 +251,11 @@ def _latest_version_payload(
     """Build the `latest_version` block returned to clients on derivation
     errors, so they can re-issue against the current head."""
     return {
-        "entity": f"{entity_type}/{entity_logical_id}@{row.id}",
+        "entity": str(EntityRef(
+            type=entity_type,
+            entity_id=entity_logical_id,
+            version_id=row.id,
+        )),
         "versionId": str(row.id),
         "content": row.content,
     }

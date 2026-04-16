@@ -23,7 +23,7 @@ sides and raise on overlap.
 from __future__ import annotations
 
 from ..errors import ActivityError
-from ..refs import is_external_uri, parse_entity_ref
+from ..refs import EntityRef
 from ..state import ActivityState
 
 
@@ -70,9 +70,9 @@ def enforce_used_generated_disjoint(state: ActivityState) -> None:
         if ref.get("external"):
             used_external_uris.add(entity_str)
             continue
-        parsed = parse_entity_ref(entity_str)
-        if parsed:
-            used_local_ids.add(parsed["id"])
+        parsed = EntityRef.parse(entity_str)
+        if parsed is not None:
+            used_local_ids.add(parsed.entity_id)
 
     if not used_local_ids and not used_external_uris:
         return  # nothing in `used` — can't overlap
@@ -82,7 +82,9 @@ def enforce_used_generated_disjoint(state: ActivityState) -> None:
     for item in state.generated_items:
         entity_str = item.get("entity", "")
 
-        if is_external_uri(entity_str):
+        parsed = EntityRef.parse(entity_str)
+        if parsed is None:
+            # Not a canonical ref — treat as external URI.
             if entity_str in used_external_uris:
                 overlaps.append({
                     "entity": entity_str,
@@ -90,12 +92,11 @@ def enforce_used_generated_disjoint(state: ActivityState) -> None:
                 })
             continue
 
-        parsed = parse_entity_ref(entity_str)
-        if parsed and parsed["id"] in used_local_ids:
+        if parsed.entity_id in used_local_ids:
             overlaps.append({
                 "entity": entity_str,
                 "kind": "local",
-                "entity_id": str(parsed["id"]),
+                "entity_id": str(parsed.entity_id),
             })
 
     if not overlaps:

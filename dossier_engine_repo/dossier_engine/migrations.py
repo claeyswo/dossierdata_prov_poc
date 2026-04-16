@@ -65,6 +65,7 @@ from .app import load_config_and_registry, SYSTEM_USER
 from .db import init_db, get_session_factory
 from .db.models import EntityRow, DossierRow, Repository
 from .engine import execute_activity
+from .engine.refs import EntityRef
 from .entities import SYSTEM_ACTION_DEF
 
 logger = logging.getLogger("dossier.migrations")
@@ -287,9 +288,13 @@ async def _migrate_dossier(
         migrated_entity_ids = []
 
         for row, new_content in entities_to_migrate:
-            old_ref = f"{row.type}/{row.entity_id}@{row.id}"
+            old_ref = str(EntityRef(
+                type=row.type, entity_id=row.entity_id, version_id=row.id,
+            ))
             new_vid = uuid4()
-            new_ref = f"{row.type}/{row.entity_id}@{new_vid}"
+            new_ref = str(EntityRef(
+                type=row.type, entity_id=row.entity_id, version_id=new_vid,
+            ))
 
             generated_items.append({
                 "entity": new_ref,
@@ -301,7 +306,9 @@ async def _migrate_dossier(
         # Add the system:note recording this migration
         note_eid = uuid4()
         note_vid = uuid4()
-        note_ref = f"system:note/{note_eid}@{note_vid}"
+        note_ref = str(EntityRef(
+            type="system:note", entity_id=note_eid, version_id=note_vid,
+        ))
         generated_items.append({
             "entity": note_ref,
             "content": {

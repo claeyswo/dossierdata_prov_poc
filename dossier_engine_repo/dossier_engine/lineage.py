@@ -93,10 +93,14 @@ async def find_related_entity(
             for used_entity in used:
                 if used_entity.generated_by is not None:
                     next_frontier.append(used_entity.generated_by)
-            # (b) Through the informed_by chain.
+            # (b) Through the informed_by chain — only same-dossier.
+            # Cross-dossier references (informed_by_uri) can't be walked
+            # from within one repository scope; the lineage walker is
+            # intra-dossier by design.
             activity_row = await repo.get_activity(activity_id)
-            if activity_row is not None and activity_row.informed_by is not None:
-                next_frontier.append(activity_row.informed_by)
+            if (activity_row is not None
+                    and activity_row.informed_by_activity_id is not None):
+                next_frontier.append(activity_row.informed_by_activity_id)
 
         frontier = next_frontier
 

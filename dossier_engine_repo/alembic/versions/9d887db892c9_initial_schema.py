@@ -42,13 +42,18 @@ def upgrade() -> None:
     sa.Column('id', sa.UUID(), nullable=False),
     sa.Column('dossier_id', sa.UUID(), nullable=False),
     sa.Column('type', sa.Text(), nullable=False),
-    sa.Column('informed_by', sa.Text(), nullable=True),
+    sa.Column('informed_by_activity_id', sa.UUID(), nullable=True),
+    sa.Column('informed_by_uri', sa.Text(), nullable=True),
     sa.Column('computed_status', sa.Text(), nullable=True),
     sa.Column('started_at', sa.DateTime(timezone=True), nullable=False),
     sa.Column('ended_at', sa.DateTime(timezone=True), nullable=True),
     sa.Column('created_at', sa.DateTime(timezone=True), nullable=True),
     sa.ForeignKeyConstraint(['dossier_id'], ['dossiers.id'], ),
-    sa.PrimaryKeyConstraint('id')
+    sa.PrimaryKeyConstraint('id'),
+    sa.CheckConstraint(
+        '(informed_by_activity_id IS NULL) OR (informed_by_uri IS NULL)',
+        name='ck_activities_informed_by_one_of',
+    ),
     )
     op.create_index('ix_activities_dossier_id', 'activities', ['dossier_id'], unique=False)
     op.create_index('ix_activities_dossier_type', 'activities', ['dossier_id', 'type'], unique=False)
