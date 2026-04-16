@@ -315,7 +315,7 @@ The worker is production-ready and safe to deploy redundantly. Every significant
 - `attempt_count` is incremented.
 - If `attempt_count >= max_attempts` (default 3), the new version has `status = "dead_letter"` — terminal, never picked up by the worker again.
 - Otherwise, the new version stays in `status = "scheduled"` but gains a `next_attempt_at` field set to `now + base_delay_seconds * 2**(attempt_count - 1) * (1 + jitter)` where jitter is uniform in `[-0.1, 0.1]`. The default `base_delay_seconds` is 60, so failures retry at roughly 60s, 120s, 240s for attempts 1, 2, 3. The jitter prevents thundering-herd retries.
-- Error telemetry — exception type, message, full stack trace — goes to the Python `logging` system via `logger.exception(..., extra={...})` with structured fields (task_id, dossier_id, attempt_count, max_attempts, function, kind). Deployments wire this to Sentry via `sentry_sdk`'s logging integration: ERROR-level events with `exc_info` become full Sentry events automatically, with the `extra` fields showing up as tags. WARNING-level retries are typically dropped at the Sentry level so transient flakiness doesn't swamp the error budget. The task content itself does NOT carry error text — only operational state (`attempt_count`, `last_attempt_at`, `next_attempt_at`) that the poll loop needs for retry decisions. To investigate a dead-lettered task, query Sentry (or your logging backend) by `task_id` and see the complete attempt-by-attempt history with stack traces.
+- Error telemetry is handled in two layers. Log records go to the Python `logging` system via `logger.warning(..., exc_info=...)` (retries) and `logger.error(..., exc_info=...)` (dead-letter), both with structured `extra` fields (`task_id`, `task_entity_id`, `dossier_id`, `function`, `kind`, `attempt_count`, `max_attempts`). On top of that, the worker directly calls `sentry_sdk.capture_exception(...)` at three specific decision points — retry, dead-letter, and worker-loop crash — with explicit fingerprints that control how events group into Sentry issues. See the [Worker → Sentry](#worker--sentry) section below for the fingerprinting contract. The task content itself does NOT carry error text — only operational state (`attempt_count`, `last_attempt_at`, `next_attempt_at`) that the poll loop needs for retry decisions.
 
 Tasks can override `max_attempts` and `base_delay_seconds` in their content to opt into a different retry shape — e.g. a cross-dossier task that calls a flaky external service might use `max_attempts=5, base_delay_seconds=30` for faster, more aggressive retry. All retry state goes through the same `complete_task → execute_activity → systemAction` pathway as happy-path completions, so every write is validated, every post-activity hook fires, and the full PROV graph is preserved.
 
@@ -417,6 +417,47 @@ ORDER BY (content->>'next_attempt_at')::timestamptz;
 For the full attempt history of a specific task (who failed, when, what error), query Sentry by `task_id:<entity_id>`. The database only stores operational state, not error details.
 
 **Running multiple workers.** On Postgres with `FOR UPDATE OF entities SKIP LOCKED`, concurrent workers are safe by construction. Run as many as your task throughput requires. A sensible starting point is one worker per CPU core for CPU-bound task functions, or a few workers per core for IO-bound ones. All workers connect to the same Postgres instance; no other coordination is needed.
+
+### Worker → Sentry
+
+The worker emits Sentry events explicitly at three decision points, with fingerprints chosen so operators get one issue per logical problem — not one per log line.
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│ Event                          │ Level     │ Fingerprint         │
+├────────────────────────────────┼───────────┼─────────────────────┤
+│ Task retry failure             │ warning   │ ["worker.task.      │
+│                                │           │   retry",           │
+│                                │           │   <function>]       │
+├────────────────────────────────┼───────────┼─────────────────────┤
+│ Task escalated to dead_letter  │ error     │ ["worker.task.      │
+│                                │           │   dead_letter",     │
+│                                │           │   <function>,       │
+│                                │           │   <task_entity_id>] │
+├────────────────────────────────┼───────────┼─────────────────────┤
+│ Worker loop itself crashed     │ fatal     │ ["worker.loop.      │
+│                                │           │   crash"]           │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+**Retries** collapse by task function. All SMTP flakes from `send_ontvangstbevestiging` go into one issue whose event count tells you how much SMTP is flaking. Operators see a trend, not a flood.
+
+**Dead-letters** are per-task. Each dead-lettered task is its own Sentry issue, tagged with task id, function, dossier id. Operators investigate, fix, then requeue via `--requeue-dead-letters --task=<uuid>`. Resolving the Sentry issue goes hand-in-hand with requeueing the task.
+
+**Worker-loop crashes** collapse into one. If the poll loop itself throws — Postgres goes away, async runtime explodes — you get one issue, not N (one per failed poll cycle).
+
+Log records still ride along. The `LoggingIntegration` is configured with `event_level=None` so `logger.info(...)`, `logger.warning(...)`, `logger.error(...)` become Sentry **breadcrumbs** (context threaded onto the next explicit event), not standalone events. Every Sentry event carries the last ~100 log records as a trail, which means an investigator clicking through an event sees what the worker was doing right before the failure.
+
+**Configuration.** The worker calls `init_sentry()` at startup. It reads `SENTRY_DSN` from the environment; if unset (or `sentry_sdk` isn't installed), all Sentry calls are silent no-ops. Deployments wire it via:
+
+```bash
+export SENTRY_DSN='https://xxx@yyy.ingest.sentry.io/zzz'
+export SENTRY_ENVIRONMENT='prod'   # optional
+export SENTRY_RELEASE='v1.2.3'     # optional
+python -m dossier_engine.worker
+```
+
+**Per-event tags** attached to every Sentry event: `task_id`, `task_entity_id`, `dossier_id`, `task_function`, `task_attempt`, `task_phase` (one of `retry` / `dead_letter`). `max_attempts` is attached as extra context. This makes Sentry queries like `task_function:move_bijlagen_to_permanent AND task_phase:dead_letter` work out of the box.
 
 ## Plugin Extension Points
 

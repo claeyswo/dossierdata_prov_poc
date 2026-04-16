@@ -30,6 +30,12 @@ from .app import load_config_and_registry, SYSTEM_USER
 from .db import init_db, get_session_factory
 from .db.models import EntityRow, Repository
 from .engine import ActivityContext, Caller, execute_activity
+from .sentry_integration import (
+    init_sentry,
+    capture_task_retry,
+    capture_task_dead_letter,
+    capture_worker_loop_crash,
+)
 
 logger = logging.getLogger("dossier.worker")
 
@@ -289,6 +295,18 @@ async def _record_failure(
             task.id, attempt_count, max_attempts,
             exc_info=error, extra=log_extra,
         )
+        # Explicit Sentry event with per-task fingerprint: each
+        # dead-lettered task is its own issue (operator needs to
+        # investigate/fix/requeue individually).
+        capture_task_dead_letter(
+            exc=error,
+            task_id=task.id,
+            task_entity_id=task.entity_id,
+            dossier_id=dossier_id,
+            function=task.content.get("function"),
+            attempt_count=attempt_count,
+            max_attempts=max_attempts,
+        )
         await complete_task(
             repo, plugin, dossier_id, task,
             status="dead_letter",
@@ -307,6 +325,18 @@ async def _record_failure(
             "Task %s: attempt %d/%d failed, retry at %s",
             task.id, attempt_count, max_attempts, next_attempt_at.isoformat(),
             exc_info=error, extra=log_extra,
+        )
+        # Explicit Sentry event with per-function fingerprint: all
+        # retries of the same task function collapse into ONE issue
+        # (event count reflects retry rate — signal, not noise).
+        capture_task_retry(
+            exc=error,
+            task_id=task.id,
+            task_entity_id=task.entity_id,
+            dossier_id=dossier_id,
+            function=task.content.get("function"),
+            attempt_count=attempt_count,
+            max_attempts=max_attempts,
         )
         await complete_task(
             repo, plugin, dossier_id, task,
@@ -754,6 +784,11 @@ async def worker_loop(config_path: str = "config.yaml", poll_interval: int = 10,
     # or `alembic upgrade head`). The worker does not create or migrate
     # tables — it only needs the engine connection.
 
+    # Initialize Sentry if SENTRY_DSN is set. No-op otherwise.
+    # Placed after config load so deployments can override DSN via
+    # config in the future if they want to, though env var wins for now.
+    init_sentry()
+
     shutdown = asyncio.Event()
 
     def _on_signal(signum, _frame):
@@ -766,6 +801,28 @@ async def worker_loop(config_path: str = "config.yaml", poll_interval: int = 10,
     logger.info(f"Worker started. Poll interval: {poll_interval}s. Once: {once}")
 
     session_factory = get_session_factory()
+
+    try:
+        await _worker_loop_body(session_factory, registry, shutdown, poll_interval, once)
+    except (KeyboardInterrupt, SystemExit):
+        # Not a crash — these are expected ways to stop the worker.
+        raise
+    except Exception as exc:
+        # Top-level worker-loop crash. This is the "the worker itself
+        # died" signal — distinct from the per-task retry/dead_letter
+        # events handled inside the loop. Single fingerprint so all
+        # such crashes group into one Sentry issue.
+        logger.exception("Worker loop crashed")
+        capture_worker_loop_crash(exc)
+        raise
+    finally:
+        logger.info("Worker stopped")
+
+
+async def _worker_loop_body(session_factory, registry, shutdown, poll_interval: int, once: bool):
+    """Extracted body of the poll/drain loop. See `worker_loop` for
+    the top-level orchestration (config load, DB init, Sentry init,
+    signal wiring, top-level try/except)."""
 
     while not shutdown.is_set():
         # Inner drain loop — keep claiming and executing one task at
@@ -853,8 +910,6 @@ async def worker_loop(config_path: str = "config.yaml", poll_interval: int = 10,
             await asyncio.wait_for(shutdown.wait(), timeout=poll_interval)
         except asyncio.TimeoutError:
             pass
-
-    logger.info("Worker stopped")
 
 
 async def _select_dead_lettered_tasks(
