@@ -199,18 +199,24 @@ relations:
 
   - type: "oe:betreft"
     kind: "domain"
+    from_types: ["entity"]
+    to_types: ["external_uri"]
     description: >
       Links an entity to the external object it concerns (e.g. an aanvraag
       to an erfgoedobject in the inventaris).
 
   - type: "oe:valtOnder"
     kind: "domain"
+    from_types: ["entity"]
+    to_types: ["external_uri"]
     description: >
       Legal basis classification — links a beslissing to the applicable
       legal article or regulation.
 
   - type: "oe:gerelateerd_aan"
     kind: "domain"
+    from_types: ["dossier"]
+    to_types: ["dossier"]
     description: >
       Cross-dossier relation — links this dossier to another related dossier.
 

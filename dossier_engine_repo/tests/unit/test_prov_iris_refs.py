@@ -90,3 +90,78 @@ class TestClassifyRef:
     def test_non_platform_https(self):
         """An HTTPS URI not under the dossier base is external."""
         assert classify_ref("https://codex.vlaanderen.be/artikel/17") == "external_uri"
+
+
+class TestValidateRefTypes:
+    """_validate_ref_types checks from/to against declared constraints."""
+
+    def test_valid_entity_to_external(self):
+        """entity → external_uri passes when declared."""
+        from dossier_engine.engine.pipeline.relations import _validate_ref_types
+        # Should not raise
+        _validate_ref_types(
+            "oe:betreft",
+            "oe:aanvraag/e1000000-0000-0000-0000-000000000001@f1000000-0000-0000-0000-000000000001",
+            "https://id.erfgoed.net/erfgoedobjecten/10001",
+            {"from_types": ["entity"], "to_types": ["external_uri"]},
+        )
+
+    def test_wrong_from_type_rejected(self):
+        """dossier ref as 'from' when only entity is allowed → 422."""
+        from dossier_engine.engine.pipeline.relations import _validate_ref_types
+        from dossier_engine.engine.errors import ActivityError
+        import pytest
+        with pytest.raises(ActivityError) as exc_info:
+            _validate_ref_types(
+                "oe:betreft",
+                "dossier:d2000000-0000-0000-0000-000000000001",
+                "https://id.erfgoed.net/erfgoedobjecten/10001",
+                {"from_types": ["entity"], "to_types": ["external_uri"]},
+            )
+        assert exc_info.value.status_code == 422
+        assert "dossier" in str(exc_info.value)
+
+    def test_wrong_to_type_rejected(self):
+        """entity ref as 'to' when only external_uri is allowed → 422."""
+        from dossier_engine.engine.pipeline.relations import _validate_ref_types
+        from dossier_engine.engine.errors import ActivityError
+        import pytest
+        with pytest.raises(ActivityError) as exc_info:
+            _validate_ref_types(
+                "oe:betreft",
+                "oe:aanvraag/e1000000-0000-0000-0000-000000000001@f1000000-0000-0000-0000-000000000001",
+                "oe:beslissing/e2000000-0000-0000-0000-000000000001@f2000000-0000-0000-0000-000000000001",
+                {"from_types": ["entity"], "to_types": ["external_uri"]},
+            )
+        assert exc_info.value.status_code == 422
+        assert "entity" in str(exc_info.value)
+
+    def test_dossier_to_dossier_valid(self):
+        """dossier → dossier passes for gerelateerd_aan."""
+        from dossier_engine.engine.pipeline.relations import _validate_ref_types
+        _validate_ref_types(
+            "oe:gerelateerd_aan",
+            "dossier:d1",
+            "dossier:d2",
+            {"from_types": ["dossier"], "to_types": ["dossier"]},
+        )
+
+    def test_no_constraints_skips_validation(self):
+        """When from_types/to_types are absent, anything passes."""
+        from dossier_engine.engine.pipeline.relations import _validate_ref_types
+        _validate_ref_types(
+            "oe:custom",
+            "dossier:d1",
+            "https://example.com/whatever",
+            {},  # no from_types, no to_types
+        )
+
+    def test_multiple_allowed_types(self):
+        """from_types can allow multiple kinds."""
+        from dossier_engine.engine.pipeline.relations import _validate_ref_types
+        _validate_ref_types(
+            "oe:mixed",
+            "dossier:d1",
+            "https://example.com/thing",
+            {"from_types": ["entity", "dossier"], "to_types": ["external_uri"]},
+        )

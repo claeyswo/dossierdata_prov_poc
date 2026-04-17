@@ -142,6 +142,33 @@ def validate_workflow_version_references(
 
 
 @dataclass
+class FieldValidator:
+    """A field-level validator with optional request/response models
+    for OpenAPI documentation.
+
+    When ``request_model`` and ``response_model`` are provided, the
+    engine generates a typed endpoint with proper schema documentation
+    in the Swagger UI. Without them, the endpoint accepts/returns
+    generic JSON.
+
+    Example::
+
+        FieldValidator(
+            fn=validate_erfgoedobject,
+            request_model=ErfgoedobjectRequest,
+            response_model=ErfgoedobjectResponse,
+            summary="Valideer erfgoedobject URI",
+            description="Controleer of de URI verwijst naar een gekend erfgoedobject.",
+        )
+    """
+    fn: Callable
+    request_model: type[BaseModel] | None = None
+    response_model: type[BaseModel] | None = None
+    summary: str | None = None
+    description: str | None = None
+
+
+@dataclass
 class Plugin:
     """A workflow plugin registration."""
 
@@ -172,14 +199,10 @@ class Plugin:
     relation_validators: dict[str, Callable] = field(default_factory=dict)
 
     # Lightweight field-level validators callable between activities
-    # via POST /{workflow}/validate/{name}. Each validator is an async
-    # callable that receives the request body (dict) and returns a
-    # result dict. Used for checks that need server-side logic
-    # (URI resolution, cross-field rules) but shouldn't wait until
-    # activity submission. Signature:
-    #   async def validator(body: dict) -> dict
-    # Return {"valid": True, ...} or {"valid": False, "error": "..."}.
-    field_validators: dict[str, Callable] = field(default_factory=dict)
+    # via POST /{workflow}/validate/{name}. Each entry is either a
+    # bare async callable (legacy) or a FieldValidator with request/
+    # response models for OpenAPI documentation.
+    field_validators: dict[str, "Callable | FieldValidator"] = field(default_factory=dict)
 
     # Called after each activity completes (inside the transaction).
     # Signature: async def hook(repo, dossier_id, activity_type, status, entities) -> None

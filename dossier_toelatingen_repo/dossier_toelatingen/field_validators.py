@@ -120,7 +120,62 @@ async def validate_handeling(body: dict) -> dict:
     return {"valid": True}
 
 
+# =====================================================================
+# Request / response models for OpenAPI documentation
+# =====================================================================
+
+from pydantic import BaseModel
+from typing import Optional
+from dossier_engine.plugin import FieldValidator
+
+
+class ErfgoedobjectRequest(BaseModel):
+    """Valideer of een erfgoedobject URI gekend is in de inventaris."""
+    uri: str
+
+
+class ErfgoedobjectResponse(BaseModel):
+    """Resultaat van de erfgoedobject validatie."""
+    valid: bool
+    label: Optional[str] = None
+    type: Optional[str] = None
+    gemeente: Optional[str] = None
+    error: Optional[str] = None
+
+
+class HandelingRequest(BaseModel):
+    """Valideer of een handeling toegelaten is voor een erfgoedobject."""
+    erfgoedobject_uri: str
+    handeling: str
+
+
+class HandelingResponse(BaseModel):
+    """Resultaat van de handeling validatie."""
+    valid: bool
+    error: Optional[str] = None
+
+
 FIELD_VALIDATORS = {
-    "erfgoedobject": validate_erfgoedobject,
-    "handeling": validate_handeling,
+    "erfgoedobject": FieldValidator(
+        fn=validate_erfgoedobject,
+        request_model=ErfgoedobjectRequest,
+        response_model=ErfgoedobjectResponse,
+        summary="Valideer erfgoedobject URI",
+        description=(
+            "Controleer of de URI verwijst naar een gekend "
+            "erfgoedobject in de inventaris. Retourneert het "
+            "label, type en gemeente bij succes."
+        ),
+    ),
+    "handeling": FieldValidator(
+        fn=validate_handeling,
+        request_model=HandelingRequest,
+        response_model=HandelingResponse,
+        summary="Valideer handeling voor erfgoedobject",
+        description=(
+            "Controleer of een handeling (renovatie, sloop, ...) "
+            "toegelaten is voor het type erfgoedobject (monument, "
+            "landschap, ...) waarnaar de URI verwijst."
+        ),
+    ),
 }

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from fastapi import FastAPI, HTTPException
 
-from ..plugin import PluginRegistry
+from ..plugin import PluginRegistry, FieldValidator
 
 
 def register(
@@ -68,6 +68,7 @@ def register(
 
     # --- Validation endpoints ---
 
+    # List endpoint (always generic — returns names).
     @app.get(
         "/{workflow}/validate",
         tags=["validation"],
@@ -84,31 +85,72 @@ def register(
         names = sorted(plugin.field_validators.keys())
         return {"validators": names}
 
-    @app.post(
-        "/{workflow}/validate/{validator_name}",
-        tags=["validation"],
-        summary="Run a field-level validator",
-        description=(
-            "Lightweight validation between activities. Runs a "
-            "plugin-registered callable that checks one thing "
-            "(URI resolution, cross-field rules, etc.) without "
-            "touching the activity pipeline. No DB writes, no "
-            "PROV records."
-        ),
-    )
-    async def run_validator(workflow: str, validator_name: str, body: dict):
-        plugin = registry.get(workflow)
-        if not plugin:
-            raise HTTPException(404, detail=f"Unknown workflow: {workflow}")
-
-        validator = plugin.field_validators.get(validator_name)
-        if validator is None:
-            available = sorted(plugin.field_validators.keys())
-            raise HTTPException(
-                404,
-                detail=f"No validator '{validator_name}' in workflow "
-                       f"'{workflow}'. Available: {available}",
+    # Per-validator typed routes — registered at startup so each
+    # validator gets its own OpenAPI schema with request/response
+    # models, summary, and description.
+    for plugin in registry.all_plugins():
+        workflow_name = plugin.name
+        for validator_name, validator_entry in plugin.field_validators.items():
+            _register_validator_route(
+                app=app,
+                workflow_name=workflow_name,
+                validator_name=validator_name,
+                validator_entry=validator_entry,
             )
 
-        result = await validator(body)
-        return result
+
+def _register_validator_route(
+    *,
+    app: FastAPI,
+    workflow_name: str,
+    validator_name: str,
+    validator_entry,
+) -> None:
+    """Register one typed validation endpoint with proper OpenAPI
+    schema. If the entry is a bare callable (legacy), falls back
+    to generic dict input/output."""
+    from ..plugin import FieldValidator
+    import inspect
+
+    if isinstance(validator_entry, FieldValidator):
+        fv = validator_entry
+        fn = fv.fn
+        req_model = fv.request_model
+        resp_model = fv.response_model
+        summary = fv.summary or f"Validate {validator_name}"
+        description = fv.description or ""
+    else:
+        fn = validator_entry
+        req_model = None
+        resp_model = None
+        summary = f"Validate {validator_name}"
+        description = ""
+
+    # Capture fn via closure (not default arg, which leaks into
+    # the OpenAPI schema as a non-serializable default).
+    _fn = fn
+
+    if req_model:
+        async def endpoint(body):
+            return await _fn(body.model_dump())
+
+        endpoint.__annotations__ = {"body": req_model, "return": resp_model or dict}
+    else:
+        async def endpoint(body: dict):
+            return await _fn(body)
+
+    endpoint.__name__ = f"validate_{workflow_name}_{validator_name}"
+    endpoint.__qualname__ = f"validate_{workflow_name}_{validator_name}"
+
+    kwargs = {
+        "tags": [workflow_name],
+        "summary": summary,
+        "description": description,
+    }
+    if resp_model:
+        kwargs["response_model"] = resp_model
+
+    app.post(
+        f"/{workflow_name}/validate/{validator_name}",
+        **kwargs,
+    )(endpoint)

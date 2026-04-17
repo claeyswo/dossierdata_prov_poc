@@ -165,15 +165,15 @@ class TestValidation:
             json={},
         )
         assert r.status_code == 404
-        assert "Available" in r.json()["detail"]
 
     async def test_validate_missing_fields(self, activity_client):
-        """POST with empty body returns valid=false with field hint."""
+        """POST with empty body returns 422 — the Pydantic model
+        catches the missing required field before our validator runs."""
         r = await activity_client.post(
             "/toelatingen/validate/erfgoedobject",
             json={},
         )
-        assert r.status_code == 200
-        body = r.json()
-        assert body["valid"] is False
-        assert "uri" in body["error"].lower()
+        assert r.status_code == 422
+        detail = r.json()["detail"]
+        # FastAPI's validation error includes the field name.
+        assert any("uri" in str(e.get("loc", "")) for e in detail)

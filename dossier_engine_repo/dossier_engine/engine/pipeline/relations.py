@@ -88,13 +88,71 @@ def _relation_kind(
     """Determine the kind (process_control or domain) for a relation
     type. Checks activity-level first, then workflow-level. Defaults
     to process_control for backwards compatibility."""
+    decl = _relation_type_declaration(plugin, activity_def, rel_type)
+    return decl.get("kind", "process_control")
+
+
+def _relation_type_declaration(
+    plugin: Plugin, activity_def: dict, rel_type: str,
+) -> dict:
+    """Look up the full declaration dict for a relation type.
+
+    Checks the activity-level ``relations:`` block first, then the
+    workflow-level ``relations:`` block. Returns an empty dict if
+    the type isn't declared anywhere (shouldn't happen — the
+    permission gate catches undeclared types before this runs).
+    """
+    # Activity level
     decls = _relation_declarations(activity_def)
     if rel_type in decls:
-        return decls[rel_type].get("kind", "process_control")
+        return decls[rel_type]
+    # Workflow level
     for e in plugin.workflow.get("relations", []):
         if isinstance(e, dict) and e.get("type") == rel_type:
-            return e.get("kind", "process_control")
-    return "process_control"
+            return e
+    return {}
+
+
+def _validate_ref_types(
+    rel_type: str,
+    from_ref: str,
+    to_ref: str,
+    declaration: dict,
+) -> None:
+    """Validate that ``from_ref`` and ``to_ref`` match the declared
+    ``from_types`` and ``to_types`` on a domain relation type.
+
+    Uses ``classify_ref`` on the *original* (pre-expansion) ref
+    so that both shorthand and expanded forms work.
+
+    Skips validation if ``from_types`` / ``to_types`` are not
+    declared — the constraint is opt-in per relation type.
+
+    Raises ``ActivityError(422)`` on mismatch.
+    """
+    from ...prov_iris import classify_ref
+
+    from_types = declaration.get("from_types")
+    if from_types:
+        actual = classify_ref(from_ref)
+        if actual not in from_types:
+            raise ActivityError(
+                422,
+                f"Relation '{rel_type}': 'from' ref must be one of "
+                f"{from_types}, got '{actual}' "
+                f"(ref: {from_ref}).",
+            )
+
+    to_types = declaration.get("to_types")
+    if to_types:
+        actual = classify_ref(to_ref)
+        if actual not in to_types:
+            raise ActivityError(
+                422,
+                f"Relation '{rel_type}': 'to' ref must be one of "
+                f"{to_types}, got '{actual}' "
+                f"(ref: {to_ref}).",
+            )
 
 
 # =====================================================================
@@ -169,9 +227,9 @@ async def _handle_domain_add(
 ) -> None:
     """Validate and stage a domain relation for persistence.
 
-    Expands shorthand refs (``oe:type/eid@vid``, ``dossier:did``,
-    etc.) to full IRIs before storing, so ``domain_relations`` rows
-    always contain resolvable, self-describing URIs."""
+    Validates ``from_types`` / ``to_types`` constraints on the
+    *original* refs (before expansion), then expands shorthand refs
+    to full IRIs for storage."""
     from ...prov_iris import expand_ref
 
     to_ref = rel_item.get("to")
@@ -181,6 +239,12 @@ async def _handle_domain_add(
             f"Domain relation '{rel_type}' requires both 'from' "
             f"and 'to': {rel_item}",
         )
+
+    # Validate ref kinds against declared from_types / to_types.
+    decl = _relation_type_declaration(
+        state.plugin, state.activity_def, rel_type,
+    )
+    _validate_ref_types(rel_type, from_ref, to_ref, decl)
 
     # Expand shorthand → full IRI.
     from_iri = expand_ref(from_ref, state.dossier_id)
@@ -266,6 +330,12 @@ async def _parse_remove_relations(
                 f"Allowed operations: "
                 f"{sorted(_allowed_operations(state.activity_def, rel_type))}",
             )
+
+        # Validate ref kinds against declared from_types / to_types.
+        decl = _relation_type_declaration(
+            state.plugin, state.activity_def, rel_type,
+        )
+        _validate_ref_types(rel_type, from_ref, to_ref, decl)
 
         # Expand shorthand → full IRI (must match what was stored).
         from_iri = expand_ref(from_ref, state.dossier_id)
