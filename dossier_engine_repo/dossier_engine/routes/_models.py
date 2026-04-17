@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class UsedItem(BaseModel):
@@ -57,9 +57,57 @@ class RelationItem(BaseModel):
     The `type` string is validated against the activity's YAML
     declaration of allowed relation types. Plugins register validators
     per type to enforce semantics (e.g. neemtAkteVan must cover every
-    version between the declared used version and the current latest)."""
-    entity: str
+    version between the declared used version and the current latest).
+
+    Also used for domain relations with `from` and `to` fields:
+
+        {"type": "oe:betreft", "from": "oe:aanvraag/X@v1", "to": "https://..."}
+
+    The engine distinguishes between process-control (has `entity`)
+    and domain (has `from` + `to`) by inspecting which fields are set.
+    """
     type: str
+    # Process-control form: activity → entity
+    entity: Optional[str] = None
+    # Domain form: entity → entity/URI
+    from_ref: Optional[str] = Field(None, alias="from")
+    to: Optional[str] = None
+
+    model_config = {"populate_by_name": True}
+
+    def model_post_init(self, __context):
+        has_entity = self.entity is not None
+        has_domain = self.from_ref is not None or self.to is not None
+        if has_entity and has_domain:
+            raise ValueError(
+                "Use either 'entity' (process-control) or "
+                "'from'/'to' (domain), not both"
+            )
+        if has_domain and (self.from_ref is None or self.to is None):
+            raise ValueError(
+                "Domain relations require both 'from' and 'to'"
+            )
+        if not has_entity and not has_domain:
+            raise ValueError(
+                "Relation must have either 'entity' or 'from'/'to'"
+            )
+
+    @property
+    def is_domain(self) -> bool:
+        return self.from_ref is not None
+
+
+class RemoveRelationItem(BaseModel):
+    """Identifies a domain relation to supersede.
+
+    Matched against active (non-superseded) rows in domain_relations
+    by (type, from, to). The engine sets superseded_by_activity_id
+    and superseded_at on the matched row."""
+    type: str
+    from_ref: str = Field(alias="from")
+    to: str
+
+    model_config = {"populate_by_name": True}
 
 
 class ActivityRequest(BaseModel):
@@ -70,6 +118,7 @@ class ActivityRequest(BaseModel):
     used: list[UsedItem] = []
     generated: list[GeneratedItem] = []
     relations: list[RelationItem] = []
+    remove_relations: list[RemoveRelationItem] = []
 
 
 class BatchActivityItem(BaseModel):
@@ -81,6 +130,7 @@ class BatchActivityItem(BaseModel):
     used: list[UsedItem] = []
     generated: list[GeneratedItem] = []
     relations: list[RelationItem] = []
+    remove_relations: list[RemoveRelationItem] = []
 
 
 class BatchActivityRequest(BaseModel):
@@ -134,6 +184,16 @@ class FullResponse(BaseModel):
     dossier: DossierResponse
 
 
+class DomainRelationResponse(BaseModel):
+    type: str
+    from_ref: str = Field(alias="from")
+    to: str
+    createdBy: str
+    createdAt: str
+
+    model_config = {"populate_by_name": True}
+
+
 class DossierDetailResponse(BaseModel):
     id: str
     workflow: str
@@ -141,3 +201,4 @@ class DossierDetailResponse(BaseModel):
     allowedActivities: list[dict[str, str]] = []
     currentEntities: list[dict[str, Any]] = []
     activities: list[dict[str, Any]] = []
+    domainRelations: list[DomainRelationResponse] = []

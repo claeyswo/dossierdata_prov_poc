@@ -84,6 +84,7 @@ class ActivityState:
     used_items: list[dict]
     generated_items: list[dict]
     relation_items: list[dict]
+    remove_relation_items: list[dict] = field(default_factory=list)
     workflow_name: str | None = None
     informed_by: str | None = None
     skip_cache: bool = False
@@ -141,6 +142,15 @@ class ActivityState:
     # dispatch loop to feed the right slice into each registered
     # validator.
     relations_by_type: dict[str, list[dict]] = field(default_factory=dict)
+
+    # Set by the `relations` phase for domain-kind relations (those
+    # with `from` + `to` instead of `entity`). Each item is a dict
+    # `{"relation_type": str, "from_ref": str, "to_ref": str}`.
+    validated_domain_relations: list[dict] = field(default_factory=list)
+
+    # Set by the `relations` phase for domain relations to remove.
+    # Each item is `{"relation_type": str, "from_ref": str, "to_ref": str}`.
+    validated_remove_relations: list[dict] = field(default_factory=list)
 
     # Set by the `tombstone` phase iff the activity is the built-in
     # `tombstone` activity. List of version_ids whose content should be

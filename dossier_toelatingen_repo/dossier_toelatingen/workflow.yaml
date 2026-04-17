@@ -131,11 +131,29 @@ tombstone:
 # semantics if no validator is registered).
 relations:
   - type: "oe:neemtAkteVan"
+    kind: "process_control"
     description: >
       Acknowledges that the client is aware of a newer version of an entity
       it used, and has chosen to proceed with the older version anyway. The
       engine rejects an activity whose `used` block references a stale
       entity version unless every intervening newer version is listed here.
+
+  - type: "oe:betreft"
+    kind: "domain"
+    description: >
+      Links an entity to the external object it concerns (e.g. an aanvraag
+      to an erfgoedobject in the inventaris).
+
+  - type: "oe:valtOnder"
+    kind: "domain"
+    description: >
+      Legal basis classification — links a beslissing to the applicable
+      legal article or regulation.
+
+  - type: "oe:gerelateerd_aan"
+    kind: "domain"
+    description: >
+      Cross-dossier relation — links this dossier to another related dossier.
 
 activities:
 
@@ -178,6 +196,11 @@ activities:
         function: "move_bijlagen_to_permanent"
       - kind: "recorded"
         function: "send_ontvangstbevestiging"
+
+    relations:
+      - type: "oe:betreft"
+        kind: "domain"
+        operations: [add]
 
   - name: "bewerkAanvraag"
     label: "Bewerk aanvraag"
@@ -615,6 +638,42 @@ activities:
         allowed_versions: ["v2"]
 
     status: null
+    validators: []
+    side_effects: []
+    tasks: []
+
+  - name: "bewerkRelaties"
+    label: "Bewerk dossierrelaties"
+    description: "Voeg relaties toe of verwijder ze. Wijzigt geen entiteiten of dossierstatus."
+    can_create_dossier: false
+
+    allowed_roles: ["oe:behandelaar"]
+    default_role: "oe:behandelaar"
+
+    authorization:
+      access: "roles"
+      roles:
+        - role: "behandelaar"
+        - role: "beheerder"
+
+    # No status requirements — available at any point in the lifecycle.
+    requirements: {}
+
+    used: []
+    generates: []
+    status: null
+
+    relations:
+      - type: "oe:betreft"
+        kind: "domain"
+        operations: [add, remove]
+      - type: "oe:valtOnder"
+        kind: "domain"
+        operations: [add, remove]
+      - type: "oe:gerelateerd_aan"
+        kind: "domain"
+        operations: [add, remove]
+
     validators: []
     side_effects: []
     tasks: []

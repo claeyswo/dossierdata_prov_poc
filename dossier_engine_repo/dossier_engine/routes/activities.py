@@ -89,6 +89,7 @@ def register(
                     used=request.used,
                     generated=request.generated,
                     relations=request.relations,
+                    remove_relations=request.remove_relations,
                     workflow_name=request.workflow,
                     informed_by=request.informed_by,
                 )
@@ -131,6 +132,7 @@ def register(
                             used=item.used,
                             generated=item.generated,
                             relations=item.relations,
+                            remove_relations=item.remove_relations,
                             workflow_name=request.workflow,
                             informed_by=item.informed_by,
                         )
@@ -234,6 +236,7 @@ def _register_typed_route(
                     used=request.used,
                     generated=request.generated,
                     relations=request.relations,
+                    remove_relations=request.remove_relations,
                     workflow_name=request.workflow,
                     informed_by=request.informed_by,
                 )
@@ -298,6 +301,7 @@ async def _run_activity(
     used: list,
     generated: list,
     relations: list,
+    remove_relations: list,
     workflow_name: str | None,
     informed_by: str | None,
 ) -> dict:
@@ -338,7 +342,8 @@ async def _run_activity(
             role=role,
             used_items=[u.model_dump() for u in used],
             generated_items=[g.model_dump() for g in generated],
-            relation_items=[r.model_dump() for r in relations],
+            relation_items=[r.model_dump(by_alias=True) for r in relations],
+            remove_relation_items=[r.model_dump(by_alias=True) for r in remove_relations],
             workflow_name=workflow_name,
             informed_by=informed_by,
         )

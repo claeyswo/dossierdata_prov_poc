@@ -162,18 +162,28 @@ def register(app: FastAPI, *, registry, get_user, global_access) -> None:
                     visible_entity_version_ids.add(e.id)
 
             # Activity log filtered per the calling user's view mode.
+            from ._activity_visibility import parse_activity_view, is_activity_visible
+            parsed_view = parse_activity_view(activity_view_mode)
             activities = await repo.get_activities_for_dossier(dossier_id)
+
+            async def _is_agent(act_id, uid):
+                return await _user_is_agent(session, act_id, uid)
+
+            async def _used_ids(act_id):
+                return await repo.get_used_entity_ids_for_activity(act_id)
+
             activity_list = []
             for a in activities:
-                include = await _activity_visible(
-                    session=session,
-                    repo=repo,
-                    activity=a,
-                    user=user,
-                    activity_view_mode=activity_view_mode,
-                    visible_entity_version_ids=visible_entity_version_ids,
+                visible = await is_activity_visible(
+                    parsed_view,
+                    activity_type=a.type,
+                    activity_id=a.id,
+                    user_id=user.id,
+                    visible_entity_ids=visible_entity_version_ids,
+                    lookup_is_agent=_is_agent,
+                    lookup_used_entity_ids=_used_ids,
                 )
-                if include:
+                if visible:
                     activity_list.append({
                         "id": str(a.id),
                         "type": a.type,
@@ -203,6 +213,19 @@ def register(app: FastAPI, *, registry, get_user, global_access) -> None:
                 dossier_status=status,
             )
 
+            # Load active domain relations for the response.
+            domain_rels = await repo.get_active_domain_relations(dossier_id)
+            domain_relations_out = [
+                {
+                    "type": r.relation_type,
+                    "from": r.from_ref,
+                    "to": r.to_ref,
+                    "createdBy": str(r.created_by_activity_id),
+                    "createdAt": r.created_at.isoformat() if r.created_at else None,
+                }
+                for r in domain_rels
+            ]
+
             return DossierDetailResponse(
                 id=str(dossier_id),
                 workflow=dossier.workflow,
@@ -210,6 +233,7 @@ def register(app: FastAPI, *, registry, get_user, global_access) -> None:
                 allowedActivities=allowed,
                 currentEntities=current_entities,
                 activities=activity_list,
+                domainRelations=domain_relations_out,
             )
 
     @app.get(
@@ -245,73 +269,6 @@ def register(app: FastAPI, *, registry, get_user, global_access) -> None:
                 for d in dossiers
             ]
             return {"dossiers": items}
-
-
-async def _activity_visible(
-    *,
-    session,
-    repo: Repository,
-    activity,
-    user: User,
-    activity_view_mode: str | list[str] | dict,
-    visible_entity_version_ids: set,
-) -> bool:
-    """Decide whether the calling user can see this activity in the
-    dossier's activity log.
-
-    Modes:
-
-    * ``"all"`` — show every activity.
-    * ``"own"`` — show only activities where the user is the agent.
-    * ``"related"`` — show activities that touched visible entities,
-      plus the user's own activities.
-    * ``list[str]`` — show only activities whose type is in the list.
-    * ``dict`` — combined mode. Requires ``mode`` (one of the string
-      sentinels above) and optional ``include`` (a list of activity
-      type names that are always visible regardless of the base mode).
-
-      Example::
-
-          activity_view:
-            mode: "own"
-            include: ["neemBeslissing", "neemOntvankelijkheidsbeslissing"]
-
-      This means "show my own activities, PLUS always show any
-      neemBeslissing or neemOntvankelijkheidsbeslissing regardless
-      of who performed it."
-    """
-    # Unwrap dict form: extract the include-list (if any) and the
-    # base mode, then check includes first (short-circuits the more
-    # expensive agent/related queries for the named types).
-    include: set[str] = set()
-    base_mode = activity_view_mode
-    if isinstance(activity_view_mode, dict):
-        base_mode = activity_view_mode.get("mode", "own")
-        include = set(activity_view_mode.get("include", []))
-
-    # Include-list always wins: if the activity type is listed,
-    # show it unconditionally.
-    if include and activity.type in include:
-        return True
-
-    # Fall through to the base mode logic.
-    if base_mode == "all":
-        return True
-
-    if base_mode == "own":
-        return await _user_is_agent(session, activity.id, user.id)
-
-    if base_mode == "related":
-        used_ids = await repo.get_used_entity_ids_for_activity(activity.id)
-        if used_ids & visible_entity_version_ids:
-            return True
-        return await _user_is_agent(session, activity.id, user.id)
-
-    # List of activity type names — match on the activity's type.
-    if isinstance(base_mode, list):
-        return activity.type in base_mode
-
-    return False
 
 
 async def _user_is_agent(session, activity_id: UUID, user_id: str) -> bool:

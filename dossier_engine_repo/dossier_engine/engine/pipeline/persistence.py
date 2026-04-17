@@ -192,3 +192,24 @@ async def persist_outputs(state: ActivityState) -> None:
             entity_version_id=rel["version_id"],
             relation_type=rel["relation_type"],
         )
+
+    # 6. Domain relations — semantic links between entities/URIs.
+    # These go into the domain_relations table, not activity_relations.
+    for rel in state.validated_domain_relations:
+        await state.repo.create_domain_relation(
+            dossier_id=state.dossier_id,
+            relation_type=rel["relation_type"],
+            from_ref=rel["from_ref"],
+            to_ref=rel["to_ref"],
+            created_by_activity_id=state.activity_id,
+        )
+
+    # 7. Domain relation removals — supersede active relations.
+    for rel in state.validated_remove_relations:
+        await state.repo.supersede_domain_relation(
+            dossier_id=state.dossier_id,
+            relation_type=rel["relation_type"],
+            from_ref=rel["from_ref"],
+            to_ref=rel["to_ref"],
+            superseded_by_activity_id=state.activity_id,
+        )

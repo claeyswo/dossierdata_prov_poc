@@ -144,31 +144,29 @@ def register_prov_routes(app, registry: PluginRegistry, get_user, global_access:
 
             # Filter activities by activity_view_mode
             visible_entity_ids = set(e.id for e in all_entities)
-            # Unwrap dict form if present.
-            include_types: set = set()
-            base_mode = activity_view_mode
-            if isinstance(activity_view_mode, dict):
-                base_mode = activity_view_mode.get("mode", "own")
-                include_types = set(activity_view_mode.get("include", []))
 
-            if base_mode != "all":
+            from ._activity_visibility import parse_activity_view, is_activity_visible
+            parsed_view = parse_activity_view(activity_view_mode)
+
+            async def _is_agent(act_id, uid):
+                assocs = assoc_by_activity.get(act_id, [])
+                return any(a.agent_id == uid for a in assocs)
+
+            async def _used_ids(act_id):
+                return set(u.entity_id for u in used_by_activity.get(act_id, []))
+
+            if parsed_view.base != "all" or parsed_view.include:
                 filtered_activities = []
                 for act in activities:
-                    # Include-list always wins.
-                    if include_types and act.type in include_types:
-                        filtered_activities.append(act)
-                    elif base_mode == "own":
-                        assocs = assoc_by_activity.get(act.id, [])
-                        if any(a.agent_id == user.id for a in assocs):
-                            filtered_activities.append(act)
-                    elif base_mode == "related":
-                        assocs = assoc_by_activity.get(act.id, [])
-                        used = used_by_activity.get(act.id, [])
-                        is_own = any(a.agent_id == user.id for a in assocs)
-                        touches_visible = any(u.entity_id in visible_entity_ids for u in used)
-                        if is_own or touches_visible:
-                            filtered_activities.append(act)
-                    elif isinstance(base_mode, list) and act.type in base_mode:
+                    if await is_activity_visible(
+                        parsed_view,
+                        activity_type=act.type,
+                        activity_id=act.id,
+                        user_id=user.id,
+                        visible_entity_ids=visible_entity_ids,
+                        lookup_is_agent=_is_agent,
+                        lookup_used_entity_ids=_used_ids,
+                    ):
                         filtered_activities.append(act)
                 activities = filtered_activities
 
@@ -384,39 +382,29 @@ def register_prov_routes(app, registry: PluginRegistry, get_user, global_access:
             # Apply activity_view access filtering
             visible_entity_version_ids = set(e.id for e in all_entities)
 
-            # Unwrap dict form if present.
-            include_types2: set = set()
-            base_mode2 = activity_view_mode
-            if isinstance(activity_view_mode, dict):
-                base_mode2 = activity_view_mode.get("mode", "own")
-                include_types2 = set(activity_view_mode.get("include", []))
+            from ._activity_visibility import parse_activity_view, is_activity_visible
+            parsed_view = parse_activity_view(activity_view_mode)
 
-            if base_mode2 != "all":
+            async def _is_agent_graph(act_id, uid):
+                assocs = assoc_by_activity.get(act_id, [])
+                return any(a.agent_id == uid for a in assocs)
+
+            async def _used_ids_graph(act_id):
+                return set(u.entity_id for u in used_by_activity.get(act_id, []))
+
+            if parsed_view.base != "all" or parsed_view.include:
                 for act in activities:
                     if act.id in skipped_activity_ids:
                         continue
-                    visible = False
-                    # Include-list always wins.
-                    if include_types2 and act.type in include_types2:
-                        visible = True
-                    elif base_mode2 == "own":
-                        for assoc in assoc_by_activity.get(act.id, []):
-                            if assoc.agent_id == user.id:
-                                visible = True
-                                break
-                    elif base_mode2 == "related":
-                        for used in used_by_activity.get(act.id, []):
-                            if used.entity_id in visible_entity_version_ids:
-                                visible = True
-                                break
-                        if not visible:
-                            for assoc in assoc_by_activity.get(act.id, []):
-                                if assoc.agent_id == user.id:
-                                    visible = True
-                                    break
-                    elif isinstance(base_mode2, list) and act.type in base_mode2:
-                        visible = True
-                    if not visible:
+                    if not await is_activity_visible(
+                        parsed_view,
+                        activity_type=act.type,
+                        activity_id=act.id,
+                        user_id=user.id,
+                        visible_entity_ids=visible_entity_version_ids,
+                        lookup_is_agent=_is_agent_graph,
+                        lookup_used_entity_ids=_used_ids_graph,
+                    ):
                         skipped_activity_ids.add(act.id)
 
             # Only hide entities generated by SYSTEM-skipped activities (not access-skipped)

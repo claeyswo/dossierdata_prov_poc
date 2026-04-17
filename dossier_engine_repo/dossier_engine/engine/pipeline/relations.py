@@ -1,37 +1,33 @@
 """
-Relation processing — the generic PROV-extension edge mechanism.
+Relation processing — process-control and domain relations.
 
-An activity request can carry a `relations` block alongside `used` and
-`generated`. Each entry is a `{entity, type}` pair declaring an
-arbitrary directed relationship from the activity to the named entity,
-under a plugin-defined relation type (e.g. `oe:neemtAkteVan`).
+An activity request can carry a ``relations`` block alongside ``used``
+and ``generated``. Each entry is either:
 
-Two distinct policy layers control which relation types are allowed:
+* **Process-control** (has ``entity``) — a directed edge from the
+  activity to an entity, like ``oe:neemtAkteVan``. Persisted in the
+  ``activity_relations`` table.
 
-1. **Permission gate (workflow + activity level)** — the workflow's
-   top-level `relations:` block declares which types are *permitted*
-   anywhere in the workflow; an activity's own `relations:` block
-   adds activity-specific permissions. The union of these two sets is
-   what the client may send. Anything outside it is a 422.
+* **Domain** (has ``from`` + ``to``) — a semantic edge between two
+  things (entity→entity, entity→URI, dossier→dossier). Persisted in
+  the ``domain_relations`` table. Neither endpoint is the activity;
+  the activity is the *provenance* of the relation.
 
-2. **Validator firing (activity level only)** — a relation validator
-   runs only for relation types listed in the activity's OWN
-   `relations:` block. Workflow-level declarations permit a type to
-   be sent but do NOT cause validators to fire on every activity. This
-   is the activity-level opt-in dispatch contract: each activity
-   declares which relation-type validators it wants enforced.
+The activity may also carry a ``remove_relations`` block (domain only)
+to supersede existing domain relations.
 
-   Why this split? Without it, a workflow-wide `oe:neemtAkteVan`
-   declaration would force the validator to run on every activity,
-   including ones where staleness checking doesn't apply (system
-   side-effects, built-ins, write-only activities). With opt-in,
-   only the activities that genuinely care (e.g. read-only
-   `doeVoorstelBeslissing`) opt in.
+Two policy layers control which relation types are allowed:
 
-The module exposes one public phase function `process_relations`,
-which parses + resolves the incoming entries, then dispatches the
-validators for activity-level opt-in types. Two private helpers
-implement the sub-phases.
+1. **Permission gate** — the union of the workflow's top-level
+   ``relations:`` block and the activity's own ``relations:`` block
+   declares which types may be sent. Anything outside is a 422.
+
+2. **Operations gate** (domain only) — each activity's relation
+   declaration can specify ``operations: [add, remove]``. If only
+   ``[add]`` (the default), remove_relations for that type is rejected.
+
+3. **Validator firing** (activity-level opt-in) — validators run
+   only for types listed in the activity's OWN ``relations:`` block.
 """
 
 from __future__ import annotations
@@ -42,138 +38,257 @@ from ..state import ActivityState
 from ...plugin import Plugin
 
 
-def allowed_relation_types_for_activity(plugin: Plugin, activity_def: dict) -> set[str]:
+# =====================================================================
+# YAML introspection helpers
+# =====================================================================
+
+def _relation_declarations(activity_def: dict) -> dict[str, dict]:
+    """Parse the activity's ``relations:`` block into a dict of
+    type → declaration (with kind, operations, etc.)."""
+    decls = {}
+    for entry in activity_def.get("relations", []) or []:
+        if isinstance(entry, dict):
+            t = entry.get("type")
+            if t:
+                decls[t] = entry
+        elif isinstance(entry, str):
+            decls[entry] = {"type": entry, "kind": "process_control"}
+    return decls
+
+
+def allowed_relation_types_for_activity(
+    plugin: Plugin, activity_def: dict,
+) -> set[str]:
     """Return the set of relation types this activity may carry on its
-    request body (the permission gate / "what may be sent").
-
-    The workflow-level `relations:` block and the activity-level
-    `relations:` block are unioned — both contribute permitted types.
-
-    This is distinct from validator-firing. Under the activity-level
-    opt-in dispatch contract, a relation validator runs only for types
-    listed in the activity's OWN `relations:` block, not for types
-    inherited from the workflow-wide allowed-set.
-    """
-    workflow = {
-        e.get("type")
-        for e in plugin.workflow.get("relations", [])
-        if e.get("type")
-    }
-    activity = {
-        e.get("type")
-        for e in activity_def.get("relations", []) or []
-        if isinstance(e, dict) and e.get("type")
-    }
+    request body (the permission gate)."""
+    workflow = set()
+    for e in plugin.workflow.get("relations", []):
+        if isinstance(e, dict) and e.get("type"):
+            workflow.add(e["type"])
+        elif isinstance(e, str):
+            workflow.add(e)
+    activity = set(_relation_declarations(activity_def).keys())
     return workflow | activity
 
 
-async def process_relations(state: ActivityState) -> None:
-    """Parse the request's `relations` block, then dispatch validators.
+def _allowed_operations(activity_def: dict, rel_type: str) -> set[str]:
+    """Return the set of operations (add, remove) this activity permits
+    for the given relation type. Defaults to {"add"}."""
+    decls = _relation_declarations(activity_def)
+    decl = decls.get(rel_type, {})
+    ops = decl.get("operations")
+    if ops:
+        return set(ops)
+    return {"add"}
 
-    Reads:  state.relation_items, state.activity_def, state.plugin,
-            state.repo, state.dossier_id, state.used_rows_by_ref,
-            state.generated
-    Writes: state.validated_relations, state.relations_by_type
-    Raises: 422 on invalid relation type, external URI in relation,
-            unknown entity ref, cross-dossier ref, missing type.
-            500 if an activity opts into a relation type the workflow
-            doesn't permit (misconfiguration).
-            ActivityError from any validator that rejects the request.
+
+def _relation_kind(
+    plugin: Plugin, activity_def: dict, rel_type: str,
+) -> str:
+    """Determine the kind (process_control or domain) for a relation
+    type. Checks activity-level first, then workflow-level. Defaults
+    to process_control for backwards compatibility."""
+    decls = _relation_declarations(activity_def)
+    if rel_type in decls:
+        return decls[rel_type].get("kind", "process_control")
+    for e in plugin.workflow.get("relations", []):
+        if isinstance(e, dict) and e.get("type") == rel_type:
+            return e.get("kind", "process_control")
+    return "process_control"
+
+
+# =====================================================================
+# Main entry point
+# =====================================================================
+
+async def process_relations(state: ActivityState) -> None:
+    """Parse ``relations`` and ``remove_relations``, then dispatch
+    validators.
+
+    Reads:  state.relation_items, state.remove_relation_items,
+            state.activity_def, state.plugin, state.repo,
+            state.dossier_id, state.used_rows_by_ref, state.generated
+    Writes: state.validated_relations (process-control),
+            state.validated_domain_relations (domain adds),
+            state.validated_remove_relations (domain removes),
+            state.relations_by_type
     """
-    allowed = allowed_relation_types_for_activity(state.plugin, state.activity_def)
-    await _parse_and_resolve(state, allowed)
+    allowed = allowed_relation_types_for_activity(
+        state.plugin, state.activity_def,
+    )
+    await _parse_relations(state, allowed)
+    await _parse_remove_relations(state, allowed)
     await _dispatch_validators(state, allowed)
 
 
-async def _parse_and_resolve(state: ActivityState, allowed: set[str]) -> None:
-    """Walk every entry the client sent under `relations`, validate its
-    shape, resolve its entity reference, and group by relation type for
-    the dispatch phase.
+# =====================================================================
+# Parse + resolve
+# =====================================================================
 
-    Each entry must:
-    * Carry a `type` field that's in the workflow's allowed set.
-    * Reference a local entity (external URIs are explicitly rejected
-      because relation semantics depend on dossier-internal lineage).
-    * Resolve to a real entity row in the same dossier.
-
-    On success, two state fields are populated:
-    * `state.validated_relations` — the canonical persistence list,
-      one dict per entry with `version_id`, `relation_type`, `ref`.
-    * `state.relations_by_type` — the dispatch input, mapping each
-      relation type to the list of raw entries (with resolved
-      `entity_row`) that were sent for that type.
-    """
+async def _parse_relations(
+    state: ActivityState, allowed: set[str],
+) -> None:
+    """Walk ``relations``, validate, resolve, and route to either
+    process-control or domain state lists."""
     for rel_item in state.relation_items:
         rel_type = rel_item.get("type")
-        rel_ref = rel_item.get("entity", "")
-
         if not rel_type:
-            raise ActivityError(422, f"Relation item missing 'type': {rel_item}")
+            raise ActivityError(
+                422, f"Relation item missing 'type': {rel_item}",
+            )
         if rel_type not in allowed:
             raise ActivityError(
                 422,
                 f"Activity '{state.activity_def['name']}' does not allow "
                 f"relation type '{rel_type}'. Allowed: {sorted(allowed)}",
             )
-
-        parsed = EntityRef.parse(rel_ref)
-        if parsed is None:
-            # Not a canonical ref — either an external URI or malformed.
-            # Relations can't reference externals; external URIs reaching
-            # this point means the caller passed something outside the
-            # relations protocol.
+        if "add" not in _allowed_operations(state.activity_def, rel_type):
             raise ActivityError(
                 422,
-                f"Invalid entity reference in relation: {rel_ref} "
-                f"(relations cannot reference external URIs)",
+                f"Activity '{state.activity_def['name']}' does not allow "
+                f"adding relations of type '{rel_type}'.",
             )
 
-        rel_entity = await state.repo.get_entity(parsed.version_id)
-        if rel_entity is None or rel_entity.dossier_id != state.dossier_id:
-            raise ActivityError(
-                422, f"Relation entity not found in dossier: {rel_ref}",
-            )
+        # Route by whether the item has from/to (domain) or entity
+        # (process-control). The request model already validated that
+        # exactly one of the two forms is present.
+        from_ref = rel_item.get("from") or rel_item.get("from_ref")
+        is_domain = from_ref is not None
 
-        state.relations_by_type.setdefault(rel_type, []).append({
-            "ref": rel_ref,
-            "entity_row": rel_entity,
-            "raw": rel_item,
-        })
-        state.validated_relations.append({
-            "version_id": rel_entity.id,
-            "relation_type": rel_type,
-            "ref": rel_ref,
-        })
-
-
-async def _dispatch_validators(state: ActivityState, allowed: set[str]) -> None:
-    """Invoke each registered validator for the relation types the
-    activity has opted into.
-
-    Activity-level opt-in: only relation types listed in the activity's
-    own `relations:` block trigger validator firing. The workflow-wide
-    set permits types but doesn't force the validator on every activity.
-
-    The activity's opt-in set must be a subset of the workflow's
-    allowed set — if not, the activity is misconfigured and we raise
-    a 500 so the operator sees the problem at request time. (Catching
-    this at workflow-load time would be cleaner; this is a fallback
-    for runtime safety.)
-
-    For each opted-in type that has a registered validator, the
-    validator receives the full activity context: resolved used rows,
-    pending generated items, the relation entries of its type. The
-    validator raises `ActivityError` to reject the request, or returns
-    normally to accept.
-    """
-    activity_level_types: set[str] = set()
-    for r in state.activity_def.get("relations", []) or []:
-        if isinstance(r, dict):
-            t = r.get("type")
+        if is_domain:
+            await _handle_domain_add(state, rel_item, rel_type, from_ref)
         else:
-            t = r
-        if t:
-            activity_level_types.add(t)
+            await _handle_process_control(state, rel_item, rel_type)
+
+
+async def _handle_domain_add(
+    state: ActivityState,
+    rel_item: dict,
+    rel_type: str,
+    from_ref: str,
+) -> None:
+    """Validate and stage a domain relation for persistence.
+
+    Expands shorthand refs (``oe:type/eid@vid``, ``dossier:did``,
+    etc.) to full IRIs before storing, so ``domain_relations`` rows
+    always contain resolvable, self-describing URIs."""
+    from ...prov_iris import expand_ref
+
+    to_ref = rel_item.get("to")
+    if not from_ref or not to_ref:
+        raise ActivityError(
+            422,
+            f"Domain relation '{rel_type}' requires both 'from' "
+            f"and 'to': {rel_item}",
+        )
+
+    # Expand shorthand → full IRI.
+    from_iri = expand_ref(from_ref, state.dossier_id)
+    to_iri = expand_ref(to_ref, state.dossier_id)
+
+    state.validated_domain_relations.append({
+        "relation_type": rel_type,
+        "from_ref": from_iri,
+        "to_ref": to_iri,
+    })
+    state.relations_by_type.setdefault(rel_type, []).append({
+        "from_ref": from_iri,
+        "to_ref": to_iri,
+        "raw": rel_item,
+    })
+
+
+async def _handle_process_control(
+    state: ActivityState,
+    rel_item: dict,
+    rel_type: str,
+) -> None:
+    """Validate and stage a process-control relation for persistence."""
+    rel_ref = rel_item.get("entity", "")
+    parsed = EntityRef.parse(rel_ref)
+    if parsed is None:
+        raise ActivityError(
+            422,
+            f"Invalid entity reference in relation: {rel_ref} "
+            f"(process-control relations cannot reference external URIs)",
+        )
+    rel_entity = await state.repo.get_entity(parsed.version_id)
+    if rel_entity is None or rel_entity.dossier_id != state.dossier_id:
+        raise ActivityError(
+            422, f"Relation entity not found in dossier: {rel_ref}",
+        )
+    state.relations_by_type.setdefault(rel_type, []).append({
+        "ref": rel_ref,
+        "entity_row": rel_entity,
+        "raw": rel_item,
+    })
+    state.validated_relations.append({
+        "version_id": rel_entity.id,
+        "relation_type": rel_type,
+        "ref": rel_ref,
+    })
+
+
+async def _parse_remove_relations(
+    state: ActivityState, allowed: set[str],
+) -> None:
+    """Walk ``remove_relations``, validate type + operation permission.
+
+    Refs are expanded to full IRIs so the supersede query matches
+    against the stored (expanded) values in domain_relations."""
+    from ...prov_iris import expand_ref
+
+    for item in state.remove_relation_items:
+        rel_type = item.get("type")
+        from_ref = item.get("from") or item.get("from_ref")
+        to_ref = item.get("to")
+
+        if not rel_type:
+            raise ActivityError(
+                422, f"remove_relations item missing 'type': {item}",
+            )
+        if not from_ref or not to_ref:
+            raise ActivityError(
+                422,
+                f"remove_relations item requires 'from' and 'to': {item}",
+            )
+        if rel_type not in allowed:
+            raise ActivityError(
+                422,
+                f"Activity '{state.activity_def['name']}' does not allow "
+                f"relation type '{rel_type}'. Allowed: {sorted(allowed)}",
+            )
+        if "remove" not in _allowed_operations(state.activity_def, rel_type):
+            raise ActivityError(
+                422,
+                f"Activity '{state.activity_def['name']}' does not allow "
+                f"removing relations of type '{rel_type}'. "
+                f"Allowed operations: "
+                f"{sorted(_allowed_operations(state.activity_def, rel_type))}",
+            )
+
+        # Expand shorthand → full IRI (must match what was stored).
+        from_iri = expand_ref(from_ref, state.dossier_id)
+        to_iri = expand_ref(to_ref, state.dossier_id)
+
+        state.validated_remove_relations.append({
+            "relation_type": rel_type,
+            "from_ref": from_iri,
+            "to_ref": to_iri,
+        })
+
+
+# =====================================================================
+# Validator dispatch
+# =====================================================================
+
+async def _dispatch_validators(
+    state: ActivityState, allowed: set[str],
+) -> None:
+    """Invoke registered validators for activity-level opt-in types."""
+    activity_level_types = set(
+        _relation_declarations(state.activity_def).keys()
+    )
 
     for rel_type in activity_level_types:
         if rel_type not in allowed:
@@ -191,7 +306,7 @@ async def _dispatch_validators(state: ActivityState, allowed: set[str]) -> None:
 
         validator = state.plugin.relation_validators.get(rel_type)
         if validator is None:
-            continue  # pure annotation — no validator, just stored
+            continue
 
         entries = state.relations_by_type.get(rel_type, [])
         await validator(

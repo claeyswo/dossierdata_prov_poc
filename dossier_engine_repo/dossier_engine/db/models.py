@@ -195,6 +195,39 @@ class AgentRow(Base):
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
+class DomainRelationRow(Base):
+    """A semantic relationship between two things (entity→entity,
+    entity→URI, dossier→dossier, etc.) established by an activity.
+
+    Distinct from `activity_relations` (process-control edges like
+    oe:neemtAkteVan where the activity is one end of the relation).
+    Here neither endpoint is the activity — the activity is the
+    *provenance* of the relation (who established it and when).
+
+    Superseded relations stay in the table for history — they're
+    never hard-deleted. Active relations have superseded_at IS NULL.
+    """
+    __tablename__ = "domain_relations"
+
+    id = Column(UUID_DB(), primary_key=True, default=uuid.uuid4)
+    dossier_id = Column(UUID_DB(), ForeignKey("dossiers.id"), nullable=False)
+    relation_type = Column(Text, nullable=False)
+    from_ref = Column(Text, nullable=False)
+    to_ref = Column(Text, nullable=False)
+    created_by_activity_id = Column(UUID_DB(), ForeignKey("activities.id"), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    superseded_by_activity_id = Column(UUID_DB(), ForeignKey("activities.id"), nullable=True)
+    superseded_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        Index("ix_domain_rel_dossier", "dossier_id"),
+        Index("ix_domain_rel_type", "relation_type"),
+        Index("ix_domain_rel_from", "from_ref"),
+        Index("ix_domain_rel_to", "to_ref"),
+        Index("ix_domain_rel_active", "dossier_id", "superseded_at"),
+    )
+
+
 # =====================================================================
 # Repository
 # =====================================================================
@@ -587,6 +620,83 @@ class Repository:
         """Return every relation row attached to this activity."""
         result = await self.session.execute(
             select(RelationRow).where(RelationRow.activity_id == activity_id)
+        )
+        return list(result.scalars().all())
+
+    # --- Domain relations (entity↔entity/URI semantic links) ---
+
+    async def create_domain_relation(
+        self,
+        dossier_id: UUID,
+        relation_type: str,
+        from_ref: str,
+        to_ref: str,
+        created_by_activity_id: UUID,
+    ) -> DomainRelationRow:
+        """Create a new domain relation. Idempotent: if an active
+        (non-superseded) relation with the same (type, from, to) already
+        exists in the dossier, the insert is skipped and the existing
+        row is returned."""
+        # Check for existing active duplicate.
+        existing = await self.session.execute(
+            select(DomainRelationRow).where(
+                DomainRelationRow.dossier_id == dossier_id,
+                DomainRelationRow.relation_type == relation_type,
+                DomainRelationRow.from_ref == from_ref,
+                DomainRelationRow.to_ref == to_ref,
+                DomainRelationRow.superseded_at.is_(None),
+            )
+        )
+        row = existing.scalar_one_or_none()
+        if row:
+            return row
+        row = DomainRelationRow(
+            dossier_id=dossier_id,
+            relation_type=relation_type,
+            from_ref=from_ref,
+            to_ref=to_ref,
+            created_by_activity_id=created_by_activity_id,
+        )
+        self.session.add(row)
+        return row
+
+    async def supersede_domain_relation(
+        self,
+        dossier_id: UUID,
+        relation_type: str,
+        from_ref: str,
+        to_ref: str,
+        superseded_by_activity_id: UUID,
+    ) -> bool:
+        """Mark an active domain relation as superseded. Returns True
+        if a matching active relation was found and superseded, False
+        if no match (idempotent — removing something already gone is
+        a no-op)."""
+        result = await self.session.execute(
+            select(DomainRelationRow).where(
+                DomainRelationRow.dossier_id == dossier_id,
+                DomainRelationRow.relation_type == relation_type,
+                DomainRelationRow.from_ref == from_ref,
+                DomainRelationRow.to_ref == to_ref,
+                DomainRelationRow.superseded_at.is_(None),
+            )
+        )
+        row = result.scalar_one_or_none()
+        if not row:
+            return False
+        row.superseded_by_activity_id = superseded_by_activity_id
+        row.superseded_at = datetime.now(timezone.utc)
+        return True
+
+    async def get_active_domain_relations(
+        self, dossier_id: UUID,
+    ) -> list[DomainRelationRow]:
+        """Return all non-superseded domain relations for a dossier."""
+        result = await self.session.execute(
+            select(DomainRelationRow)
+            .where(DomainRelationRow.dossier_id == dossier_id)
+            .where(DomainRelationRow.superseded_at.is_(None))
+            .order_by(DomainRelationRow.created_at)
         )
         return list(result.scalars().all())
 

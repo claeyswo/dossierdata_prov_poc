@@ -152,3 +152,128 @@ def agent_type_value(agent_type: str) -> dict:
     else:
         qname = f"oe:{agent_type}"
     return {"$": qname, "type": "xsd:QName"}
+
+
+# =====================================================================
+# Domain relation ref expansion
+# =====================================================================
+#
+# Domain relations store their endpoints as full IRIs so they're
+# self-describing, resolvable, and consistent with external URIs.
+# But the API accepts shorthand refs for convenience — callers
+# shouldn't have to construct full IRIs when they already know the
+# dossier context. This section translates between the two.
+#
+# Accepted shorthand formats:
+#
+#   oe:type/eid@vid                   → local entity in current dossier
+#   dossier:did/oe:type/eid@vid       → entity in a different dossier
+#   dossier:did                        → dossier itself
+#   https://...                        → external URI (returned as-is)
+#
+# Expanded IRIs follow the same structure as the PROV rendering:
+#
+#   https://id.erfgoed.net/dossiers/{did}/entities/{type}/{eid}/{vid}
+#   https://id.erfgoed.net/dossiers/{did}/
+#   https://... (external, unchanged)
+
+def expand_ref(ref: str, dossier_id: UUID | str) -> str:
+    """Expand a shorthand domain-relation ref to a full IRI.
+
+    If the ref is already a full IRI (starts with http:// or https://),
+    it's returned unchanged. Otherwise the shorthand is parsed and
+    expanded using the canonical IRI structure from this module.
+
+    Examples::
+
+        expand_ref("oe:aanvraag/e1@v1", "d1")
+        → "https://id.erfgoed.net/dossiers/d1/entities/oe:aanvraag/e1/v1"
+
+        expand_ref("dossier:d2/oe:aanvraag/e1@v1", "d1")
+        → "https://id.erfgoed.net/dossiers/d2/entities/oe:aanvraag/e1/v1"
+
+        expand_ref("dossier:d2", "d1")
+        → "https://id.erfgoed.net/dossiers/d2/"
+
+        expand_ref("https://id.erfgoed.net/erfgoedobjecten/10001", "d1")
+        → "https://id.erfgoed.net/erfgoedobjecten/10001"
+    """
+    # Already a full IRI — pass through.
+    if ref.startswith("https://") or ref.startswith("http://"):
+        return ref
+
+    # dossier: prefix — either a dossier ref or a cross-dossier entity.
+    if ref.startswith("dossier:"):
+        remainder = ref[len("dossier:"):]
+        # dossier:did/oe:type/eid@vid → cross-dossier entity
+        if "/" in remainder:
+            did_str, entity_part = remainder.split("/", 1)
+            return _expand_entity_ref(entity_part, did_str)
+        # dossier:did → dossier IRI
+        return DOSSIER_BASE.format(dossier_id=remainder)
+
+    # No prefix → local entity in the current dossier.
+    return _expand_entity_ref(ref, str(dossier_id))
+
+
+def _expand_entity_ref(ref: str, dossier_id_str: str) -> str:
+    """Expand an entity ref (type/eid@vid) to a full entity IRI
+    within the given dossier. Falls back to returning the ref
+    unchanged if it doesn't parse as a valid EntityRef."""
+    # Import here to avoid circular dependency (EntityRef is in
+    # engine/refs.py which doesn't depend on prov_iris).
+    from .engine.refs import EntityRef
+
+    parsed = EntityRef.parse(ref)
+    if parsed:
+        return entity_full_iri(
+            dossier_id_str,
+            parsed.type,
+            parsed.entity_id,
+            parsed.version_id,
+        )
+    # Doesn't parse — return as-is and let downstream validation
+    # catch it if needed.
+    return ref
+
+
+def classify_ref(ref: str) -> str:
+    """Classify a domain-relation endpoint reference.
+
+    Returns one of:
+    * ``"entity"`` — an entity within the platform (local or
+      cross-dossier). The IRI contains ``/entities/``.
+    * ``"dossier"`` — a dossier itself. The IRI matches the
+      dossier base pattern without ``/entities/``.
+    * ``"external_uri"`` — anything outside the platform.
+
+    Works on both expanded IRIs and shorthand refs::
+
+        classify_ref("https://id.erfgoed.net/dossiers/d1/entities/...")
+        → "entity"
+
+        classify_ref("oe:aanvraag/e1@v1")
+        → "entity"
+
+        classify_ref("dossier:d2")
+        → "dossier"
+
+        classify_ref("https://id.erfgoed.net/erfgoedobjecten/10001")
+        → "external_uri"
+    """
+    # Shorthand forms.
+    if ref.startswith("dossier:"):
+        remainder = ref[len("dossier:"):]
+        return "entity" if "/" in remainder else "dossier"
+
+    # Full IRIs.
+    _DOSSIER_PREFIX = "https://id.erfgoed.net/dossiers/"
+    if ref.startswith(_DOSSIER_PREFIX):
+        return "entity" if "/entities/" in ref else "dossier"
+
+    # Not a platform IRI and not a shorthand → external.
+    if ref.startswith("https://") or ref.startswith("http://"):
+        return "external_uri"
+
+    # No prefix, no scheme → local entity shorthand.
+    return "entity"

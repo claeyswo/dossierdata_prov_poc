@@ -89,6 +89,7 @@ async def execute_activity(
     informed_by: str | None = None,
     skip_cache: bool = False,
     relation_items: list[dict] | None = None,
+    remove_relation_items: list[dict] | None = None,
     caller: Caller = Caller.CLIENT,
     anchor_entity_id: UUID | None = None,
     anchor_type: str | None = None,
@@ -116,6 +117,8 @@ async def execute_activity(
         generated_items = []
     if relation_items is None:
         relation_items = []
+    if remove_relation_items is None:
+        remove_relation_items = []
     now = datetime.now(timezone.utc)
 
     # Build the mutable state object that flows through every pipeline
@@ -132,6 +135,7 @@ async def execute_activity(
         used_items=used_items,
         generated_items=generated_items,
         relation_items=relation_items,
+        remove_relation_items=remove_relation_items,
         workflow_name=workflow_name,
         informed_by=informed_by,
         skip_cache=skip_cache,
