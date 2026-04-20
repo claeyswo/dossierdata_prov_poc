@@ -491,8 +491,8 @@ class TestProcessRelations:
         await process_relations(state)
 
         assert len(state.validated_relations) == 1
-        assert state.validated_relations[0]["version_id"] == vid
-        assert state.validated_relations[0]["relation_type"] == "oe:references"
+        assert state.validated_relations[0].version_id == vid
+        assert state.validated_relations[0].relation_type == "oe:references"
         assert "oe:references" in state.relations_by_type
 
     async def test_activity_opt_in_triggers_validator(self, repo):

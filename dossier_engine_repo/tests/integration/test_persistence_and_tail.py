@@ -41,7 +41,9 @@ from dossier_engine.engine.pipeline.persistence import (
     create_activity_row, persist_outputs,
 )
 from dossier_engine.engine.pipeline.status import derive_status
-from dossier_engine.engine.state import ActivityState, Caller
+from dossier_engine.engine.state import (
+    ActivityState, Caller, UsedRef, ValidatedRelation,
+)
 
 
 D1 = UUID("11111111-1111-1111-1111-111111111111")
@@ -298,11 +300,11 @@ class TestPersistOutputs:
 
         state = _state(
             repo, activity_id=activity_id,
-            used_refs=[{
-                "entity": f"oe:aanvraag/xxx@{target_vid}",
-                "version_id": target_vid,
-                "type": "oe:aanvraag",
-            }],
+            used_refs=[UsedRef(
+                entity=f"oe:aanvraag/xxx@{target_vid}",
+                version_id=target_vid,
+                type="oe:aanvraag",
+            )],
         )
 
         await persist_outputs(state)
@@ -331,11 +333,11 @@ class TestPersistOutputs:
 
         state = _state(
             repo, activity_id=activity_id,
-            validated_relations=[{
-                "version_id": target_vid,
-                "relation_type": "oe:neemtAkteVan",
-                "ref": f"oe:aanvraag/xxx@{target_vid}",
-            }],
+            validated_relations=[ValidatedRelation(
+                version_id=target_vid,
+                relation_type="oe:neemtAkteVan",
+                ref=f"oe:aanvraag/xxx@{target_vid}",
+            )],
         )
 
         await persist_outputs(state)
@@ -990,18 +992,22 @@ class TestBuildFullResponse:
             now=now,
             dossier=dossier_row,
             used_refs=[
-                {"entity": "oe:aanvraag/x@y", "type": "oe:aanvraag"},
+                UsedRef(
+                    entity="oe:aanvraag/x@y",
+                    version_id=uuid4(),
+                    type="oe:aanvraag",
+                ),
             ],
             generated_response=[{
                 "entity": "oe:beslissing/a@b",
                 "type": "oe:beslissing",
                 "content": {"x": 1},
             }],
-            validated_relations=[{
-                "version_id": uuid4(),
-                "relation_type": "oe:references",
-                "ref": "oe:thing/q@r",
-            }],
+            validated_relations=[ValidatedRelation(
+                version_id=uuid4(),
+                relation_type="oe:references",
+                ref="oe:thing/q@r",
+            )],
             current_status="goedgekeurd",
             allowed_activities=[{"type": "foo", "label": "Foo"}],
         )
@@ -1036,11 +1042,12 @@ class TestBuildFullResponse:
             repo,
             activity_def={"name": "test"},
             now=datetime.now(timezone.utc),
-            used_refs=[{
-                "entity": "oe:aanvraag/x@y",
-                "type": "oe:aanvraag",
-                "auto_resolved": True,
-            }],
+            used_refs=[UsedRef(
+                entity="oe:aanvraag/x@y",
+                version_id=uuid4(),
+                type="oe:aanvraag",
+                auto_resolved=True,
+            )],
             generated_response=[],
             validated_relations=[],
             current_status="nieuw",

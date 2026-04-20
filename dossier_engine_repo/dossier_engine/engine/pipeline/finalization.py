@@ -202,15 +202,15 @@ def build_full_response(state: ActivityState) -> dict:
         },
         "used": [
             {
-                "entity": r["entity"],
-                "type": r.get("type", "external"),
-                **({"autoResolved": True} if r.get("auto_resolved") else {}),
+                "entity": r.entity,
+                "type": r.type or "external",
+                **({"autoResolved": True} if r.auto_resolved else {}),
             }
             for r in state.used_refs
         ],
         "generated": state.generated_response,
         "relations": [
-            {"entity": rel["ref"], "type": rel["relation_type"]}
+            {"entity": rel.ref, "type": rel.relation_type}
             for rel in state.validated_relations
         ],
         "dossier": {

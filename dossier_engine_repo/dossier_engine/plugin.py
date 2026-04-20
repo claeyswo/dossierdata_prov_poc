@@ -229,6 +229,17 @@ class Plugin:
     # register workflow-specific search endpoints like /dossiers/{workflow_name}/...
     search_route_factory: Callable | None = None
 
+    # Workflow-scoped constants/config. A Pydantic BaseSettings instance
+    # populated at plugin load from (in precedence order, highest wins):
+    #   1. Environment variables — operator escape hatch, secrets
+    #   2. workflow.yaml's `constants.values` block — plugin author's
+    #      domain-level tuning
+    #   3. Pydantic class defaults
+    # Handlers access this via context.constants; hooks and factories
+    # access via plugin.constants. None if the plugin doesn't declare
+    # a constants class.
+    constants: Any = None
+
     # Defaults for engine-provided types. system:task and system:note are
     # multi-cardinality (many per dossier); oe:dossier_access is a singleton.
     # These are overlaid by plugin workflow declarations if present.

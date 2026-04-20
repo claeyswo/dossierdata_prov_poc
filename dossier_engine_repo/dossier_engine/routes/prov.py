@@ -20,7 +20,9 @@ from ..auth import User
 from ..db import get_session_factory, Repository
 from ..db.models import ActivityRow, EntityRow, AssociationRow, UsedRow
 from ..plugin import PluginRegistry
-from .access import check_dossier_access, get_visibility_from_entry
+from .access import (
+    check_dossier_access, check_audit_access, get_visibility_from_entry,
+)
 
 from sqlalchemy import select
 
@@ -31,14 +33,34 @@ _jinja_env = Environment(loader=FileSystemLoader(str(_TEMPLATE_DIR)))
 router = APIRouter(tags=["prov"])
 
 
-def register_prov_routes(app, registry: PluginRegistry, get_user, global_access: list[dict] | None = None):
-    """Register PROV export and visualization routes."""
+def register_prov_routes(
+    app,
+    registry: PluginRegistry,
+    get_user,
+    global_access: list[dict] | None = None,
+    global_audit_access: list[str] | None = None,
+):
+    """Register PROV export and visualization routes.
+
+    The three audit-level endpoints (``/prov``, ``/prov/graph/columns``,
+    ``/archive``) use ``check_audit_access`` with ``global_audit_access``
+    — they bypass per-user activity/entity filtering and expose the
+    complete provenance record. The ``/prov/graph/timeline`` endpoint
+    uses ordinary ``check_dossier_access`` and honors per-user
+    filtering — it's the user-facing view.
+    """
 
     @app.get(
         "/dossiers/{dossier_id}/prov",
         tags=["prov"],
-        summary="PROV-JSON export",
-        description="Export the provenance graph for a dossier in PROV-JSON format. Filtered by dossier_access.",
+        summary="PROV-JSON export (audit view)",
+        description=(
+            "Audit-level export of the complete provenance graph in "
+            "PROV-JSON format. Always includes system activities, "
+            "tasks, and all entities regardless of per-user filtering. "
+            "Requires a role in global_audit_access or the dossier's "
+            "audit_access list."
+        ),
     )
     async def get_prov_json(
         dossier_id: UUID,
@@ -54,21 +76,19 @@ def register_prov_routes(app, registry: PluginRegistry, get_user, global_access:
 
             plugin = registry.get(dossier.workflow)
 
-            # Check access + determine visibility
-            access_entry = await check_dossier_access(repo, dossier_id, user, global_access)
-            visible_types, activity_view_mode = get_visibility_from_entry(access_entry)
+            # Audit-level access: no per-user filtering below.
+            await check_audit_access(
+                repo, dossier_id, user, global_audit_access,
+            )
 
-            # Load all data
+            # Load all data — no entity-type filter, no activity-view
+            # filter. This endpoint returns the complete graph.
             activities = await repo.get_activities_for_dossier(dossier_id)
 
             all_entities_result = await session.execute(
                 select(EntityRow).where(EntityRow.dossier_id == dossier_id).order_by(EntityRow.created_at)
             )
             all_entities = list(all_entities_result.scalars().all())
-
-            # Filter entities by visibility
-            if visible_types is not None:
-                all_entities = [e for e in all_entities if e.type in visible_types]
 
             # Load associations for all activities
             activity_ids = [a.id for a in activities]
@@ -142,33 +162,8 @@ def register_prov_routes(app, registry: PluginRegistry, get_user, global_access:
                 "actedOnBehalfOf": {},
             }
 
-            # Filter activities by activity_view_mode
-            visible_entity_ids = set(e.id for e in all_entities)
-
-            from ._activity_visibility import parse_activity_view, is_activity_visible
-            parsed_view = parse_activity_view(activity_view_mode)
-
-            async def _is_agent(act_id, uid):
-                assocs = assoc_by_activity.get(act_id, [])
-                return any(a.agent_id == uid for a in assocs)
-
-            async def _used_ids(act_id):
-                return set(u.entity_id for u in used_by_activity.get(act_id, []))
-
-            if parsed_view.base != "all" or parsed_view.include:
-                filtered_activities = []
-                for act in activities:
-                    if await is_activity_visible(
-                        parsed_view,
-                        activity_type=act.type,
-                        activity_id=act.id,
-                        user_id=user.id,
-                        visible_entity_ids=visible_entity_ids,
-                        lookup_is_agent=_is_agent,
-                        lookup_used_entity_ids=_used_ids,
-                    ):
-                        filtered_activities.append(act)
-                activities = filtered_activities
+            # Audit view: no filtering. Every activity, every entity,
+            # every association goes through unchanged.
 
             # Agents (deduplicated)
             agents_seen = set()
@@ -297,14 +292,19 @@ def register_prov_routes(app, registry: PluginRegistry, get_user, global_access:
     @app.get(
         "/dossiers/{dossier_id}/prov/graph/timeline",
         tags=["prov"],
-        summary="PROV graph visualization",
-        description="Interactive visualization of the provenance graph.",
+        summary="PROV graph visualization (user view)",
+        description=(
+            "Interactive timeline visualization of the dossier's "
+            "provenance graph. Honors per-user filtering from "
+            "dossier_access (entity types and activity_view). This "
+            "endpoint NEVER shows system activities or tasks — it's "
+            "the day-to-day business view. For the full record, use "
+            "the audit-level /prov or /prov/graph/columns endpoints."
+        ),
         response_class=HTMLResponse,
     )
     async def get_prov_graph(
         dossier_id: UUID,
-        include_system_activities: bool = False,
-        include_tasks: bool = False,
         user: User = Depends(get_user),
     ):
         session_factory = get_session_factory()
@@ -362,24 +362,16 @@ def register_prov_routes(app, registry: PluginRegistry, get_user, global_access:
                     if act_def.get("client_callable") is False:
                         system_activity_types.add(act_def["name"])
 
-            # Build set of activity IDs to skip (system activities)
+            # Timeline is the user-facing view: always hide system
+            # activities AND tasks. No query-param toggle — for the
+            # full record, clients use the audit-level endpoints.
             skipped_activity_ids = set()
-            if not include_system_activities:
-                for act in activities:
-                    if act.type in system_activity_types:
-                        skipped_activity_ids.add(act.id)
+            for act in activities:
+                if act.type in system_activity_types or act.type == "systemAction":
+                    skipped_activity_ids.add(act.id)
+            all_entities = [e for e in all_entities if e.type != "system:task"]
 
-            # Skip completeTask activities and system:task entities unless include_tasks
-            if not include_tasks:
-                for act in activities:
-                    if act.type == "systemAction":
-                        skipped_activity_ids.add(act.id)
-                all_entities = [e for e in all_entities if e.type != "system:task"]
-            else:
-                # When showing tasks, make sure completeTask isn't hidden by system activity filter
-                skipped_activity_ids -= {act.id for act in activities if act.type == "systemAction"}
-
-            # Apply activity_view access filtering
+            # Apply per-user activity_view filtering from dossier_access.
             visible_entity_version_ids = set(e.id for e in all_entities)
 
             from ._activity_visibility import parse_activity_view, is_activity_visible
@@ -407,12 +399,13 @@ def register_prov_routes(app, registry: PluginRegistry, get_user, global_access:
                     ):
                         skipped_activity_ids.add(act.id)
 
-            # Only hide entities generated by SYSTEM-skipped activities (not access-skipped)
-            if not include_system_activities:
-                system_skipped = set(
-                    act.id for act in activities if act.type in system_activity_types
-                )
-                all_entities = [e for e in all_entities if e.generated_by not in system_skipped]
+            # Hide entities generated by system activities (they're
+            # already skipped above; drop their generated entities too
+            # so the graph doesn't show orphan nodes).
+            system_skipped = set(
+                act.id for act in activities if act.type in system_activity_types
+            )
+            all_entities = [e for e in all_entities if e.generated_by not in system_skipped]
 
             entity_by_id = {e.id: e for e in all_entities}
 
@@ -620,7 +613,9 @@ def register_prov_routes(app, registry: PluginRegistry, get_user, global_access:
 
     # Import and register the columns graph
     from .prov_columns import register_columns_graph
-    register_columns_graph(app, registry, get_user, global_access)
+    register_columns_graph(
+        app, registry, get_user, global_access, global_audit_access
+    )
 
     # Archive endpoint
     from fastapi.responses import Response as RawResponse
@@ -628,12 +623,15 @@ def register_prov_routes(app, registry: PluginRegistry, get_user, global_access:
     @app.get(
         "/dossiers/{dossier_id}/archive",
         tags=["prov"],
-        summary="Dossier archive (PDF)",
+        summary="Dossier archive (PDF, audit view)",
         description=(
-            "Generate a self-contained PDF/A archive of the dossier. "
-            "Includes a cover page, provenance timeline (static SVG), "
-            "entity content, and the raw PROV-JSON as an embedded attachment. "
-            "Suitable for long-term archival."
+            "Audit-level PDF/A archive of the dossier — the full "
+            "provenance record plus embedded file attachments, "
+            "suitable for long-term preservation and regulatory "
+            "submission. Includes a cover page, provenance timeline "
+            "(static SVG), entity content, and the raw PROV-JSON as "
+            "an embedded attachment. Requires a role in "
+            "global_audit_access or the dossier's audit_access list."
         ),
     )
     async def get_dossier_archive(
@@ -649,8 +647,10 @@ def register_prov_routes(app, registry: PluginRegistry, get_user, global_access:
             if not dossier:
                 raise HTTPException(404, detail="Dossier not found")
 
-            # Check access
-            await check_dossier_access(repo, dossier_id, user, global_access)
+            # Audit-level access: full record in the PDF.
+            await check_audit_access(
+                repo, dossier_id, user, global_audit_access,
+            )
 
             # Build PROV-JSON (reuse the same logic as the /prov endpoint)
             plugin = registry.get(dossier.workflow)

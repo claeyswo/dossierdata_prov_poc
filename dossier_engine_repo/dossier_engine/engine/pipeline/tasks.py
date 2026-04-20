@@ -130,11 +130,26 @@ async def _schedule_recorded_task(
     """Resolve anchor, handle supersession, persist the task entity."""
     anchor_entity_id = await _resolve_anchor(state, task_def)
 
+    # Resolve scheduled_for: accepts "+20d"/"+2h"/"+45m"/"+3w" relative
+    # offsets (resolved against state.now) or absolute ISO 8601. Raises
+    # ValueError on a malformed value so YAML typos fail loudly at
+    # activity execution time instead of silently scheduling for "now".
+    from ..scheduling import resolve_scheduled_for
+    try:
+        resolved_scheduled_for = resolve_scheduled_for(
+            task_def.get("scheduled_for"), state.now,
+        )
+    except ValueError as e:
+        raise ActivityError(
+            500,
+            f"Bad task declaration in workflow YAML: {e}",
+        ) from None
+
     task_content = TaskEntity(
         kind=task_kind,
         function=task_def.get("function"),
         target_activity=task_def.get("target_activity"),
-        scheduled_for=task_def.get("scheduled_for"),
+        scheduled_for=resolved_scheduled_for,
         cancel_if_activities=task_def.get("cancel_if_activities", []),
         allow_multiple=task_def.get("allow_multiple", False),
         result_activity_id=str(uuid4()),

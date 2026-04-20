@@ -22,7 +22,7 @@ from uuid import UUID
 from ..errors import ActivityError
 from ..lookups import lookup_singleton, resolve_from_prefetched
 from ..refs import EntityRef, is_external_uri
-from ..state import ActivityState, Caller
+from ..state import ActivityState, Caller, UsedRef
 
 
 async def resolve_used(state: ActivityState) -> None:
@@ -71,11 +71,11 @@ async def _resolve_explicit(state: ActivityState) -> None:
 
         if is_external_uri(entity_ref):
             ext_entity = await state.repo.ensure_external_entity(state.dossier_id, entity_ref)
-            state.used_refs.append({
-                "entity": entity_ref,
-                "external": True,
-                "version_id": ext_entity.id,
-            })
+            state.used_refs.append(UsedRef(
+                entity=entity_ref,
+                version_id=ext_entity.id,
+                external=True,
+            ))
             continue
 
         parsed = EntityRef.parse(entity_ref)
@@ -91,11 +91,11 @@ async def _resolve_explicit(state: ActivityState) -> None:
                 422, f"Entity belongs to a different dossier: {entity_ref}",
             )
 
-        state.used_refs.append({
-            "entity": entity_ref,
-            "version_id": parsed.version_id,
-            "type": entity_type,
-        })
+        state.used_refs.append(UsedRef(
+            entity=entity_ref,
+            version_id=parsed.version_id,
+            type=entity_type,
+        ))
         state.resolved_entities[entity_type] = existing_entity
         state.used_rows_by_ref[entity_ref] = existing_entity
 
@@ -173,16 +173,16 @@ async def _auto_resolve_for_system_caller(state: ActivityState) -> None:
 
         if entity is not None:
             state.resolved_entities[etype] = entity
-            state.used_refs.append({
-                "entity": str(EntityRef(
+            state.used_refs.append(UsedRef(
+                entity=str(EntityRef(
                     type=etype,
                     entity_id=entity.entity_id,
                     version_id=entity.id,
                 )),
-                "version_id": entity.id,
-                "type": etype,
-                "auto_resolved": True,
-            })
+                version_id=entity.id,
+                type=etype,
+                auto_resolved=True,
+            ))
 
 
 def _parse_local_trigger_id(informed_by: str | None) -> UUID | None:

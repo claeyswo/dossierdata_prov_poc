@@ -30,23 +30,33 @@ from ..db.models import (
 )
 from ..db import get_session_factory
 from ..auth import User
-from .access import check_dossier_access, get_visibility_from_entry
+from .access import (
+    check_dossier_access, check_audit_access, get_visibility_from_entry,
+)
 
 _TEMPLATE_DIR = Path(__file__).parent / "templates"
 _jinja_env = Environment(loader=FileSystemLoader(str(_TEMPLATE_DIR)))
 
 
-def register_columns_graph(app, registry, get_user, global_access=None):
+def register_columns_graph(
+    app, registry, get_user,
+    global_access=None, global_audit_access=None,
+):
 
     @app.get(
         "/dossiers/{dossier_id}/prov/graph/columns",
         tags=["prov"],
         summary="PROV graph — column layout",
+        description=(
+            "Audit-level view of the complete provenance graph in a "
+            "three-band column layout. Always shows system activities "
+            "and tasks. Requires a role in global_audit_access or the "
+            "dossier's audit_access list."
+        ),
         response_class=HTMLResponse,
     )
     async def get_prov_graph_columns(
         dossier_id: UUID,
-        include_tasks: bool = True,
         user: User = Depends(get_user),
     ):
         session_factory = get_session_factory()
@@ -58,16 +68,16 @@ def register_columns_graph(app, registry, get_user, global_access=None):
                 raise HTTPException(404, detail="Dossier not found")
 
             plugin = registry.get(dossier.workflow)
-            access_entry = await check_dossier_access(repo, dossier_id, user, global_access)
-            visible_types, _ = get_visibility_from_entry(access_entry)
+            # Audit-level access: full graph, no filtering.
+            await check_audit_access(
+                repo, dossier_id, user, global_audit_access,
+            )
 
             activities = await repo.get_activities_for_dossier(dossier_id)
             all_entities_result = await session.execute(
                 select(EntityRow).where(EntityRow.dossier_id == dossier_id).order_by(EntityRow.created_at)
             )
             all_entities = list(all_entities_result.scalars().all())
-            if visible_types is not None:
-                all_entities = [e for e in all_entities if e.type in visible_types]
 
             activity_ids = [a.id for a in activities]
             assoc_result = await session.execute(
@@ -90,9 +100,9 @@ def register_columns_graph(app, registry, get_user, global_access=None):
                     if act_def.get("client_callable") is False:
                         system_activity_types.add(act_def["name"])
 
-            if not include_tasks:
-                activities = [a for a in activities if a.type != "systemAction"]
-                all_entities = [e for e in all_entities if e.type != "system:task"]
+            # Audit view: always include tasks and system activities.
+            # No query param gating — this endpoint is for the full
+            # unfiltered record.
 
             activity_by_id = {a.id: a for a in activities}
             entity_by_id = {e.id: e for e in all_entities}

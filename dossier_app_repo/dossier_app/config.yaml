@@ -41,3 +41,10 @@ global_access:
   - role: "beheerder"
     view: "all"
     activity_view: "all"
+
+# Audit-level access — roles that may view the full, unfiltered
+# provenance record (PROV-JSON export, columns graph, archive PDF).
+# Role-only (no per-agent grant). Default-deny: users without a
+# matching role here or in a dossier's audit_access list get 403.
+global_audit_access:
+  - "beheerder"

@@ -31,6 +31,7 @@ from dossier_engine.engine.errors import ActivityError
 from dossier_engine.engine.pipeline.invariants import (
     enforce_used_generated_disjoint,
 )
+from dossier_engine.engine.state import UsedRef
 
 
 # Fixed UUIDs so assertion failure messages are readable.
@@ -42,23 +43,23 @@ V_B1 = UUID("b1111111-1111-1111-1111-111111111111")
 
 
 def _local_used_ref(entity_id: UUID, version_id: UUID, etype: str = "oe:foo"):
-    """Shape: what `resolve_used` would put in `state.used_refs` for
-    a local entity. `entity` is the full `type/eid@vid` ref."""
-    return {
-        "entity": f"{etype}/{entity_id}@{version_id}",
-        "version_id": version_id,
-        "type": etype,
-    }
+    """What `resolve_used` would put in `state.used_refs` for a local
+    entity. `entity` is the full `type/eid@vid` ref."""
+    return UsedRef(
+        entity=f"{etype}/{entity_id}@{version_id}",
+        version_id=version_id,
+        type=etype,
+    )
 
 
 def _external_used_ref(uri: str):
-    """Shape: what `resolve_used` would put in `state.used_refs`
-    for an external URI."""
-    return {
-        "entity": uri,
-        "external": True,
-        "version_id": uuid4(),
-    }
+    """What `resolve_used` would put in `state.used_refs` for an
+    external URI."""
+    return UsedRef(
+        entity=uri,
+        external=True,
+        version_id=uuid4(),
+    )
 
 
 def _local_generated_item(entity_id: UUID, version_id: UUID, etype: str = "oe:foo"):

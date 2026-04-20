@@ -299,9 +299,12 @@ When an activity should trigger future work (send a notification, check a deadli
 ```yaml
 - name: "dienAanvraagIn"
   tasks:
+    # Fire immediately after the activity completes — no scheduled_for.
     - kind: "recorded"
       function: "send_ontvangstbevestiging"
-    - kind: "anchored"
+
+    # Fire 20 days later — relative offset.
+    - kind: "recorded"
       anchor_type: "oe:aanvraag"
       function: "check_behandeltermijn"
       scheduled_for: "+20d"
@@ -324,6 +327,58 @@ Registered on the plugin:
 ```python
 Plugin(..., task_handlers=TASK_HANDLERS)
 ```
+
+#### Scheduling: when does a task run?
+
+The `scheduled_for` field accepts two forms:
+
+**Relative offset** — resolved against the activity's start time.
+
+```yaml
+scheduled_for: "+20d"    # 20 days from now
+scheduled_for: "+2h"     # 2 hours from now
+scheduled_for: "+45m"    # 45 minutes
+scheduled_for: "+3w"     # 3 weeks
+```
+
+Units: `m` (minutes), `h` (hours), `d` (days), `w` (weeks). The `+` prefix is required — it's what tells the parser "this is an offset, not a date". Negative offsets and unknown units are rejected at activity execution time.
+
+**Absolute ISO 8601** — for fixed wall-clock times.
+
+```yaml
+scheduled_for: "2026-12-31T23:59:59Z"
+scheduled_for: "2026-05-01T12:00:00+02:00"
+```
+
+Omit `scheduled_for` entirely for tasks that should run immediately after the activity completes.
+
+#### Dynamic deadlines (from entity content or config)
+
+YAML can't read entity fields — there's no `{{ aanvraag.deadline }}` template syntax, deliberately. For anything where the deadline depends on entity content or runtime config, compute the ISO string in a handler and return it in `HandlerResult.tasks`:
+
+```python
+from datetime import datetime, timezone, timedelta
+
+async def handle_beslissing(context, content):
+    # Deadline from plugin config — 30 days by default, overrideable
+    # via env var or workflow.yaml.
+    deadline_days = context.constants.aanvraag_deadline_days
+
+    deadline = (
+        datetime.now(timezone.utc) + timedelta(days=deadline_days)
+    ).isoformat()
+
+    task_dict = {
+        "kind": "scheduled_activity",
+        "target_activity": "trekAanvraagIn",
+        "scheduled_for": deadline,     # full ISO string
+        "cancel_if_activities": ["vervolledigAanvraag"],
+        "anchor_type": "oe:aanvraag",
+    }
+    return HandlerResult(tasks=[task_dict])
+```
+
+Handlers have full access to `context.get_typed("oe:aanvraag")` to read entity content, `context.constants` for configured values, and `context.dossier_id` for anything else needing lookup. The rule of thumb: **if the deadline depends on something that varies, compute in a handler. If it's always "N days after this activity", use the YAML offset.**
 
 ### Search — Elasticsearch integration
 
@@ -394,6 +449,81 @@ relations:
 
 Built-in prefixes (`prov`, `xsd`, `rdf`, `rdfs`) are always available; you don't need to declare them. Your plugin's own prefix (`oe` by default) is registered from `config.yaml`'s `iri_base.ontology`.
 
+### Workflow constants and environment variables
+
+Your plugin will have constants — deadline durations, decision thresholds, feature flags, external service URLs, API keys. Hardcoding them in handler code is fine for a prototype, but they need a proper home: some change per deployment (dev vs prod URLs), some are secrets (never commit), some are domain-level tuning you want operators to adjust without code changes.
+
+The engine gives you a typed `constants` slot on every plugin. Declare a Pydantic `BaseSettings` class:
+
+```python
+# my_workflow/constants.py
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+class MyWorkflowConstants(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_prefix="DOSSIER_MY_WORKFLOW_",
+        case_sensitive=False,
+        frozen=True,
+    )
+
+    # Domain constants
+    aanvraag_deadline_days: int = 30
+    max_attachments: int = 20
+
+    # Environment-specific
+    external_api_url: str = "http://localhost:9200"
+    external_api_key: str | None = None
+
+    # Feature flags
+    auto_approve_enabled: bool = False
+```
+
+Wire it into `create_plugin()`:
+
+```python
+def create_plugin() -> Plugin:
+    workflow = yaml.safe_load(open("workflow.yaml"))
+    yaml_constants = (workflow.get("constants") or {}).get("values", {}) or {}
+    constants = MyWorkflowConstants(**yaml_constants)
+    return Plugin(..., constants=constants)
+```
+
+Access it anywhere in your plugin code:
+
+```python
+# In a handler
+async def handle_beslissing(context, content):
+    deadline_days = context.constants.aanvraag_deadline_days
+    ...
+
+# In a hook or route factory
+async def update_search_index(repo, dossier_id, ...):
+    url = plugin.constants.external_api_url
+    ...
+```
+
+**Precedence (highest wins):**
+
+1. **Environment variables** — `DOSSIER_MY_WORKFLOW_AANVRAAG_DEADLINE_DAYS=60` — operator's escape hatch for per-deployment tuning and the only acceptable place for secrets.
+2. **`workflow.yaml`** — `constants.values` block — committable domain-level tuning.
+3. **Class defaults** — the values in your Pydantic class.
+
+```yaml
+# workflow.yaml
+constants:
+  values:
+    aanvraag_deadline_days: 45   # overrides class default of 30
+    # external_api_key: never put secrets here — use env vars
+```
+
+**What goes where:**
+
+- **Code defaults**: sensible values that let a bare install work
+- **`workflow.yaml`**: domain decisions the plugin author makes (deadlines, thresholds, feature flag defaults)
+- **Environment variables**: deployment-specific values (URLs, timeouts, feature flag overrides) and ALL secrets
+
+Because the class is `frozen=True`, nothing can mutate the constants after plugin load — they're immutable for the lifetime of the process.
+
 ## What you don't need to think about
 
 The engine handles these automatically — you declare them in YAML or not at all:
@@ -401,8 +531,8 @@ The engine handles these automatically — you declare them in YAML or not at al
 - **PROV provenance** — every activity, entity version, and derivation chain is recorded
 - **Versioning** — `derivedFrom` chains are computed from `used` + `generated` declarations
 - **Idempotency** — client-generated UUIDs make PUTs safe to retry
-- **Access control** — the `oe:dossier_access` entity (managed by a handler) controls who sees what
-- **Archiving** — `GET /dossiers/{id}/archive` produces a PDF/A-3b with full provenance and embedded files
+- **Access control** — the `oe:dossier_access` entity (managed by a handler) controls who sees what. Audit-level views (`/prov`, `/prov/graph/columns`, `/archive`) require a separate `global_audit_access` role list in `config.yaml` or an `audit_access` list on the dossier — these endpoints expose the full unfiltered record (system activities, tasks, all entities) and should be restricted to auditors and compliance roles.
+- **Archiving** — `GET /dossiers/{id}/archive` produces a PDF/A-3b with full provenance and embedded files (audit-level access required)
 - **Tombstone redaction** — the built-in `tombstone` activity NULLs entity content for GDPR without breaking the PROV graph
 - **Activity visibility** — access entries control which activities each user sees in the timeline
 - **IRI generation** — entity IRIs follow the W3C PROV structure and match the API routes
@@ -426,5 +556,6 @@ Everything a plugin can register:
 | `pre_commit_hooks` | `list[Callable]` | Strict hooks (can veto activity) |
 | `post_activity_hook` | `Callable` | Advisory hook (errors swallowed) |
 | `search_route_factory` | `Callable` | Registers search endpoints |
+| `constants` | `BaseSettings` | Typed workflow constants (env vars + YAML) |
 
 Most plugins use only `entity_models`, `handlers`, and perhaps `task_handlers`. Everything else is opt-in for when you need it.

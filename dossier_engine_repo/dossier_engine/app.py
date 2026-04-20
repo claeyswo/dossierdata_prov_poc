@@ -337,7 +337,10 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
 
     # Register routes
     global_access = config.get("global_access", [])
+    global_audit_access = config.get("global_audit_access", [])
     register_routes(app, registry, auth_middleware, global_access)
-    register_prov_routes(app, registry, auth_middleware, global_access)
+    register_prov_routes(
+        app, registry, auth_middleware, global_access, global_audit_access
+    )
 
     return app

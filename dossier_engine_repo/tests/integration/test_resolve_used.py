@@ -129,9 +129,9 @@ class TestResolveExplicit:
         await _resolve_explicit(state)
 
         assert len(state.used_refs) == 1
-        assert state.used_refs[0]["entity"] == ref
-        assert state.used_refs[0]["version_id"] == vid
-        assert state.used_refs[0]["type"] == "oe:aanvraag"
+        assert state.used_refs[0].entity == ref
+        assert state.used_refs[0].version_id == vid
+        assert state.used_refs[0].type == "oe:aanvraag"
         assert "oe:aanvraag" in state.resolved_entities
         assert state.resolved_entities["oe:aanvraag"].id == vid
         assert ref in state.used_rows_by_ref
@@ -215,8 +215,8 @@ class TestResolveExplicit:
         await _resolve_explicit(state)
 
         assert len(state.used_refs) == 1
-        assert state.used_refs[0]["entity"] == "this-is-not-a-ref"
-        assert state.used_refs[0]["external"] is True
+        assert state.used_refs[0].entity == "this-is-not-a-ref"
+        assert state.used_refs[0].external is True
 
     async def test_external_uri_shortcircuits_to_external_path(self, repo):
         """An `https://` URI in `used` is an external reference.
@@ -230,9 +230,9 @@ class TestResolveExplicit:
         await _resolve_explicit(state)
 
         assert len(state.used_refs) == 1
-        assert state.used_refs[0]["entity"] == uri
-        assert state.used_refs[0]["external"] is True
-        assert "version_id" in state.used_refs[0]
+        assert state.used_refs[0].entity == uri
+        assert state.used_refs[0].external is True
+        assert state.used_refs[0].version_id is not None
 
     async def test_duplicate_external_uri_idempotent(self, repo):
         """Listing the same external URI twice in the same activity
@@ -251,6 +251,6 @@ class TestResolveExplicit:
         await _resolve_explicit(state)
 
         assert len(state.used_refs) == 2
-        assert all(ref["external"] is True for ref in state.used_refs)
+        assert all(ref.external is True for ref in state.used_refs)
         # Same version_id on both — same underlying external row.
-        assert state.used_refs[0]["version_id"] == state.used_refs[1]["version_id"]
+        assert state.used_refs[0].version_id == state.used_refs[1].version_id

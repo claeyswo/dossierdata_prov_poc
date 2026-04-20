@@ -94,7 +94,7 @@ def _build_prov_test_app() -> FastAPI:
         {
             "id": "alice", "username": "alice",
             "type": "natuurlijk_persoon", "name": "Alice",
-            "roles": [], "properties": {},
+            "roles": ["auditor"], "properties": {},
         },
     ])
 
@@ -103,7 +103,10 @@ def _build_prov_test_app() -> FastAPI:
     app.state.config = {"file_service": {"url": "http://test", "signing_key": "k"}}
 
     register_routes(app, registry, auth, global_access=[])
-    register_prov_routes(app, registry, auth, global_access=[])
+    register_prov_routes(
+        app, registry, auth, global_access=[],
+        global_audit_access=["auditor"],
+    )
     return app
 
 
@@ -411,3 +414,153 @@ class TestProvGraphColumns:
         assert body.startswith("<!DOCTYPE html>")
         assert "PROV Columns" in body
         assert "d3.min.js" in body
+
+
+class TestAuditAccess:
+    """The audit-level endpoints (/prov, /prov/graph/columns,
+    /archive) use check_audit_access, not the ordinary dossier_access
+    check. A user with ordinary dossier_access but no audit role gets
+    403; the timeline endpoint stays open to them."""
+
+    async def test_prov_json_denied_without_audit_role(self, repo):
+        """User without auditor role gets 403 on /prov even though
+        they have ordinary dossier_access."""
+        # Custom app with a non-auditor user
+        from dossier_engine.auth import POCAuthMiddleware
+        from dossier_engine.plugin import Plugin, PluginRegistry
+        from fastapi import FastAPI
+        from httpx import ASGITransport, AsyncClient
+
+        plugin = Plugin(
+            name="testwf",
+            workflow={"name": "testwf", "activities": []},
+            entity_models={},
+            entity_schemas={},
+            handlers={},
+            validators={},
+            relation_validators={},
+        )
+        registry = PluginRegistry()
+        registry.register(plugin)
+        auth = POCAuthMiddleware([
+            {"id": "bob", "username": "bob", "type": "natuurlijk_persoon",
+             "name": "Bob", "roles": ["oe:aanvrager"], "properties": {}},
+        ])
+
+        app = FastAPI()
+        app.state.registry = registry
+        app.state.config = {"file_service": {"url": "http://test", "signing_key": "k"}}
+        register_routes(app, registry, auth, global_access=[])
+        register_prov_routes(
+            app, registry, auth, global_access=[],
+            global_audit_access=["auditor"],  # bob is not an auditor
+        )
+
+        await _bootstrap_with_entity(repo)
+        await _commit(repo)
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            r = await c.get(
+                f"/dossiers/{D1}/prov",
+                headers={"X-POC-User": "bob"},
+            )
+            assert r.status_code == 403
+            assert "audit" in r.json()["detail"].lower()
+
+    async def test_archive_denied_without_audit_role(self, repo):
+        """Same check on /archive — audit-level endpoint."""
+        from dossier_engine.auth import POCAuthMiddleware
+        from dossier_engine.plugin import Plugin, PluginRegistry
+        from fastapi import FastAPI
+        from httpx import ASGITransport, AsyncClient
+
+        plugin = Plugin(
+            name="testwf",
+            workflow={"name": "testwf", "activities": []},
+            entity_models={},
+            entity_schemas={},
+            handlers={},
+            validators={},
+            relation_validators={},
+        )
+        registry = PluginRegistry()
+        registry.register(plugin)
+        auth = POCAuthMiddleware([
+            {"id": "bob", "username": "bob", "type": "natuurlijk_persoon",
+             "name": "Bob", "roles": ["oe:aanvrager"], "properties": {}},
+        ])
+
+        app = FastAPI()
+        app.state.registry = registry
+        app.state.config = {"file_service": {"url": "http://test", "signing_key": "k"}}
+        register_routes(app, registry, auth, global_access=[])
+        register_prov_routes(
+            app, registry, auth, global_access=[],
+            global_audit_access=["auditor"],
+        )
+
+        await _bootstrap_with_entity(repo)
+        await _commit(repo)
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            r = await c.get(
+                f"/dossiers/{D1}/archive",
+                headers={"X-POC-User": "bob"},
+            )
+            assert r.status_code == 403
+
+    async def test_timeline_open_to_dossier_access_users(self, repo):
+        """Timeline endpoint honors ordinary dossier_access — a
+        user without audit role can still view their own timeline."""
+        # Bob has dossier access via empty global_access list only
+        # matching no entries → default-deny. We need an explicit
+        # global_access entry for bob's role.
+        from dossier_engine.auth import POCAuthMiddleware
+        from dossier_engine.plugin import Plugin, PluginRegistry
+        from fastapi import FastAPI
+        from httpx import ASGITransport, AsyncClient
+
+        plugin = Plugin(
+            name="testwf",
+            workflow={"name": "testwf", "activities": []},
+            entity_models={},
+            entity_schemas={},
+            handlers={},
+            validators={},
+            relation_validators={},
+        )
+        registry = PluginRegistry()
+        registry.register(plugin)
+        auth = POCAuthMiddleware([
+            {"id": "bob", "username": "bob", "type": "natuurlijk_persoon",
+             "name": "Bob", "roles": ["oe:aanvrager"], "properties": {}},
+        ])
+
+        app = FastAPI()
+        app.state.registry = registry
+        app.state.config = {"file_service": {"url": "http://test", "signing_key": "k"}}
+        register_routes(
+            app, registry, auth,
+            global_access=[{"role": "oe:aanvrager", "view": "all", "activity_view": "all"}],
+        )
+        register_prov_routes(
+            app, registry, auth,
+            global_access=[{"role": "oe:aanvrager", "view": "all", "activity_view": "all"}],
+            global_audit_access=["auditor"],  # bob is NOT an auditor
+        )
+
+        await _bootstrap_with_entity(repo)
+        await _commit(repo)
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            r = await c.get(
+                f"/dossiers/{D1}/prov/graph/timeline",
+                headers={"X-POC-User": "bob"},
+            )
+            # Timeline honors ordinary dossier_access — bob's
+            # oe:aanvrager role is in global_access, so he gets in.
+            assert r.status_code == 200, r.text
+            assert "text/html" in r.headers["content-type"]

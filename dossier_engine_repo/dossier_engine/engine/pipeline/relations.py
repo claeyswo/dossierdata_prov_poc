@@ -34,7 +34,7 @@ from __future__ import annotations
 
 from ..errors import ActivityError
 from ..refs import EntityRef
-from ..state import ActivityState
+from ..state import ActivityState, ValidatedRelation, DomainRelationEntry
 from ...plugin import Plugin
 
 
@@ -250,11 +250,11 @@ async def _handle_domain_add(
     from_iri = expand_ref(from_ref, state.dossier_id)
     to_iri = expand_ref(to_ref, state.dossier_id)
 
-    state.validated_domain_relations.append({
-        "relation_type": rel_type,
-        "from_ref": from_iri,
-        "to_ref": to_iri,
-    })
+    state.validated_domain_relations.append(DomainRelationEntry(
+        relation_type=rel_type,
+        from_ref=from_iri,
+        to_ref=to_iri,
+    ))
     state.relations_by_type.setdefault(rel_type, []).append({
         "from_ref": from_iri,
         "to_ref": to_iri,
@@ -286,11 +286,11 @@ async def _handle_process_control(
         "entity_row": rel_entity,
         "raw": rel_item,
     })
-    state.validated_relations.append({
-        "version_id": rel_entity.id,
-        "relation_type": rel_type,
-        "ref": rel_ref,
-    })
+    state.validated_relations.append(ValidatedRelation(
+        version_id=rel_entity.id,
+        relation_type=rel_type,
+        ref=rel_ref,
+    ))
 
 
 async def _parse_remove_relations(
@@ -341,11 +341,11 @@ async def _parse_remove_relations(
         from_iri = expand_ref(from_ref, state.dossier_id)
         to_iri = expand_ref(to_ref, state.dossier_id)
 
-        state.validated_remove_relations.append({
-            "relation_type": rel_type,
-            "from_ref": from_iri,
-            "to_ref": to_iri,
-        })
+        state.validated_remove_relations.append(DomainRelationEntry(
+            relation_type=rel_type,
+            from_ref=from_iri,
+            to_ref=to_iri,
+        ))
 
 
 # =====================================================================

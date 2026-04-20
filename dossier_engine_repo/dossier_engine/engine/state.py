@@ -43,6 +43,77 @@ from ..db.models import ActivityRow, EntityRow, Repository
 from ..plugin import Plugin
 
 
+# ===================================================================
+# Typed pipeline data
+# ===================================================================
+#
+# These dataclasses replace `list[dict]` / `dict[str, ...]` fields in
+# ActivityState. The shape used to be documented only in the state's
+# docstrings; making them real types means:
+#
+#   * IDE autocomplete works on the fields
+#   * A typo in a field name (``version_di`` instead of ``version_id``)
+#     is caught at construction, not at the silent downstream read
+#   * Optional vs required is expressed in the signature, not inferred
+#     by reading `.get(key)` call sites
+#
+# The shapes mirror what the previous dict-based code used, so the
+# migration is mechanical. Each field is individually documented; no
+# docstring-only shapes remain.
+
+
+@dataclass(frozen=True)
+class UsedRef:
+    """A resolved `used` reference, produced by the `used` phase.
+
+    Versioned entity reference that the activity reads. For local
+    entities, ``type`` is set. For external URIs, ``external=True``
+    and ``type`` stays None (externals aren't typed in our schema).
+    For system-caller auto-resolution (worker scheduled activities),
+    ``auto_resolved=True``.
+    """
+
+    entity: str
+    version_id: UUID
+    type: str | None = None
+    external: bool = False
+    auto_resolved: bool = False
+
+
+@dataclass(frozen=True)
+class ValidatedRelation:
+    """A process-control relation staged for persistence.
+
+    Process-control relations link an activity to an entity (the
+    ``used`` equivalent for relations — e.g. ``oe:neemtAkteVan``).
+    One row per validated relation, persisted to the
+    ``activity_relations`` table.
+    """
+
+    version_id: UUID
+    relation_type: str
+    ref: str
+
+
+@dataclass(frozen=True)
+class DomainRelationEntry:
+    """A domain relation staged for persistence or removal.
+
+    Domain relations link two entities (or an entity and an external
+    URI) with an ontological predicate — e.g.
+    ``<aanvraag> oe:betreft <erfgoedobject>``. Refs are stored as
+    full IRIs; ``expand_ref`` resolves shorthand before staging.
+
+    Shared between ``validated_domain_relations`` (add) and
+    ``validated_remove_relations`` (remove) since the shape is
+    identical — the phase that produced it knows which is which.
+    """
+
+    relation_type: str
+    from_ref: str  # full IRI
+    to_ref: str    # full IRI
+
+
 class Caller(str, Enum):
     """Who initiated this activity execution.
 
@@ -103,12 +174,12 @@ class ActivityState:
     # freshly created. None until the phase runs.
     dossier: Any = None
 
-    # Set by the `used` phase. Each ref is a dict like
-    # `{"entity": "<ref>", "version_id": UUID, "type": "oe:foo"}` for
-    # local entities, or `{"entity": "<uri>", "external": True,
-    # "version_id": UUID}` for external URIs. Used both for persistence
-    # (creating used links) and as input to relation validators.
-    used_refs: list[dict] = field(default_factory=list)
+    # Set by the `used` phase. Each entry is a `UsedRef` — a resolved
+    # versioned reference to an entity the activity reads. Used by
+    # persistence to create used-link rows, by invariant checks for
+    # overlap detection, and by relation validators that need to look
+    # up entities by their original ref.
+    used_refs: list[UsedRef] = field(default_factory=list)
 
     # Set by the `used` phase. Maps entity type → most recent
     # `EntityRow` of that type that the activity touched. Passed to
@@ -132,10 +203,10 @@ class ActivityState:
     # Persisted as `type=external` rows so they show up in the PROV graph.
     generated_externals: list[str] = field(default_factory=list)
 
-    # Set by the `relations` phase. Each item is a dict
-    # `{"version_id": UUID, "relation_type": str, "ref": str}` ready to
-    # become a `RelationRow`.
-    validated_relations: list[dict] = field(default_factory=list)
+    # Set by the `relations` phase. Process-control relations ready
+    # to be persisted to `activity_relations`. Each entry is a
+    # `ValidatedRelation`.
+    validated_relations: list[ValidatedRelation] = field(default_factory=list)
 
     # Set by the `relations` phase. Maps relation type → list of raw
     # entries the client sent for that type. Used by the validator
@@ -144,13 +215,13 @@ class ActivityState:
     relations_by_type: dict[str, list[dict]] = field(default_factory=dict)
 
     # Set by the `relations` phase for domain-kind relations (those
-    # with `from` + `to` instead of `entity`). Each item is a dict
-    # `{"relation_type": str, "from_ref": str, "to_ref": str}`.
-    validated_domain_relations: list[dict] = field(default_factory=list)
+    # with `from` + `to` instead of `entity`). Each entry is a
+    # `DomainRelationEntry` with full-IRI refs.
+    validated_domain_relations: list[DomainRelationEntry] = field(default_factory=list)
 
     # Set by the `relations` phase for domain relations to remove.
-    # Each item is `{"relation_type": str, "from_ref": str, "to_ref": str}`.
-    validated_remove_relations: list[dict] = field(default_factory=list)
+    # Same shape as add — `DomainRelationEntry`.
+    validated_remove_relations: list[DomainRelationEntry] = field(default_factory=list)
 
     # Set by the `tombstone` phase iff the activity is the built-in
     # `tombstone` activity. List of version_ids whose content should be

@@ -2,6 +2,18 @@ name: "toelatingen"
 description: "Toelatingen beschermd erfgoed"
 version: "0.1"
 
+# Workflow constants — accessible from handlers via context.constants
+# and from hooks via plugin.constants. Precedence: env vars
+# (DOSSIER_TOELATINGEN_*) > this block > class defaults in
+# dossier_toelatingen/constants.py. The Pydantic class is the
+# authoritative schema; values here override its defaults.
+constants:
+  values:
+    # Example: tune the aanvraag deadline for this deployment without
+    # touching the Pydantic class. Uncomment to override.
+    # aanvraag_deadline_days: 60
+    # auto_approve_enabled: true
+
 # Namespace prefixes used in this workflow's entity types, relations,
 # and PROV output. ``oe:`` is pre-registered from config.yaml's
 # iri_base.ontology. Add any external vocabularies here to use them

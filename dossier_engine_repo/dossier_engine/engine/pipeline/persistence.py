@@ -180,17 +180,17 @@ async def persist_outputs(state: ActivityState) -> None:
 
     # 4. `Used` link rows. References only — no overlap with generated,
     # which is enforced earlier by `enforce_used_generated_disjoint`.
+    # UsedRef always has a version_id; no guard needed.
     for ref in state.used_refs:
-        if "version_id" in ref:
-            await state.repo.create_used(state.activity_id, ref["version_id"])
+        await state.repo.create_used(state.activity_id, ref.version_id)
 
     # 5. Relation rows (oe:neemtAkteVan and any other plugin-defined
     # PROV-extension relations).
     for rel in state.validated_relations:
         await state.repo.create_relation(
             activity_id=state.activity_id,
-            entity_version_id=rel["version_id"],
-            relation_type=rel["relation_type"],
+            entity_version_id=rel.version_id,
+            relation_type=rel.relation_type,
         )
 
     # 6. Domain relations — semantic links between entities/URIs.
@@ -198,9 +198,9 @@ async def persist_outputs(state: ActivityState) -> None:
     for rel in state.validated_domain_relations:
         await state.repo.create_domain_relation(
             dossier_id=state.dossier_id,
-            relation_type=rel["relation_type"],
-            from_ref=rel["from_ref"],
-            to_ref=rel["to_ref"],
+            relation_type=rel.relation_type,
+            from_ref=rel.from_ref,
+            to_ref=rel.to_ref,
             created_by_activity_id=state.activity_id,
         )
 
@@ -208,8 +208,8 @@ async def persist_outputs(state: ActivityState) -> None:
     for rel in state.validated_remove_relations:
         await state.repo.supersede_domain_relation(
             dossier_id=state.dossier_id,
-            relation_type=rel["relation_type"],
-            from_ref=rel["from_ref"],
-            to_ref=rel["to_ref"],
+            relation_type=rel.relation_type,
+            from_ref=rel.from_ref,
+            to_ref=rel.to_ref,
             superseded_by_activity_id=state.activity_id,
         )

@@ -66,8 +66,8 @@ def enforce_used_generated_disjoint(state: ActivityState) -> None:
     used_local_ids: set = set()
     used_external_uris: set = set()
     for ref in state.used_refs:
-        entity_str = ref.get("entity", "")
-        if ref.get("external"):
+        entity_str = ref.entity
+        if ref.external:
             used_external_uris.add(entity_str)
             continue
         parsed = EntityRef.parse(entity_str)

@@ -285,8 +285,8 @@ class TestAutoResolveForSystemCaller:
         assert "oe:aanvraag" in state.resolved_entities
         assert state.resolved_entities["oe:aanvraag"].id == target_vid
         assert len(state.used_refs) == 1
-        assert state.used_refs[0]["auto_resolved"] is True
-        assert state.used_refs[0]["type"] == "oe:aanvraag"
+        assert state.used_refs[0].auto_resolved is True
+        assert state.used_refs[0].type == "oe:aanvraag"
 
     async def test_anchor_fallback_when_trigger_scope_empty(self, repo):
         """Trigger scope doesn't have the type, but an anchor of
@@ -325,7 +325,7 @@ class TestAutoResolveForSystemCaller:
         await _auto_resolve_for_system_caller(state)
 
         assert state.resolved_entities["oe:aanvraag"].id == vid
-        assert state.used_refs[0]["auto_resolved"] is True
+        assert state.used_refs[0].auto_resolved is True
 
     async def test_singleton_fallback_when_nothing_else_matches(self, repo):
         """Trigger scope empty AND no anchor. But the type is a

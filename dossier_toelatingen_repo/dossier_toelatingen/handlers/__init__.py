@@ -184,7 +184,12 @@ async def handle_beslissing(context: ActivityContext, content: dict | None) -> H
 
             anchor_entity_id = str(aanvraag_row.entity_id) if aanvraag_row else None
 
-            deadline = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
+            # Deadline from plugin constants — 30 days by default,
+            # configurable via workflow.yaml or DOSSIER_TOELATINGEN_AANVRAAG_DEADLINE_DAYS env var.
+            deadline_days = context.constants.aanvraag_deadline_days
+            deadline = (
+                datetime.now(timezone.utc) + timedelta(days=deadline_days)
+            ).isoformat()
             task_dict = {
                 "kind": "scheduled_activity",
                 "target_activity": "trekAanvraagIn",

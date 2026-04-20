@@ -167,6 +167,14 @@ def create_plugin() -> Plugin:
     entity_models, entity_schemas = build_entity_registries_from_workflow(workflow)
     validate_workflow_version_references(workflow, entity_schemas)
 
+    # Build the constants object. Precedence: env vars (via
+    # BaseSettings) > workflow.yaml's constants.values > class defaults.
+    # The `constants:` block is optional — omitted means use all
+    # defaults + env overrides.
+    from .constants import ToelatingenConstants
+    yaml_constants = (workflow.get("constants") or {}).get("values", {}) or {}
+    constants = ToelatingenConstants(**yaml_constants)
+
     return Plugin(
         name=workflow["name"],
         workflow=workflow,
@@ -179,4 +187,5 @@ def create_plugin() -> Plugin:
         task_handlers=TASK_HANDLERS,
         post_activity_hook=update_search_index,
         search_route_factory=register_search_routes,
+        constants=constants,
     )

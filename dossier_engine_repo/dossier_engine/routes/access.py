@@ -11,6 +11,15 @@ Access-check flow
    ``activity_view`` keys from the matched entry to determine what
    the user is allowed to see.
 
+3. ``check_audit_access`` is a separate, stricter check for the
+   endpoints that expose the full, unfiltered provenance record —
+   PROV-JSON export, column-layout visualization, archive PDF.
+   These views don't honor per-user activity/entity filtering and
+   show everything, including system activities and tasks. They're
+   intended for auditors, compliance, and long-term preservation.
+   Default-deny: only roles listed in ``global_audit_access``
+   (config.yaml) or in the dossier's ``audit_access`` list pass.
+
 Design principle: *default-deny*.  Access must be explicitly granted
 by a matching entry.  There is no implicit "everyone can see
 everything if we forgot to set up access rules."  This means:
@@ -20,6 +29,10 @@ everything if we forgot to set up access rules."  This means:
   key (use ``"all"`` to mean all activities visible).
 - A dossier without an ``oe:dossier_access`` entity is locked to
   global-access users only.
+- ``check_audit_access`` is separate — a user granted
+  ``check_dossier_access`` does NOT automatically get audit-level
+  views; that requires explicit listing in ``global_audit_access``
+  or the dossier's ``audit_access``.
 
 Entity visibility (``view``)
 ----------------------------
@@ -158,3 +171,70 @@ def get_visibility_from_entry(
     activity_view = entry.get("activity_view", "all")
 
     return visible_types, activity_view
+
+
+async def check_audit_access(
+    repo: Repository, dossier_id: UUID, user: User,
+    global_audit_access: list[str] | None = None,
+) -> None:
+    """Check if user may access the full-provenance views for this
+    dossier.
+
+    "Audit-level" views are the ones that bypass per-user filtering
+    and expose the complete provenance record: PROV-JSON export,
+    columns graph visualization, archive PDF. They're intended for
+    auditors, compliance officers, and long-term preservation — not
+    for the day-to-day dossier timeline.
+
+    Matches on role only (not on individual agent IDs — audit
+    access is a role-based grant, not something you'd hand to a
+    specific person ad-hoc).
+
+    Sources (in order):
+
+    1. ``global_audit_access`` — a list of role names from
+       config.yaml. Granted to every dossier.
+    2. ``audit_access`` list on the dossier's ``oe:dossier_access``
+       entity. Per-dossier roles — useful when a workflow needs
+       dossier-specific audit roles (e.g. ``oe:ondertekenaar`` for
+       a signing authority).
+
+    Raises:
+        HTTPException 403 if no role match (default-deny). The
+        403 is deliberately generic — don't leak whether the user
+        has basic access or just lacks audit rights.
+    """
+    # Fast path: global list.
+    if global_audit_access:
+        if any(role in user.roles for role in global_audit_access):
+            return
+
+    # Per-dossier list on the access entity.
+    access_entity = await repo.get_singleton_entity(
+        dossier_id, "oe:dossier_access",
+    )
+    if access_entity and access_entity.content:
+        audit_roles = access_entity.content.get("audit_access", [])
+        if audit_roles and any(r in user.roles for r in audit_roles):
+            return
+
+    from ..audit import emit_audit
+    emit_audit(
+        action="dossier.audit_denied",
+        actor_id=user.id,
+        actor_name=user.name,
+        target_type="Dossier",
+        target_id=str(dossier_id),
+        outcome="denied",
+        dossier_id=str(dossier_id),
+        reason="User has no role in global_audit_access or dossier audit_access",
+    )
+    raise HTTPException(
+        403,
+        detail=(
+            "No audit-level access to this dossier. Audit views "
+            "(PROV-JSON, columns graph, archive) require a role "
+            "listed in global_audit_access or the dossier's "
+            "audit_access list."
+        ),
+    )

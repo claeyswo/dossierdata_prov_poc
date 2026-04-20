@@ -90,6 +90,23 @@ class ActivityContext:
         handlers that need the version id to seed a lineage walk."""
         return self._used_entities.get(entity_type)
 
+    @property
+    def constants(self) -> Any:
+        """The plugin's workflow-scoped constants object.
+
+        Typed Pydantic BaseSettings instance populated at plugin load
+        from env vars, workflow.yaml, and class defaults. Use for
+        anything that's configuration rather than per-activity data:
+        deadline durations, feature flags, external service URLs,
+        secrets.
+
+        Returns None if the plugin didn't declare a constants class.
+        Accessing attributes on None will raise AttributeError — the
+        clearer failure mode is to declare an empty class than to
+        leave constants undeclared and silently miss values.
+        """
+        return self._plugin.constants if self._plugin else None
+
     def get_typed(self, entity_type: str) -> Any | None:
         """Get a used entity's content as a validated Pydantic model instance.
 
