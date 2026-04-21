@@ -20,11 +20,77 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .plugin import PluginRegistry
 from .auth import POCAuthMiddleware, User
-from .db import init_db, create_tables, get_session_factory
+from .db import init_db, get_session_factory
 from .routes import register_routes
 from .routes.prov import register_prov_routes
 
 _log = logging.getLogger("dossier.app")
+
+
+def _run_alembic_migrations(db_url: str) -> None:
+    """Run ``alembic upgrade head`` in a subprocess. Raise RuntimeError
+    on any failure.
+
+    Subprocess is needed because alembic's env.py calls
+    ``asyncio.run()`` internally, which can't nest inside uvicorn's
+    already-running event loop when startup runs in-process.
+
+    Fail-fast policy: any Alembic failure aborts startup. The previous
+    behaviour — falling back to ``create_tables()`` on migration
+    failure — risked silently accepting a partially migrated schema,
+    where the upgrade had applied some DDL before erroring.
+    ``create_tables`` (``Base.metadata.create_all``) no-ops on
+    existing tables, so the half-applied state would survive, the app
+    would come up, and requests would land on a schema that matched
+    neither the model nor any Alembic revision. Data corruption,
+    invisible until someone reads the startup WARNING they didn't
+    notice. Refusing to start is the safe posture: the operator sees
+    the failure, fixes the migration or the DB, and retries.
+
+    Missing ``alembic.ini`` is also a hard error. Every real
+    deployment of this service ships migration infrastructure; an
+    install that doesn't is a broken deployment, not a "dev
+    convenience" case. Tests set up the schema via
+    ``tests/conftest.py::create_tables()`` directly, not via
+    ``create_app()``, so this check doesn't hurt the test path.
+
+    Raises:
+        RuntimeError: if ``alembic.ini`` is not found at the expected
+            path, or if ``alembic upgrade head`` returns a non-zero
+            exit code.
+    """
+    alembic_ini = Path(__file__).parent.parent / "alembic.ini"
+    if not alembic_ini.exists():
+        raise RuntimeError(
+            f"alembic.ini not found at {alembic_ini} — the "
+            "deployment is missing migration infrastructure. "
+            "Install the engine from a source checkout (which "
+            "includes alembic.ini + the alembic/ directory at "
+            "the repo root), not from a wheel that ships only "
+            "the Python package."
+        )
+
+    env = {**os.environ, "DOSSIER_DB_URL": db_url}
+    result = subprocess.run(
+        ["python3", "-m", "alembic", "upgrade", "head"],
+        cwd=str(alembic_ini.parent),
+        capture_output=True, text=True, env=env,
+    )
+    if result.returncode != 0:
+        # Log the full stderr before raising so operators have the
+        # Alembic traceback in the app log regardless of how the
+        # RuntimeError is handled upstream.
+        _log.error(
+            "Alembic migration failed (rc=%s). Aborting startup to "
+            "avoid a partially migrated schema. Alembic stderr:\n%s",
+            result.returncode, result.stderr,
+        )
+        raise RuntimeError(
+            f"Alembic 'upgrade head' failed with rc={result.returncode}. "
+            "Refusing to start with a possibly partial schema; see "
+            "app log for Alembic stderr."
+        )
+    _log.info("Alembic migrations applied successfully")
 
 
 # System user used by the worker and side effects
@@ -322,28 +388,10 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
             )
         await init_db(db_url)
 
-        # Run Alembic migrations to HEAD via subprocess.
-        # Subprocess is needed because alembic's env.py calls
-        # asyncio.run() internally, which can't nest inside
-        # uvicorn's already-running event loop.
-        alembic_ini = Path(__file__).parent.parent / "alembic.ini"
-        if alembic_ini.exists():
-            env = {**os.environ, "DOSSIER_DB_URL": db_url}
-            result = subprocess.run(
-                ["python3", "-m", "alembic", "upgrade", "head"],
-                cwd=str(alembic_ini.parent),
-                capture_output=True, text=True, env=env,
-            )
-            if result.returncode == 0:
-                _log.info("Alembic migrations applied successfully")
-            else:
-                _log.warning(
-                    f"Alembic migration failed (rc={result.returncode}), "
-                    f"falling back to create_tables: {result.stderr}"
-                )
-                await create_tables()
-        else:
-            await create_tables()
+        # Migrations. Runs to HEAD, or raises RuntimeError — no
+        # silent fallback. See ``_run_alembic_migrations`` for the
+        # fail-fast rationale.
+        _run_alembic_migrations(db_url)
 
     # Register routes
     global_access = config.get("global_access", [])

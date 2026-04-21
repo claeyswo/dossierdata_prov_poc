@@ -10,15 +10,15 @@
 
 | Status | Count | Items |
 |---|---|---|
-| ✅ Fixed & verified | 19 | Bugs 1, 2, 5, 12, 15, 16, 17, 32, 44, 47, 64, 65, 68, 70, 72 (coverage), 73, 74, 75, 76 + Obs-2 (duplicate "external") |
+| ✅ Fixed & verified | 20 | Bugs 1, 2, 5, 6, 12, 15, 16, 17, 32, 44, 47, 64, 65, 68, 70, 72 (coverage), 73, 74, 75, 76 + Obs-2 (duplicate "external") |
 | 🔍 Investigated, not a bug | 1 | Bug 14 — cross-dossier refs are `type=external` rows |
 | 🛑 Deferred / accepted | 4 | Bug 31 (RRN acceptable), Bug 45 (MinIO migration), Bug 63 (403 is correct HTTP), Bug 71 (test activities, deploy-time removal) |
-| 🧪 Test suite | **762/762** passing | engine 707, toelatingen 16, file_service 21, common/signing 18 |
+| 🧪 Test suite | **767/767** passing | engine 712, toelatingen 16, file_service 21, common/signing 18 |
 | 🏃 `test_requests.sh` | **25/25 OK, exit 0, zero deadlocks, zero worker crashes** | D1–D9 green |
 | ✂️ Duplication closed | **D1, D2, D4, D22, D25** | Graph-loader consolidation + audit-emit wrapper |
 | 🧰 Harnesses installed | **3** | Guidebook YAML lint + phase-docstring lint + CI shell-spec wrapper |
 | 🤖 CI wired | **GitHub Actions** | `.github/workflows/ci.yml` — 4 jobs: pytest, shell-spec, doc-harnesses, migrations-append-only |
-| 📦 Pending | ~58 bugs + 57 obs + 22 dups + 5 meta (partial relief) | See below |
+| 📦 Pending | ~57 bugs + 57 obs + 22 dups + 5 meta (partial relief) | See below |
 
 Note: Bug 75 was discovered *by* harness 2 on its first run — a new bug surfaced and fixed in the same session as the harness that surfaced it.
 
@@ -33,7 +33,7 @@ Note: Bug 75 was discovered *by* harness 2 on its first run — a new bug surfac
 | ~~1~~ | 1 | ~~`remove_relations` — `r["relation_type"]` on frozen dataclass → `TypeError`.~~ | ✅ |
 | ~~2~~ | 1 | ~~Add-validator dispatch path also triggers on removes.~~ | ✅ |
 | ~~5~~ | 2 | ~~`check_dossier_access` docstring claims default-deny but code asserts default-allow.~~ | ✅ **Fixed in Round 15.** Code now matches the module docstring: an un-provisioned dossier (no `oe:dossier_access` entity, or one with empty content) raises 403 with `emit_dossier_audit(reason="Dossier has no access entity configured")` instead of falling through to permit. Drive-by consistency fix in the same file — three gratuitous in-function `from ..audit import emit_dossier_audit` hoisted to module level. Four tests updated + two regression tests added + `_bootstrap_with_entity` in `test_prov_endpoints.py` taught to seed the access entity that production's `setDossierAccess` side-effect writes. |
-| 6 | 2 | Alembic failure fallback runs `create_tables()` — half-migrated schema risk. |  |
+| ~~6~~ | 2 | ~~Alembic failure fallback runs `create_tables()` — half-migrated schema risk.~~ | ✅ **Fixed in Round 16.** `app.py` now raises `RuntimeError` on any Alembic `upgrade head` non-zero exit (logging stderr at ERROR first so the Alembic traceback survives in the app log) *and* on missing `alembic.ini`. Previous silent fallback to `create_tables()` is gone — it masked partial-migration corruption by no-op'ing over existing tables. Extracted the Alembic invocation to a module-level `_run_alembic_migrations(db_url)` helper so the fail-fast paths are unit-testable without a live DB. 5 regression tests added. |
 | 7 | 2 | Batch endpoint emits audit events per item before transaction commit. |  |
 | 🔍 14 | 3 | **Not a bug.** Cross-dossier refs persisted as local `type=external` rows via `ensure_external_entity`; raw-UUID cross-dossier refs rejected at `resolve_used:89-92` with 422. | Dropped from must-fix. |
 | ~~15~~ | 3 | ~~Archive tempfile leak fills `/tmp` on heavy use.~~ | ✅ |
@@ -416,10 +416,38 @@ Started with the usual "verify before planning" step — given Round 14's lesson
 
 **Follow-up observation** (not shipped, for consideration in a later round). `_bootstrap_with_entity` was carrying a hidden dependency on the bug it was supposed to be unrelated to. Other test fixtures across the suite likely have the same shape — create a dossier without provisioning access, and accidentally-pass because of default-allow. The engine sweep says no other tests hit `check_dossier_access` without seeding it (otherwise the full-suite run would have shown more failures), but a small harness that asserts "every committed test dossier has an `oe:dossier_access` entity" would catch this class of drift at commit time and pin the production invariant. Flagging as a candidate **M7 / harness 4** if useful — it's roughly the same shape as the existing docstring-lint harness (walk, inspect, assert).
 
+### Round 16 — Bug 6 (Alembic failure fallback → partial-migration corruption)
+
+Verify-before-plan confirmed the drift was real. `app.py:330-346` ran `alembic upgrade head` via subprocess, and on non-zero exit logged a WARNING and called `create_tables()` (`Base.metadata.create_all`) as a silent fallback. Because `create_all` no-ops on existing tables, a partial migration — where the upgrade script applied some DDL before erroring — would survive intact: the app would come up on a schema that matched neither the ORM model nor any Alembic revision, `alembic_version` would still point at the partially-applied revision, future `upgrade head` calls would try to re-apply the same failed migration, and the symptom would be data corruption visible only as a WARNING line nobody read.
+
+Two paths hit `create_tables()`: the non-zero-exit fallback on line 344 (the main bug), and a second `if not alembic_ini.exists()` branch on line 346 (effectively dead for any source checkout but potentially live if someone pip-installs a wheel that doesn't bundle `alembic.ini` — `pyproject.toml`'s `packages.find` scopes to `dossier_engine*` and the ini sits a directory up, so it's *not* shipped with the wheel).
+
+**Design question surfaced before coding** — three options considered: (A) pure fail-fast on both paths, (B) gate the fallback behind an explicit config flag, (C) `create_tables + alembic stamp head` only on verified-empty DB, fail-fast on partial. User picked A. Reasoning that landed on A: the threat model is partial-migration corruption of production data (hardest to detect, most expensive to recover from), the "convenience" the fallback provided was illusory because tests go through `conftest.py` directly and production always runs Alembic, and fail-fast matches the same posture taken on Bug 5 (default-deny on authorization anomaly → refuse to start on migration anomaly).
+
+**Fix.**
+- **New module-level helper** `_run_alembic_migrations(db_url: str) -> None` in `app.py`. Raises `RuntimeError` on missing `alembic.ini` (with a message that names the expected path and explains what "missing" means for a deployment), raises `RuntimeError` on non-zero `upgrade head` exit, logs success at INFO on rc=0. Before raising on non-zero exit, logs the full Alembic stderr at ERROR level via `dossier.app` logger so the migration traceback survives in app logs regardless of how the RuntimeError propagates through uvicorn's lifespan handler. The LoggingIntegration shipped in Round 13 picks this up as a Sentry breadcrumb, so crashed startups become observable in SIEM.
+- **`startup()` shrunk** to a single `_run_alembic_migrations(db_url)` call plus a pointer comment.
+- **`create_tables` import dropped** from `app.py`. Still exported from `dossier_engine.db` and used by `tests/conftest.py` + `stress_test.py`, which are the legitimate callers — those are in-process schema bootstraps that intentionally skip Alembic, and the helper is fine for that.
+
+**Drive-by refactor justified.** The standing rule is "don't refactor during a bug fix round, stash drive-bys in lower-priority." The helper extraction bends that rule because it earns its keep: the failure paths are now unit-testable without a live DB, which is the difference between pinning the contract (the regression tests below) and relying on manual end-to-end runs. If extraction had meant more than ~60 lines of movement, I'd have left it inline and tested via FastAPI's lifespan plumbing.
+
+**Tests shipped.** 5 new tests in `tests/unit/test_alembic_startup.py::TestRunAlembicMigrations`:
+- `test_missing_alembic_ini_raises_runtime_error` — monkeypatches `Path.exists` → False, asserts `RuntimeError` with "alembic.ini" and "migration infrastructure" in the message (so the operator-visible diagnostic is part of the pinned contract, not incidental wording).
+- `test_nonzero_exit_raises_runtime_error` — monkeypatches `subprocess.run` to return `returncode=1`, asserts `RuntimeError` with the `rc=` string.
+- `test_nonzero_exit_logs_stderr_at_error_level` — asserts that Alembic's stderr content (a realistic `InvalidSchemaName` example) appears in the `dossier.app` ERROR log record before the raise. Pins the "log before raise" ordering so a future refactor that reverses it doesn't silently lose the traceback.
+- `test_zero_exit_logs_success_without_raising` — happy path, pins that rc=0 cleanly returns without raising and emits the "Alembic migrations applied successfully" INFO log.
+- `test_subprocess_run_invoked_with_expected_args` — pins the invocation contract: command list is `["python3", "-m", "alembic", "upgrade", "head"]`, `capture_output=True`, `text=True`, and crucially the `DOSSIER_DB_URL` env var is set on the subprocess environment. That last one matters because `alembic/env.py` reads it to build the async engine; a typo or omission silently falls back to the module-level default connection string and migrates the wrong DB.
+
+**Verified.**
+- **Test suite:** 767/767 (engine 712, up from 707 after Round 15; toelatingen 16, common/signing 18, file_service 21). +5 matches the five new regression tests.
+- **Shell spec via harness 2:** exit 0, 25 OK, 5 summaries, D1–D9 green, zero tracebacks/5xx. The fail-fast change touches only the rc≠0 branch — the happy path (Alembic runs cleanly on a fresh Postgres, which is what the harness stages) is unaffected.
+
+**Note on what didn't change.** `create_tables()` in `dossier_engine.db.session` stays. It's the right tool for in-process test schema bootstrap (`conftest.py`) and for the standalone stress-test harness, both of which intentionally sidestep Alembic. The bug was never `create_tables` itself — it was *using it as a production failure fallback*. That usage is now gone; the helper remains fit for purpose.
+
 ### Where to go next (in priority order)
 
-1. **Bug 58 — unauthenticated `/validate` endpoint.** User-visible, not behind SSO. Check the route registration in `dossier_engine_repo/dossier_engine/app.py` and wherever validate endpoints are mounted. As with Bugs 5/12/76, verify it's still open first — it's been on the list across multiple rounds and may already be wired.
-2. **Remaining open "must-fix" bugs** — Bugs 6, 7, 30, 55, 57, 62. Priority depends on deployment context.
+1. **Bug 7 — batch endpoint emits audit events per item before transaction commit.** Fail-open shape in the opposite direction from Bug 6: audit is append-only NDJSON, so once an event is emitted you can't retract it. If the batch commit fails after partial audit emission, the log claims actions that never happened. Verify still open first.
+2. **Remaining open "must-fix" bugs** — Bugs 30, 55, 57, 58, 62 in number order. Priority depends on deployment context, but the severity-first walk keeps them grouped before should-fix.
 
 The two "optional" items previously on this list remain closed:
 - **Obs-3** (write-on-change for `set_dossier_access`) — deferred by product decision. Keeping the full provenance graph is intended behaviour, not a pending optimization. Filed alongside Bugs 31/45/71 under deferred/accepted.
