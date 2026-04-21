@@ -31,8 +31,8 @@ from .db import init_db, get_session_factory
 from .db.models import EntityRow, Repository
 from .engine import ActivityContext, Caller, execute_activity
 from .engine.refs import EntityRef
-from .sentry_integration import (
-    init_sentry,
+from .sentry import (
+    init_sentry_worker,
     capture_task_retry,
     capture_task_dead_letter,
     capture_worker_loop_crash,
@@ -817,7 +817,7 @@ async def worker_loop(config_path: str = "config.yaml", poll_interval: int = 10,
     # Initialize Sentry if SENTRY_DSN is set. No-op otherwise.
     # Placed after config load so deployments can override DSN via
     # config in the future if they want to, though env var wins for now.
-    init_sentry()
+    init_sentry_worker()
 
     shutdown = asyncio.Event()
 

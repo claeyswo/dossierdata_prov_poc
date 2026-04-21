@@ -17,6 +17,7 @@ Features:
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from uuid import UUID
 
@@ -28,6 +29,8 @@ from sqlalchemy import select
 from ..db.models import (
     EntityRow, ActivityRow, AssociationRow, UsedRow, Repository
 )
+
+_log = logging.getLogger("dossier.routes.prov_columns")
 from ..db import get_session_factory
 from ..auth import User
 from .access import (
@@ -134,7 +137,21 @@ def register_columns_graph(
                             try:
                                 scheduled_ids.add(UUID(raid))
                             except (ValueError, AttributeError):
-                                pass
+                                # result_activity_id is written by the
+                                # engine as ``str(uuid4())``, so a
+                                # malformed value here is row corruption
+                                # (or a pre-migration legacy row that
+                                # stored a non-UUID). Skipping drops this
+                                # task from the scheduled-activity column
+                                # set, which is safe — the task still
+                                # runs, it just doesn't get a dedicated
+                                # column in the graph. Log so the
+                                # corruption is visible.
+                                _log.warning(
+                                    "Malformed result_activity_id %r on "
+                                    "task entity %s; skipping column mapping",
+                                    raid, e.id,
+                                )
 
             # Build top row
             top_row = []
@@ -219,7 +236,20 @@ def register_columns_graph(
                     try:
                         col_for_act[UUID(col["id"])] = i
                     except (ValueError, AttributeError):
-                        pass
+                        # Column ids come from either activity.id
+                        # (always a real UUID) or a dummy-column slot
+                        # where id is set to a non-UUID placeholder —
+                        # those are legitimately not UUIDs and we
+                        # correctly skip them. But if id looks UUID-ish
+                        # and fails to parse, that's anomalous; debug-
+                        # level log keeps the graph-rendering path
+                        # quiet for the expected-skip case while still
+                        # leaving a trail if a structural bug ever
+                        # starts producing malformed ids.
+                        _log.debug(
+                            "Column id %r is not a UUID; not mapped to an activity",
+                            col["id"],
+                        )
 
             # Assign side effects to columns
             side_effect_ids = set()

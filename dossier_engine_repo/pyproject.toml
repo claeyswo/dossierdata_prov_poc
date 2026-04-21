@@ -20,10 +20,23 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Sentry wiring is optional at runtime — the `sentry.py` module is a
+# silent no-op when `sentry_sdk` isn't installed. Deployments that
+# want Sentry pick up this extra:
+#     pip install 'dossier-engine[observability]'
+# or add `sentry-sdk>=1.14.0` to their own requirements. The lower
+# bound is where FastApiIntegration was introduced.
+observability = [
+    "sentry-sdk>=1.14.0",
+]
+# The dev extra includes the observability one so local pytest runs
+# can exercise both no-op and installed paths without a second
+# install step.
 dev = [
     "httpx>=0.26.0",
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
+    "sentry-sdk>=1.14.0",
 ]
 
 [build-system]

@@ -13,7 +13,7 @@
 | ✅ Fixed & verified | 16 | Bugs 1, 2, 15, 16, 17, 32, 44, 47, 64, 65, 68, 70, 72 (coverage), 73, 74, 75 + Obs-2 (duplicate "external") |
 | 🔍 Investigated, not a bug | 1 | Bug 14 — cross-dossier refs are `type=external` rows |
 | 🛑 Deferred / accepted | 4 | Bug 31 (RRN acceptable), Bug 45 (MinIO migration), Bug 63 (403 is correct HTTP), Bug 71 (test activities, deploy-time removal) |
-| 🧪 Test suite | **740/740** passing | engine 687, toelatingen 16, file_service 19, common/signing 18 |
+| 🧪 Test suite | **754/754** passing | engine 701, toelatingen 16, file_service 19, common/signing 18 |
 | 🏃 `test_requests.sh` | **25/25 OK, exit 0, zero deadlocks, zero worker crashes** | D1–D9 green |
 | ✂️ Duplication closed | **D1, D2, D4, D22, D25** | Graph-loader consolidation + audit-emit wrapper |
 | 🧰 Harnesses installed | **3** | Guidebook YAML lint + phase-docstring lint + CI shell-spec wrapper |
@@ -59,7 +59,7 @@ Note: Bug 75 was discovered *by* harness 2 on its first run — a new bug surfac
 |---|------|---------|--------|
 | 4 | 2 | `Session` type annotation never imported. |  |
 | 9 | 2 | N+1 in dossier detail view. |  |
-| 12 | 2 | `_parse_scheduled_for` silently returns None on unparseable dates. |  |
+| 12 | 2 | **M2 Stage 2 target.** `_parse_scheduled_for` (`worker.py:65`) silently returns `None` on unparseable ISO strings. The due-check treats `None` as "not scheduled = immediately due," so a malformed `scheduled_for` fires the task *now* instead of its intended future time. Engine always writes valid strings via `resolve_scheduled_for`, so malformation = data corruption or schema drift. Design question for the fix: log-and-defer (safest) vs log-and-skip (visible but doesn't fire) vs propagate to worker crash (loudest). |  |
 | 13 | 2 | Deprecated `@app.on_event("startup")`. |  |
 | — | 2 | Alembic subprocess has no timeout. |  |
 | — | 2 | `file_service.signing_key` default accepted at startup. |  |
@@ -96,6 +96,7 @@ Note: Bug 75 was discovered *by* harness 2 on its first run — a new bug surfac
 | ~~73~~ | (impl) | ~~`conftest.py` TRUNCATE list omits `domain_relations`.~~ | ✅ |
 | ~~74~~ | (impl) | ~~Worker/route deadlock on `system:task` rows.~~ | ✅ **Fixed.** Structural (worker takes dossier lock first, matching user-activity order) + defence-in-depth (`run_with_deadlock_retry` on routes). |
 | ~~75~~ | (impl) | ~~Worker crashes on cold start if the app hasn't finished Alembic migrations yet — `UndefinedTableError` propagates to top-level crash handler.~~ | ✅ **Fixed.** Surfaced by harness 2. Worker now tolerates SQLSTATE 42P01 during pre-ready window, logs a warning and retries; real missing-table errors after first successful poll still propagate. |
+| 76 | (impl) | **M2 Stage 3 target.** `file_service/app.py:265` — the `.meta` parse during `/internal/move` catches OSError and JSONDecodeError and falls back to "no binding info", which then permits the move because the `intended == ""` check gates on truthy. A corrupt `.meta` should reject, not permit. The back-compat case (`.meta` file missing entirely) is handled separately at line 261's `if temp_meta.exists()` guard and is legitimate; this bug only affects the "exists but corrupted" case, which is genuinely anomalous and shouldn't bypass the dossier-binding check added for Bugs 44/47. Surfaced by the Round 13 M2 survey. |
 
 ### Lower-priority
 
@@ -226,10 +227,54 @@ D4 and D22 both closed — they turned out to be the same pattern (audit emissio
 - **Bug 70 fixed.** `test_requests.sh` had four echo lines pointing at a bare `/prov/graph` URL that doesn't exist on the server. Fixed to `/prov/graph/timeline` (the user-visible, visibility-filtered route). Verified end-to-end: timeline returns 401 without auth (route registered), the old bare URL returns 404 (proves the original URL was dead).
 - **Incidental doc-drift fixed.** `prov.py`'s module docstring claimed the module exposed `/prov` and `/prov/graph` — the second endpoint doesn't exist. Docstring rewritten to list the four real endpoints (`/prov`, `/prov/graph/timeline`, `/prov/graph/columns`, `/archive`), so future readers don't build on the same wrong mental model. This is M4 territory but surfaces again here; a harness to lint module docstrings against the endpoint router is a possible future addition, not done this round.
 
+### Round 13 — Meta M2 Stage 1 (visibility) + Sentry FastAPI integration
+
+Survey of the silent-skip pattern across the platform. M2 is a **visibility pass, not a bug-fix pass** — "Stage 1" makes failures observable without changing runtime behavior. The actual bug-shape findings (Bug 12 `_parse_scheduled_for` silent fire-now; Bug 76 corrupt `.meta` bypasses dossier-binding check) are real bugs extracted from the survey but deliberately deferred — they're Stages 2 and 3, to be done in a later round.
+
+**Survey results.** AST-walked 38 `except` clauses in production code (tests excluded). Categorized:
+
+- **11 legitimately silent** (optional-import guards, control-flow idioms like `asyncio.TimeoutError` on `wait_for(shutdown.wait(), timeout=…)`, namespace-registry fallbacks). No change.
+- **5 already well-designed** (`worker.py` retry/claim/failure paths — log with `exc_info=True`, capture to Sentry with fingerprint, re-raise where appropriate). These are the gold standard other sites were measured against.
+- **8 addressed this round** — see below.
+- **2 real bugs extracted**:
+  - **Bug 12 reconfirmed** (`worker.py:65`, `_parse_scheduled_for`). A malformed ISO string in `scheduled_for` falls through to `None`, which the due-check treats as "immediately due" — a task scheduled for next week fires right now. Real correctness bug, not just noise. Deferred to Stage 2.
+  - **Bug 76 new** (`file_service/app.py:265`). If `.meta` exists and is corrupted (OSError or JSONDecodeError), the dossier-binding check added for Bugs 44/47 silently falls back to "no meta" and permits the move. A corrupted `.meta` is an anomaly; safe default is reject, not permit. Deferred to Stage 3.
+
+**Stage 1 — logging added to 8 silent-skip sites:**
+
+| File:line | Role | Change |
+|---|---|---|
+| `engine/pipeline/tasks.py:123` | `_fire_and_forget` | `logger.warning(..., exc_info=True)` with explanatory comment; swallow preserved |
+| `engine/pipeline/tasks.py:315` | Malformed anchor UUID on task row | `logger.error` — engine wrote this field via `str(anchor_entity_id)`, so malformation is row corruption |
+| `engine/pipeline/finalization.py:161` | `post_activity_hook` | Added `exc_info=True` so Sentry picks up the full traceback instead of `str(e)` only |
+| `routes/_typed_doc.py:133` | Legacy-path JSON schema render | `logger.warning` before returning empty docs block |
+| `routes/_typed_doc.py:170` | Versioned-path JSON schema render | Same pattern as above |
+| `routes/dossiers.py:105` | Corrupt `eligible_activities` cache | `logger.warning` before recomputing |
+| `routes/prov_columns.py:136` | Malformed `result_activity_id` on task row | `logger.warning` — engine-written value, malformation = corruption |
+| `routes/prov_columns.py:221` | Non-UUID column id | `logger.debug` only — legitimate dummy-column placeholders hit this path, WARNING would be noise |
+| `file_service/app.py:63` | Missing config file path | `logger.warning` fires **once at module load** if `CONFIG_PATH` doesn't exist. Catches the operational footgun where a typo'd `FILE_SERVICE_CONFIG` env var silently downgrades to the POC signing key. Per-request `get_config()` stays silent (one load-time line covers it). |
+
+**Sentry FastAPI integration** — shipped alongside M2 Stage 1 because logging only gets you halfway without a tool that picks the breadcrumbs up:
+
+- **Module rename: `sentry_integration.py` → `sentry.py`** (scope broadened from worker-only). Back-compat alias `init_sentry = init_sentry_worker` so any existing import of the old name still works.
+- **Shared `_init_sdk(dsn, *, process_kind, extra_integrations)`** private helper owns DSN resolution, the `_initialized` guard, and the `LoggingIntegration(event_level=None)` contract. Single source of truth for both entry points.
+- **`init_sentry_worker(dsn=None)`** — unchanged from the old `init_sentry` behaviour.
+- **`init_sentry_fastapi(app, dsn=None)`** — adds `FastApiIntegration` on top of `LoggingIntegration`. Called from `create_app` right after the `FastAPI(...)` constructor and *before* CORS middleware so Sentry sees the full request lifecycle (including preflight).
+- **No-op discipline preserved.** SDK not installed → silent no-op. `SENTRY_DSN` unset → silent no-op. Second init call in-process → no-op (log at DEBUG). Dev and test runs completely unchanged.
+- **`[project.optional-dependencies].observability`** extra added to `dossier_engine_repo/pyproject.toml`, shipping `sentry-sdk>=1.14.0` (lower bound is where `FastApiIntegration` was introduced). Included in `dev` too so the tests below can run. Deployments opt in via `pip install 'dossier-engine[observability]'`.
+
+**14 new tests** in `tests/unit/test_sentry.py` covering: no-op when DSN unset (3), shared `_initialized` guard across both entry points (3), integrations list wired correctly per process kind (4, including the `event_level=None` invariant pin), back-compat alias (2), capture helpers no-op without init (2). Monkeypatches `sentry_sdk.init` to capture kwargs without hitting the network.
+
+**Verified:**
+- **Test suite:** 754/754 (engine 701, up from 687; toelatingen 16, signing 18, file_service 19).
+- **Shell spec via harness 2:** exit 0, 25 OK, 5 summaries, D1–D9 green, zero tracebacks/5xx.
+- **App log during a clean D1-D9 run:** zero WARNINGs or ERRORs from the new logging paths, confirming Stage 1 is correctly positioned in error branches only (happy-path runs stay quiet).
+
 ### Where to go next (in priority order)
 
-1. **Meta M2 — "silent skip" review.** Survey all `logger.error` + `pass` patterns (unregistered validators, audit emission failures, bijlage move per-file failures, etc.), decide case-by-case which should propagate vs swallow. Mostly a design discussion with targeted fixes at the end.
-2. **Any of the open "must-fix" bugs worth taking on** — Bugs 5, 6, 7, 30, 55, 57, 58, 62 all still open. Priority depends on deployment context; 5 (access-check docstring/code drift at a security boundary) and 58 (unauthenticated `/validate` endpoint) are the most user-visible.
+1. **Meta M2 Stage 2 — Bug 12** (`worker.py:_parse_scheduled_for`). Malformed ISO strings currently fall through to "fire now"; should either log-and-defer or log-and-skip. Design question to resolve with you: is a corrupt `scheduled_for` a worker crash or a safe-defer?
+2. **Meta M2 Stage 3 — Bug 76** (`file_service/app.py:265`). Corrupt `.meta` → reject the move instead of falling back to "no binding info." Tighter security posture, small change.
+3. **Any of the open "must-fix" bugs** — Bugs 5, 6, 7, 30, 55, 57, 58, 62. Bug 5 (access-check docstring/code drift at a security boundary) and Bug 58 (unauthenticated `/validate` endpoint) are the most user-visible.
 
 The two "optional" items previously on this list are now closed out:
 - **Obs-3** (write-on-change for `set_dossier_access`) — deferred by product decision. Keeping the full provenance graph is intended behaviour, not a pending optimization. Filed alongside Bugs 31/45/71 under deferred/accepted.

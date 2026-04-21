@@ -51,6 +51,7 @@ enough to cancel a scheduled task. State must actually advance.
 
 from __future__ import annotations
 
+import logging
 from datetime import timezone
 from uuid import UUID, uuid4
 
@@ -60,6 +61,8 @@ from ..lookups import resolve_from_trigger
 from ..state import ActivityState
 from ...db.models import EntityRow
 from ...entities import TaskEntity
+
+_log = logging.getLogger("dossier.engine.tasks")
 
 
 async def process_tasks(state: ActivityState) -> None:
@@ -121,7 +124,17 @@ async def _fire_and_forget(state: ActivityState, task_def: dict) -> None:
     try:
         await fn(ctx)
     except Exception:
-        pass  # fire and forget — swallow
+        # Fire-and-forget: swallow by design (see docstring). Log with
+        # traceback so "a notification never arrived" is investigable
+        # rather than silent. Logged at WARNING, not ERROR, because the
+        # activity itself did succeed — this handler's failure doesn't
+        # change any invariant the caller cared about. Sentry's
+        # LoggingIntegration picks WARNING up as a breadcrumb and (if
+        # promoted) an event; either way it stops being invisible.
+        _log.warning(
+            f"fire_and_forget task '{fn_name}' raised (swallowed by design)",
+            exc_info=True,
+        )
 
 
 async def _schedule_recorded_task(
@@ -313,6 +326,18 @@ async def cancel_matching_tasks(state: ActivityState) -> None:
             try:
                 task_anchor_id = UUID(anchor_id_str)
             except (ValueError, TypeError):
+                # Data corruption: the engine wrote this via
+                # ``str(anchor_entity_id)`` (see ``_schedule_recorded_task``),
+                # so a malformed value here means the row was tampered
+                # with or the schema changed incompatibly. Log loudly
+                # so it surfaces in Sentry; the skip is a safe default
+                # (cancellation simply doesn't fire) but the cause
+                # needs investigating.
+                _log.error(
+                    "Malformed anchor_entity_id %r on task %s — "
+                    "skipping cancellation check",
+                    anchor_id_str, task_entity.id,
+                )
                 continue  # malformed anchor — skip
             if task_anchor_id not in advanced_entity_ids:
                 continue  # this activity didn't advance the anchor entity

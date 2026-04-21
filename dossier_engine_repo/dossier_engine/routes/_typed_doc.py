@@ -26,8 +26,11 @@ endpoint's `description` parameter at registration time.
 from __future__ import annotations
 
 import json
+import logging
 
 from ..plugin import Plugin
+
+_log = logging.getLogger("dossier.routes.typed_doc")
 
 
 def build_activity_description(act_def: dict, plugin: Plugin) -> str:
@@ -131,6 +134,16 @@ def format_entity_schemas_for_doc(
         try:
             schema = model_class.model_json_schema()
         except Exception:
+            # Pydantic couldn't emit a JSON schema for this model —
+            # usually a forward-ref or recursive-type problem. Skipping
+            # omits the block from API docs rather than breaking the
+            # whole ``/docs`` page. Log so someone notices the gap when
+            # they read the Sentry stream.
+            _log.warning(
+                "Could not render JSON schema for %s (legacy path); "
+                "docs block will be omitted",
+                entity_type, exc_info=True,
+            )
             return ""
         out = f"\n**Content schema (`{entity_type}`):**\n"
         out += f"```json\n{json.dumps(schema, indent=2)}\n```\n"
@@ -168,6 +181,14 @@ def format_entity_schemas_for_doc(
         try:
             schema = model_class.model_json_schema()
         except Exception:
+            # Same failure shape as the legacy path above — Pydantic
+            # couldn't render the schema. Log and skip this version's
+            # block rather than break the whole ``/docs`` page.
+            _log.warning(
+                "Could not render JSON schema for %s @ %s; "
+                "docs block will be omitted",
+                entity_type, v, exc_info=True,
+            )
             continue
         out += f"\n**Schema `{entity_type}` @ `{v}`:**\n"
         out += f"```json\n{json.dumps(schema, indent=2)}\n```\n"

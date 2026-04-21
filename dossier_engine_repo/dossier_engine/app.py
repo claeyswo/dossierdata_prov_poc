@@ -225,6 +225,16 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
         version="0.1.0",
     )
 
+    # Sentry before CORS — we want Sentry to see the full request
+    # lifecycle, including any CORS preflight handling, not just the
+    # subset that survives the CORS filter. No-op if sentry_sdk isn't
+    # installed or SENTRY_DSN isn't set, so dev and test environments
+    # run unchanged. The FastAPI integration instruments via the ASGI
+    # middleware stack internally; no explicit add_middleware() call
+    # needed here.
+    from .sentry import init_sentry_fastapi
+    init_sentry_fastapi(app)
+
     # Collect all POC users from all plugins
     all_poc_users = []
     for plugin in registry.all_plugins():

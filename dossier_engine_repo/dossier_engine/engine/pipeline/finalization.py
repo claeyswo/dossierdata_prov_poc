@@ -159,7 +159,15 @@ async def finalize_dossier(state: ActivityState) -> None:
                 entities={e.type: e for e in current_entities},
             )
         except Exception as e:
-            _log.warning(f"post_activity_hook failed: {e}")
+            # post_activity_hook is best-effort (ES reindex, etc.) —
+            # its failure doesn't invalidate the activity. Keep the
+            # swallow, but log with the traceback so Sentry's FastAPI
+            # integration picks up the full exception context, not
+            # just the str(e) summary.
+            _log.warning(
+                f"post_activity_hook failed: {e}",
+                exc_info=True,
+            )
 
     # 19. Cache status + eligible activities on the dossier row.
     eligible = await compute_eligible_activities(

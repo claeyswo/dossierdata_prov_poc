@@ -41,6 +41,8 @@ import json as _json
 from typing import Optional
 from uuid import UUID
 
+import logging
+
 from fastapi import Depends, FastAPI, HTTPException
 from sqlalchemy import select
 
@@ -57,6 +59,8 @@ from ..engine import (
 from ..file_refs import inject_download_urls
 from ._models import DossierDetailResponse
 from .access import check_dossier_access, get_visibility_from_entry
+
+_log = logging.getLogger("dossier.routes.dossiers")
 
 
 def register(app: FastAPI, *, registry, get_user, global_access) -> None:
@@ -103,6 +107,18 @@ def register(app: FastAPI, *, registry, get_user, global_access) -> None:
                 try:
                     eligible = _json.loads(dossier.eligible_activities)
                 except (ValueError, TypeError):
+                    # The cache is populated by the engine's finalize
+                    # phase (``json.dumps`` of a known-clean dict), so
+                    # a parse failure here is cache corruption — either
+                    # a truncated write or a schema migration that
+                    # changed the shape underneath an existing row.
+                    # Safe fallback: recompute. Log at WARNING so the
+                    # anomaly surfaces in Sentry.
+                    _log.warning(
+                        "Corrupt eligible_activities cache on dossier "
+                        "%s; recomputing.",
+                        dossier_id, exc_info=True,
+                    )
                     eligible = await compute_eligible_activities(
                         plugin, repo, dossier_id,
                     )

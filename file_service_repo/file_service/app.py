@@ -13,6 +13,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 from pathlib import Path
@@ -23,6 +24,8 @@ from fastapi import FastAPI, UploadFile, File, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
 
 from dossier_common.signing import verify_token
+
+logger = logging.getLogger("file_service")
 
 app = FastAPI(
     title="File Service",
@@ -49,18 +52,41 @@ def _default_config_path() -> str:
         if pkg_path:
             return str(Path(pkg_path[0]) / "config.yaml")
     except ImportError:
-        pass
+        # dossier_app isn't on the import path — running standalone
+        # (e.g. in a container that only ships file_service). Fall
+        # through to the cwd-relative default.
+        logger.debug(
+            "dossier_app not importable; using cwd-relative "
+            "config.yaml as the default path",
+        )
     return "config.yaml"
 
 
 CONFIG_PATH = os.environ.get("FILE_SERVICE_CONFIG", _default_config_path())
 
+# Warn once at module load if the configured path doesn't exist. Without
+# this, a typo in ``FILE_SERVICE_CONFIG`` silently falls back to the POC
+# signing key (``poc-signing-key-change-in-production``) — an
+# operational footgun that's hard to spot after deploy. One startup
+# line in the log is enough for ops to catch it; per-request logging
+# (``get_config`` is called many times per request) would spam.
+if not Path(CONFIG_PATH).exists():
+    logger.warning(
+        "Config path %r does not exist. file_service will fall back to "
+        "built-in defaults, including the POC signing key. Set "
+        "FILE_SERVICE_CONFIG to the real config path, or ensure the "
+        "default resolves to an existing file.",
+        CONFIG_PATH,
+    )
+
 
 def get_config():
     try:
         with open(CONFIG_PATH) as f:
-            config = yaml.safe_load(f)
+            config = yaml.safe_load(f) or {}
     except FileNotFoundError:
+        # Silent here because the module-load warning above already
+        # fired once; spamming per-request is noise.
         config = {}
     return config.get("file_service", {})
 
