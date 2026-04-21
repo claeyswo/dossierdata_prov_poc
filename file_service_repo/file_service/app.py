@@ -279,17 +279,57 @@ async def move_file(
     # uploaded for against the dossier being moved into. Mismatch
     # is an attempted cross-dossier graft — reject.
     #
-    # Opportunistic-skip only when .meta is missing or lacks the
-    # intended_dossier_id field (legacy rows pre-dating this check).
-    # Any new upload written through the current upload handler
-    # always carries the field, so this back-compat door closes
-    # naturally as old temp files drain.
+    # Policy for the three possible ``.meta`` states:
+    #
+    # * **Missing entirely** — file was uploaded before this check was
+    #   introduced (Bug 47). Legacy path: allow through; the
+    #   back-compat door closes naturally as old temp files drain.
+    #   This is the ``if temp_meta.exists():`` guard below.
+    # * **Present and valid, with ``intended_dossier_id``** — the
+    #   normal case. Compare strict; mismatch → 403.
+    # * **Present and valid but missing ``intended_dossier_id``** —
+    #   legacy-content path (a stub ``.meta`` from before the field
+    #   was added). Allow through, same as "missing entirely."
+    # * **Present but corrupted** (Bug 76) — the file exists, so it
+    #   wasn't written before the check was introduced, so the binding
+    #   *should* be there and isn't. Unsafe to fall back; reject.
+    #   Corrupted ``.meta`` is the kind of anomaly that precedes an
+    #   attack (tampering to bypass the binding) or that signals disk
+    #   corruption — either way, rejecting is strictly safer than the
+    #   silent bypass the old code permitted.
     if temp_meta.exists():
         try:
             with open(temp_meta) as f:
                 meta = json.load(f)
-        except (OSError, json.JSONDecodeError):
-            meta = {}
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+            # Bug 76: log and reject. The legacy back-compat door is
+            # "no .meta file at all" (handled by the outer
+            # ``if temp_meta.exists():``), not "corrupted .meta" —
+            # this case falls through only when the file is present
+            # and unreadable, which shouldn't happen in normal
+            # operation.
+            #
+            # Three catch shapes, all same policy:
+            # * ``OSError`` — disk read failed (permission, I/O error).
+            # * ``json.JSONDecodeError`` — truncated / malformed JSON.
+            # * ``UnicodeDecodeError`` — bytes that aren't valid UTF-8,
+            #   raised by ``open()`` default text mode before JSON sees
+            #   them. Subclass of ``ValueError``, not of
+            #   ``JSONDecodeError`` — easy to miss when writing the
+            #   catch; regression-guarded by
+            #   ``test_move_rejects_when_meta_is_non_json_garbage``.
+            logger.error(
+                "Corrupted .meta for file %s: %s. Rejecting move.",
+                file_id, exc,
+            )
+            raise HTTPException(
+                500,
+                detail=(
+                    "File metadata is unreadable; move refused to "
+                    "preserve the dossier-binding invariant. "
+                    "Investigate and either repair or re-upload."
+                ),
+            )
         intended = meta.get("intended_dossier_id", "")
         if intended and intended != dossier_id:
             raise HTTPException(

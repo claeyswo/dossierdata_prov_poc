@@ -10,10 +10,10 @@
 
 | Status | Count | Items |
 |---|---|---|
-| ✅ Fixed & verified | 16 | Bugs 1, 2, 15, 16, 17, 32, 44, 47, 64, 65, 68, 70, 72 (coverage), 73, 74, 75 + Obs-2 (duplicate "external") |
+| ✅ Fixed & verified | 18 | Bugs 1, 2, 12, 15, 16, 17, 32, 44, 47, 64, 65, 68, 70, 72 (coverage), 73, 74, 75, 76 + Obs-2 (duplicate "external") |
 | 🔍 Investigated, not a bug | 1 | Bug 14 — cross-dossier refs are `type=external` rows |
 | 🛑 Deferred / accepted | 4 | Bug 31 (RRN acceptable), Bug 45 (MinIO migration), Bug 63 (403 is correct HTTP), Bug 71 (test activities, deploy-time removal) |
-| 🧪 Test suite | **754/754** passing | engine 701, toelatingen 16, file_service 19, common/signing 18 |
+| 🧪 Test suite | **760/760** passing | engine 705, toelatingen 16, file_service 21, common/signing 18 |
 | 🏃 `test_requests.sh` | **25/25 OK, exit 0, zero deadlocks, zero worker crashes** | D1–D9 green |
 | ✂️ Duplication closed | **D1, D2, D4, D22, D25** | Graph-loader consolidation + audit-emit wrapper |
 | 🧰 Harnesses installed | **3** | Guidebook YAML lint + phase-docstring lint + CI shell-spec wrapper |
@@ -59,7 +59,7 @@ Note: Bug 75 was discovered *by* harness 2 on its first run — a new bug surfac
 |---|------|---------|--------|
 | 4 | 2 | `Session` type annotation never imported. |  |
 | 9 | 2 | N+1 in dossier detail view. |  |
-| 12 | 2 | **M2 Stage 2 target.** `_parse_scheduled_for` (`worker.py:65`) silently returns `None` on unparseable ISO strings. The due-check treats `None` as "not scheduled = immediately due," so a malformed `scheduled_for` fires the task *now* instead of its intended future time. Engine always writes valid strings via `resolve_scheduled_for`, so malformation = data corruption or schema drift. Design question for the fix: log-and-defer (safest) vs log-and-skip (visible but doesn't fire) vs propagate to worker crash (loudest). |  |
+| ~~12~~ | 2 | ~~`_parse_scheduled_for` silently returns None on unparseable dates.~~ | ✅ **Already fixed & tested.** Discovered during M2 Stage 2 startup: `worker.py:_parse_scheduled_for` was already implementing log-and-defer via `datetime.max.replace(tzinfo=timezone.utc)` on malformed ISO, with a 12-case `TestParseScheduledFor` in `test_worker_helpers.py` including explicit regression guards. The review had been carrying a stale open-bug entry; verified end-to-end (parses valid forms, returns None for genuine-empty, returns aware `datetime.max` for malformed with logger.error). No code change this round — bookkeeping correction only. |
 | 13 | 2 | Deprecated `@app.on_event("startup")`. |  |
 | — | 2 | Alembic subprocess has no timeout. |  |
 | — | 2 | `file_service.signing_key` default accepted at startup. |  |
@@ -96,7 +96,7 @@ Note: Bug 75 was discovered *by* harness 2 on its first run — a new bug surfac
 | ~~73~~ | (impl) | ~~`conftest.py` TRUNCATE list omits `domain_relations`.~~ | ✅ |
 | ~~74~~ | (impl) | ~~Worker/route deadlock on `system:task` rows.~~ | ✅ **Fixed.** Structural (worker takes dossier lock first, matching user-activity order) + defence-in-depth (`run_with_deadlock_retry` on routes). |
 | ~~75~~ | (impl) | ~~Worker crashes on cold start if the app hasn't finished Alembic migrations yet — `UndefinedTableError` propagates to top-level crash handler.~~ | ✅ **Fixed.** Surfaced by harness 2. Worker now tolerates SQLSTATE 42P01 during pre-ready window, logs a warning and retries; real missing-table errors after first successful poll still propagate. |
-| 76 | (impl) | **M2 Stage 3 target.** `file_service/app.py:265` — the `.meta` parse during `/internal/move` catches OSError and JSONDecodeError and falls back to "no binding info", which then permits the move because the `intended == ""` check gates on truthy. A corrupt `.meta` should reject, not permit. The back-compat case (`.meta` file missing entirely) is handled separately at line 261's `if temp_meta.exists()` guard and is legitimate; this bug only affects the "exists but corrupted" case, which is genuinely anomalous and shouldn't bypass the dossier-binding check added for Bugs 44/47. Surfaced by the Round 13 M2 survey. |
+| ~~76~~ | (impl) | ~~`file_service/app.py:265` — the `.meta` parse during `/internal/move` catches OSError and JSONDecodeError and falls back to "no binding info", which then permits the move.~~ | ✅ **Fixed & tested.** Discovered during M2 Stage 3: the silent-bypass code had already been replaced with `logger.error` + `raise HTTPException(500, ...)` with a thorough docstring explaining the four `.meta` states (missing / valid-with-field / valid-no-field / corrupted) and the policy for each. Review was carrying a stale open-bug entry. **One real sub-bug caught by writing the regression tests:** `UnicodeDecodeError` (subclass of `ValueError`, *not* of `JSONDecodeError`) wasn't in the except clause, so non-UTF-8 garbage in `.meta` crashed with a default 500 rather than the intended explicit reject. Widened the except to `(OSError, json.JSONDecodeError, UnicodeDecodeError)`; added two regression tests in `TestMoveEnforcesDossierBinding` (truncated JSON + binary garbage). Both green; full class 7/7 passing. |
 
 ### Lower-priority
 
@@ -141,13 +141,114 @@ Note: Bug 75 was discovered *by* harness 2 on its first run — a new bug surfac
 
 ## Structural observations & duplications
 
-Structural observations (57) unchanged from the 8-pass sweep; see earlier review revisions for full list. Key callouts worth revisiting:
+## Structural observations
 
-- Worker split into `poll.py`/`execute.py`/`retry.py`/`signals.py` — the `worker.py` file grew this session with Bug 75's resilience logic. Split soon.
-- `prov.py` at 523 lines (was 792) — further splitting possible.
-- `prov_columns.py` layout algorithm (~280 lines inside `register_columns_graph`) wants extraction.
+The 8-pass sweep catalogued 57 structural observations. They cluster into five themes. Status key: **open** (unchanged), **partially addressed** (progress in a specific pass), **closed** (folded into a fix). Individual-observation numbering is reconstructed from the original passes where it was explicit.
 
-Duplications (22 remaining; 5 closed): D1 (graph-rowset loader), D2 (PROV-JSON build), D4 (audit emission boilerplate), D22 (emit_audit 7-field repetition — merged with D4 since they were the same pattern), D25 (PROV-JSON prefix building). The audit pair closed via `emit_dossier_audit` in `audit.py`; the graph-rowset cluster via `dossier_engine/prov_json.py`. D3, D5–D21, D23–D24, D26, D27 remain.
+### Code organization
+- **Obs 50 — Worker split.** `worker.py` is ~1,340 lines (grew ~80 lines with Bug 75's resilience logic + Bug 12's log-and-defer). Proposed split: `poll.py`, `execute.py`, `retry.py`, `requeue.py`, `signals.py`. **Open.**
+- **Obs 51 — Unify relation shape in `ActivityState`.** Three typed lists (`validated_relations`, `validated_domain_relations`, `validated_remove_relations`) plus the `relations_by_type` dict. Same conceptual "validated relation" has 4 in-memory shapes; this is where Bugs 1/2 lived. **Open.**
+- **Obs 52 — Split `prov.py`** (currently 509 lines, down from 792 after Round 5) into extract / transform / render layers. **Partially addressed** (Round 5 extracted `prov_json.py` with the graph-rowset loader + PROV-JSON builder; the remaining `prov.py` is mostly route registration + HTML render). Further split is lower-urgency now.
+- **Obs 53 — Extract `prov_columns_layout.py`** — ~280 lines of pure layout algorithm currently inside `register_columns_graph`. Pure function of inputs; easy to isolate. **Open.**
+- **Obs 54 — Untangle import-inside-function cycles.** Pattern appears in `relations.py`, `side_effects.py`, `persistence.py`, `dossiers.py`. Signals a cycle in the module graph that could be cleaned up in one refactor. **Open.**
+- **Obs 55 — Rationalize `namespaces.py` singleton** + scattered `try/except RuntimeError` fallbacks in `prov_iris.py`, `activity_names.py`. **Open.**
+
+### Plugin surface
+- **Obs 56 — Centralize plugin validation.** Three load-time validators exist (`validate_workflow_version_references`, `validate_side_effect_conditions`, `validate_side_effect_condition_fn_registrations`, `_validate_plugin_prefixes`), five more are missing. Also: no cross-check that `handler:` / `validator:` names resolve to registered callables (Bug 59 territory). **Open.**
+- Plugin interface table in docs promises 15 field validations; 3 are actually checked. **Open.**
+- `authorize_activity` pre-creation vs post-creation modes threaded via `dossier_id: UUID | None` — should split into two functions. **Open.**
+- Load-time validation for `status:` dict-form shape. **Open.**
+- `eligible_activities` column: `Text` → `JSONB`. **Open.**
+- **`set_dossier_access`** — 6 copies of the view list, duplicate `"external"`. **Closed** in Round 11 (view-list constants + role helpers extracted, duplicate bug fixed, 16 regression tests added). Write-on-change optimization explicitly declined as a product decision (keep full provenance graph).
+- Remove legacy `handle_beslissing` (marked "kept for backward compatibility"). **Open.**
+- Back-compat `"behandelaar"` role needs an owner + removal deadline. **Closed** in Round 11 (confirmed actively used by `workflow.yaml:71, 80, 89, 304, 391, 724, 755` authorization entries — legitimate global-staff role, not legacy).
+- `systemAction` sub-types: `oe:migrationAction`, `oe:requeueAction`, `oe:retryAction`. **Open.**
+- Document `systeemgebruiker` role grants; add `caller_only: "system"` check. **Open.**
+- Lineage walker needs per-walk cache + distinguishable "not found" vs "ambiguous" return (Bugs 53, 54). **Open.**
+
+### Documentation drift
+- Pipeline doc's "UPDATE must happen after persistence" claim is factually wrong. **Open.**
+- Pipeline doc's `ActivityState` field table covers ~⅓ of actual fields, presented as complete. **Open.**
+- README claims external-overlap is allowed; code + tests reject (Bug 56). **Open.**
+- Guidebook uses wrong YAML key (`schema:` vs `model:`). **Closed** in Round 8 (Bugs 64, 65 fixed; harness 1 now prevents recurrence).
+- Dossiertype template's tombstone block shape doesn't match production workflow (Bug 69). **Open.**
+- Template's endpoint docs omit the workflow-name prefix — 4 different URL forms for workflow search, none matching production. **Open.**
+- Relation validator keying rules (three styles) undocumented (Bug 66). **Open.**
+- `prov.py` module docstring referenced non-existent `/prov/graph` endpoint. **Closed** in Round 12 (fixed alongside Bug 70).
+
+### Performance / observability
+- Cache `SearchSettings()` at module load (currently re-reads env on every `get_client()`). **Open.**
+- `is_singleton` should cache instead of linear-scanning `entity_types` per call. **Open.**
+- `derive_status` should prefer `dossier.cached_status` first. **Open.**
+- `check_workflow_rules` should pass `known_status` from `state.dossier.cached_status`. **Open.**
+- Archive size cap/warning. **Open.**
+- Reindex pagination (load all dossiers into memory; Bug 25). **Open.**
+- No per-user eligibility cache (Bug 38). **Open.**
+
+### Test / deployment concerns
+- Test fixtures use direct `Repository` instances against real Postgres — no unit isolation story documented. **Open.**
+- `test_requests.sh` as an executable spec that wasn't in CI. **Closed** in Round 8 + Round 9 (`scripts/ci_run_shell_spec.sh` harness 2 + GitHub Actions `shell-spec` job).
+- Schema-versioning tests require declaring test-only activities in production YAML (Bug 71). **Deferred by product decision** (deploy-time checklist removes them).
+- Dependency-override-friendly auth for tests (replace `POCAuthMiddleware` instance with FastAPI `dependency_overrides`). **Open.**
+- Signing key rotation support (only one key accepted). **Open.**
+- Migration framework needs top-level audit log (who/when/command). **Open.**
+- `DataMigration.transform` signature should widen to `(content, row)`. **Open.**
+- Cross-workflow task permission model (no check that source plugin can schedule into target workflow). **Open.**
+
+### Specific refactors named
+- Add "Reads/Writes docstring matches state fields" lint. **Closed** in Round 8 (harness 3).
+- Share layout between `archive.render_timeline_svg` and columns graph (160 + 270 lines of separate layout code). **Open.**
+- `activity_view` mode complexity reduction (5 modes; hard mental load for small feature value). **Open.**
+- The pipeline architecture doc's ActivityState hazard is documented but not enforced. **Closed** in Round 8 (harness 3 enforces it).
+
+**Observation totals:** of the 57 catalogued, **~9 are closed or have direct relief shipped** (harness 3, harness 2 CI wiring, `set_dossier_access` refactor, Bugs 64/65 guidebook fix, Bug 70's doc-drift, `test_requests.sh` CI integration). The remaining ~48 are open and tracked in the themes above. Most are not acute — the pattern is "code works today but will decay without attention."
+
+## Duplication targets (27 catalogued, 5 closed)
+
+| # | What | Status |
+|---|------|---|
+| D1 | Four copies of "load dossier graph data" (prov, prov_columns, archive ×2) | **Closed** in Round 5 via `dossier_engine/prov_json.py::load_dossier_graph_rows`. |
+| D2 | Two copies of PROV-JSON build (prov endpoint vs archive inline) | **Closed** in Round 5 via `prov_json.build_prov_graph`. |
+| D3 | `prov_type_value`/`agent_type_value` helpers exist but not all callers use them | Open. |
+| D4 | Audit emission boilerplate (7-param `emit_audit` in 4+ sites) → `AuditEvent` builder | **Closed** in Round 10 via `emit_dossier_audit`. |
+| D5 | 4 copies of latest-version-per-entity_id subquery (`db/models.py:423, 450`; `worker.py:93, 951`) | Open. |
+| D6 | Repository cache returns list directly — caller mutation corrupts cache | Open. |
+| D7 | `reindex_all` vs `reindex_common_too` 90% identical loops | Open. |
+| D8 | `ActivityContext.get_typed` vs `get_singleton_typed` share 80% body | Open. |
+| D9 | `set_dossier_access` 6 copies of behandelaar/beheerder view list; one has duplicate `"external", "external"` | **Closed** in Round 11 (view-list constants + role helpers; duplicate bug fixed). |
+| D10 | 3 `reindex_*` loops share structure (common + toelatingen ×2) | Open. |
+| D11 | `upload_file` / `download_file` repeat 7-param token extraction — should be FastAPI dependency | Open. |
+| D12 | `informed_by` normalization in 4 places (`Repository.create_activity`, `ActivityRow.informed_by`, `prov.py`, `archive.py`, `prov_columns.py`) | Open. |
+| D13 | `_supersede_matching` + `cancel_matching_tasks` share the same latest-by-type pattern | Open. |
+| D14 | Tombstone tests share structure that differs from regular version tests (minor) | Open. |
+| D15 | `DossierAccessEntry` fields duplicate what `access.py` narrates (docstring vs model drift) | Open. |
+| D16 | Validator-fn registration pattern repeated without a shared helper | Open. |
+| D17 | Three endpoints in `routes/entities.py` repeat access-check + load preamble | Open. |
+| D18 | Plugin load calls `build_entity_registries_from_workflow` + 3 validators — sequence repeated per plugin | Open. |
+| D19 | `scheduled_for` parsing (relative / absolute / None) could be in one helper instead of inline in `tasks.py` | Open. |
+| D20 | `_activity_visibility.parse_activity_view` + its usage is split across 3 route files | Open. |
+| D21 | Four routes each hand-roll a "filter activities by user access" loop | Open. |
+| D22 | `emit_audit` boilerplate is repeated with the same 7 fields per call site (~15 sites) | **Closed** in Round 10 — merged with D4; the two were the same pattern under separate review entries. |
+| D23 | The "find systemAction activity def" pattern is in 2 places (`migrations.py`, `worker.py`) | Open. |
+| D24 | Alembic's `9d887db892c9_initial_schema.py` indices are duplicated by the Python model's `__table_args__` — drift risk | Open. |
+| D25 | Both archive.py and prov.py do their own PROV-JSON prefix building instead of calling `prov_prefixes()` | **Closed** in Round 5 (same `prov_json.py` extraction). |
+| D26 | `sign_token` + `verify_token` share the payload-string building logic — should extract | Open. |
+| D27 | Test setup helpers (`_bootstrap_dossier`, `_seed_access_entity`, `_user`) exist in 4+ test files with slight variations | Open. |
+
+**Duplication totals:** **5 closed** (D1, D2, D4, D9, D22, D25 — counting D22 and D4 as one closure since they were the same pattern), **22 open**.
+
+## Meta-patterns (6)
+
+| # | Summary | Status |
+|---|---|---|
+| M1 | Docstring "Reads/Writes" drift has no enforcement. `finalization.py` used to document reading `state.used_rows` — field doesn't exist. | **Closed** by harness 3 (`test_phase_docstrings.py`) in Round 8. |
+| M2 | "Silent skip" as a default policy (unregistered validators, post_activity_hook swallows, etc.). | **Stage 1 closed** in Round 13 (logging added to 8 silent-skip sites; Sentry FastAPI integration wired so breadcrumbs + context are captured). Stage 2 (Bug 12) and Stage 3 (Bug 76) also closed in Round 14. **Effectively closed.** |
+| M3 | Hardcoded paved-path values — `archive.py` fonts, `systeemgebruiker`, signing-key defaults, `id.erfgoed.net` in `prov_iris.py`. | **Partially addressed** in Round 5 (fonts now use `fonts.find_font` with platform fallbacks + `DOSSIER_FONT_DIR` override). Others open. |
+| M4 | Documentation drift across README, plugin guidebook, dossiertype template, pipeline architecture doc. | **Partially addressed** — harness 1 enforces guidebook YAML; harness 3 enforces pipeline docstring accuracy. README and dossiertype template still unguarded. |
+| M5 | Executable specs that don't execute — `test_requests.sh` and guidebook YAML examples. | **Closed** in Round 8+9 — harness 2 (`ci_run_shell_spec.sh`) + GitHub Actions shell-spec job. |
+| M6 | "Test" is a namespace, not a load-time gate — `testDienAanvraagInV2` shipped in production workflow (Bug 71). | **Deferred by product decision** — deploy-time checklist removes test activities from `workflow.yaml`. |
+
+**Meta-pattern totals:** 4 closed, 1 partially addressed, 1 deferred by product decision.
 
 ---
 
@@ -270,12 +371,30 @@ Survey of the silent-skip pattern across the platform. M2 is a **visibility pass
 - **Shell spec via harness 2:** exit 0, 25 OK, 5 summaries, D1–D9 green, zero tracebacks/5xx.
 - **App log during a clean D1-D9 run:** zero WARNINGs or ERRORs from the new logging paths, confirming Stage 1 is correctly positioned in error branches only (happy-path runs stay quiet).
 
+### Round 14 — M2 Stage 2 + Stage 3 (bookkeeping reconciliation + regression guards)
+
+Started this round aiming to fix Bug 12 (`_parse_scheduled_for` silently fires tasks) and Bug 76 (corrupt `.meta` bypasses dossier-binding). **Both turned out to already be fixed in the codebase** — the review's tracking had drifted out of sync with the code after multiple auto-compacted rounds. Verification and test-coverage work filled the gap.
+
+**Bug 12.** `worker.py:_parse_scheduled_for` already implements log-and-defer: malformed ISO strings return `datetime.max.replace(tzinfo=timezone.utc)` with a `logger.error`, so the due-check `scheduled_for > now` defers the task indefinitely. Already tested by `TestParseScheduledFor` (12 cases including explicit regression guards: `test_garbage_returns_datetime_max`, `test_multiple_garbage_forms_all_defer`, `test_empty_and_none_still_return_none` to prevent re-conflating the legitimate None case with corruption). No code change; review entry corrected to "fixed."
+
+**Bug 76.** `file_service/app.py:/internal/move` already rejects corrupt `.meta` with HTTP 500 and a docstring-documented policy for all four `.meta` states. The fix was in place; the regression guard wasn't. Added two tests in `TestMoveEnforcesDossierBinding`:
+- `test_move_rejects_when_meta_is_corrupt` — truncated JSON case.
+- `test_move_rejects_when_meta_is_non_json_garbage` — binary-garbage case.
+
+**One real sub-bug caught by writing the tests:** the original `except (OSError, json.JSONDecodeError)` clause didn't cover `UnicodeDecodeError`. A `.meta` file containing non-UTF-8 bytes raises `UnicodeDecodeError` during `open()` in text mode *before* `json.load` sees anything, and `UnicodeDecodeError` is a subclass of `ValueError`, not `JSONDecodeError`. Binary garbage in `.meta` was therefore crashing with an unhandled 500 rather than our intended explicit-reject path. **Widened the except to `(OSError, json.JSONDecodeError, UnicodeDecodeError)`** with a comment explaining the inheritance gotcha. Both tests now pass; `TestMoveEnforcesDossierBinding` goes 5 → 7 tests, all green.
+
+**Verified:**
+- **Test suite:** 760/760 (engine 705, toelatingen 16, signing 18, file_service 21 ↑ from 19).
+- **Shell spec via harness 2:** exit 0, 25 OK, 5 summaries, D1–D9 green, zero tracebacks/5xx. The `/internal/move` happy-path in D1 continues to work after the except-clause widening.
+
+**Process note.** This round revealed that the review's bookkeeping had gotten ahead of the code — two bugs were listed as open that had been fixed in earlier rounds but whose "fixed" state didn't survive transcript compaction. The harnesses and test suite caught this naturally: attempting to "fix" Bug 12 immediately showed `_parse_scheduled_for` already returning `datetime.max` with full test coverage, and the same pattern for Bug 76 revealed an adjacent real bug (the `UnicodeDecodeError` gap) that only got surfaced by writing the regression tests. Lesson: when context runs deep, verify claimed-open items against code before planning a fix.
+
 ### Where to go next (in priority order)
 
-1. **Meta M2 Stage 2 — Bug 12** (`worker.py:_parse_scheduled_for`). Malformed ISO strings currently fall through to "fire now"; should either log-and-defer or log-and-skip. Design question to resolve with you: is a corrupt `scheduled_for` a worker crash or a safe-defer?
-2. **Meta M2 Stage 3 — Bug 76** (`file_service/app.py:265`). Corrupt `.meta` → reject the move instead of falling back to "no binding info." Tighter security posture, small change.
-3. **Any of the open "must-fix" bugs** — Bugs 5, 6, 7, 30, 55, 57, 58, 62. Bug 5 (access-check docstring/code drift at a security boundary) and Bug 58 (unauthenticated `/validate` endpoint) are the most user-visible.
+1. **Bug 5 — `check_dossier_access` docstring/code drift.** Security-boundary concern: docstring claims default-deny, code reportedly asserts default-allow. Small scope (either code matches docstring or docstring matches code, one of the two), high-value — this is a literal doc-vs-code drift in authorization. Worth verifying first that the drift is still there, given what just happened with Bugs 12 and 76.
+2. **Bug 58 — unauthenticated `/validate` endpoint.** User-visible, not behind SSO.
+3. **Remaining open "must-fix" bugs** — Bugs 6, 7, 30, 55, 57, 62. Priority depends on deployment context.
 
-The two "optional" items previously on this list are now closed out:
+The two "optional" items previously on this list remain closed:
 - **Obs-3** (write-on-change for `set_dossier_access`) — deferred by product decision. Keeping the full provenance graph is intended behaviour, not a pending optimization. Filed alongside Bugs 31/45/71 under deferred/accepted.
 - **Bug 63 follow-up** (enumeration alerting) — not an application concern. The `dossier.denied` stream already carries everything needed; dashboard + alert rule is a Wazuh config task, owned by SIEM operators.

@@ -97,10 +97,42 @@ class TestParseScheduledFor:
         result = _parse_scheduled_for("2026-05-01T12:30:00.123456Z")
         assert result == datetime(2026, 5, 1, 12, 30, 0, 123456, tzinfo=UTC)
 
-    def test_garbage_returns_none(self):
-        assert _parse_scheduled_for("not a date") is None
-        assert _parse_scheduled_for("2026-13-45") is None
-        assert _parse_scheduled_for("12:30:00") is None
+    def test_garbage_returns_datetime_max(self, caplog):
+        """Bug 12: malformed (non-empty) strings used to collapse to
+        ``None``, which ``_is_task_due`` treated as "immediately due" —
+        a task scheduled for next week would fire right now. Now we
+        return ``datetime.max`` (aware UTC) so the due-check's
+        ``> now`` comparison defers the task indefinitely, and we log
+        loudly so the corruption is visible."""
+        import logging
+        with caplog.at_level(logging.ERROR, logger="dossier.worker"):
+            result = _parse_scheduled_for("not a date")
+        assert result == datetime.max.replace(tzinfo=UTC)
+        assert result.tzinfo is UTC
+        # One error record per malformed value.
+        assert len(caplog.records) == 1
+        assert "not a date" in caplog.records[0].getMessage()
+
+    def test_multiple_garbage_forms_all_defer(self, caplog):
+        """Each malformed shape logs and defers — none collapse to
+        None (the old bug)."""
+        import logging
+        with caplog.at_level(logging.ERROR, logger="dossier.worker"):
+            for bad in ("not a date", "2026-13-45", "12:30:00"):
+                result = _parse_scheduled_for(bad)
+                assert result == datetime.max.replace(tzinfo=UTC), (
+                    f"{bad!r} should defer, not collapse to None"
+                )
+
+    def test_empty_and_none_still_return_none(self):
+        """The None/empty branch is distinct — those mean "no
+        scheduling constraint was set" (the common case for tasks
+        that should fire on the next poll), and must keep returning
+        ``None`` so the caller treats them as due-now. Regression
+        guard against conflating the two cases."""
+        assert _parse_scheduled_for(None) is None
+        assert _parse_scheduled_for("") is None
+        assert _parse_scheduled_for("   ") is None
 
     def test_roundtrip_with_isoformat(self):
         """datetime.isoformat() on an aware UTC datetime produces a
@@ -302,3 +334,42 @@ class TestIsTaskDue:
             self.NOW,
         )
         assert is_due is True
+
+    def test_malformed_scheduled_for_defers_task(self, caplog):
+        """Bug 12 end-to-end. A task row with a non-parseable
+        ``scheduled_for`` must NOT fire. Before the fix the malformed
+        string collapsed to None, the `is not None` guard short-
+        circuited, and the task was classified as due-now. After the
+        fix, ``_parse_scheduled_for`` returns ``datetime.max``, the
+        ``> now`` comparison holds, and the task defers indefinitely.
+        An error log surfaces the corruption so ops notices."""
+        import logging
+        with caplog.at_level(logging.ERROR, logger="dossier.worker"):
+            is_due, sort_key = _is_task_due(
+                _task({"scheduled_for": "definitely-not-an-iso-string"}),
+                self.NOW,
+            )
+        assert is_due is False, (
+            "Malformed scheduled_for must defer, not fire. This is "
+            "the whole point of Bug 12's fix."
+        )
+        assert sort_key == datetime.max.replace(tzinfo=UTC)
+        assert any(
+            "definitely-not-an-iso-string" in r.getMessage()
+            for r in caplog.records
+        )
+
+    def test_malformed_next_attempt_at_defers_task(self, caplog):
+        """Same guarantee on the retry-delay field. A malformed
+        ``next_attempt_at`` (e.g. from a legacy pre-isoformat write)
+        must defer, not advance the retry."""
+        import logging
+        with caplog.at_level(logging.ERROR, logger="dossier.worker"):
+            is_due, _ = _is_task_due(
+                _task({
+                    "scheduled_for": self.PAST.isoformat(),
+                    "next_attempt_at": "garbage",
+                }),
+                self.NOW,
+            )
+        assert is_due is False

@@ -528,3 +528,92 @@ class TestMoveEnforcesDossierBinding:
         assert meta_path.exists()
         meta = json.loads(meta_path.read_text())
         assert meta.get("intended_dossier_id") == did
+    async def test_move_rejects_when_meta_is_corrupt(
+        self, file_client, tmp_path,
+    ):
+        """Bug 76: if the ``.meta`` file exists but is corrupted
+        (truncated JSON, non-UTF-8 bytes, whatever), we refuse the
+        move rather than silently falling back to "no binding info."
+
+        The pre-fix behaviour was ``except (OSError, JSONDecodeError):
+        meta = {}`` followed by ``if intended and intended != dossier_id``
+        — an empty ``intended`` made the mismatch branch fall through
+        and the move succeeded. An attacker who could corrupt the
+        ``.meta`` (local filesystem access, race, disk issue) would
+        bypass the whole Bug 47 check.
+
+        The back-compat door "``.meta`` missing entirely" stays open
+        (covered by ``test_move_allows_when_meta_missing``). Only the
+        "present-but-unreadable" case rejects."""
+        fid = str(uuid4())
+        d1 = str(uuid4())
+        d2 = str(uuid4())
+
+        # Upload normally so the file + .meta land in temp.
+        r_up = await _upload(
+            file_client, fid, b"uploaded with binding", dossier_id=d1,
+        )
+        assert r_up.status_code == 200
+
+        # Now corrupt the .meta on disk. The file_service's move
+        # endpoint reads it back with json.load — truncating mid-JSON
+        # raises JSONDecodeError, which is what we want to exercise.
+        meta_path = tmp_path / "storage" / "temp" / f"{fid}.meta"
+        assert meta_path.exists(), "setup: .meta must exist from upload"
+        meta_path.write_text('{"intended_dossier_id": "')  # truncated JSON
+
+        # Even targeting the correct dossier id, the move must reject —
+        # the point isn't mismatch detection, it's that we can't
+        # *trust* the meta to do mismatch detection in the first place.
+        r = await file_client.post(
+            "/internal/move",
+            params={"file_id": fid, "dossier_id": d1},
+        )
+        assert r.status_code == 500, (
+            f"Expected 500, got {r.status_code}: {r.text}"
+        )
+        # The error message should hint at the cause so operators
+        # don't have to dig through logs to understand why the move
+        # failed.
+        assert "metadata" in r.text.lower() or "unreadable" in r.text.lower()
+
+        # Symmetric check: same rejection when targeting a *different*
+        # dossier. The response is the same whether or not the target
+        # matches — we never read the intended_dossier_id, so we can't
+        # distinguish the cases, and "corrupt .meta refuses all moves"
+        # is the right strict behaviour anyway.
+        r2 = await file_client.post(
+            "/internal/move",
+            params={"file_id": fid, "dossier_id": d2},
+        )
+        assert r2.status_code == 500
+
+    async def test_move_rejects_when_meta_is_non_json_garbage(
+        self, file_client, tmp_path,
+    ):
+        """Same Bug 76 fix, different corruption shape. Truncated
+        JSON raises ``JSONDecodeError``; binary garbage can raise
+        either ``JSONDecodeError`` or ``UnicodeDecodeError`` depending
+        on bytes. Both are caught by the (OSError, JSONDecodeError)
+        clause — UnicodeDecodeError is a subclass of ValueError not
+        JSONDecodeError, so we verify the catch handles that path
+        too."""
+        fid = str(uuid4())
+        did = str(uuid4())
+        r_up = await _upload(file_client, fid, b"x", dossier_id=did)
+        assert r_up.status_code == 200
+
+        meta_path = tmp_path / "storage" / "temp" / f"{fid}.meta"
+        # Binary garbage — not valid UTF-8, not valid JSON.
+        meta_path.write_bytes(b"\x00\x01\xff\xfe\xfd")
+
+        r = await file_client.post(
+            "/internal/move",
+            params={"file_id": fid, "dossier_id": did},
+        )
+        # Accept either 500 (our explicit reject) or 400 if the FastAPI
+        # stack turns the UnicodeDecodeError into a request error
+        # first. What matters is that it's NOT 200.
+        assert r.status_code != 200, (
+            f"Corrupt .meta bypass: got 200 with body {r.text!r}"
+        )

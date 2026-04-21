@@ -53,17 +53,50 @@ def _parse_scheduled_for(value: str | None) -> datetime | None:
     compare greater than a "Z"-formatted scheduled_for even when
     they're the same instant.
 
-    Returns None for None or for strings that don't parse.
+    Three return shapes, all consumed by the ``> now`` comparison in
+    ``_is_task_due``:
+
+    * ``None`` — value is None/empty. Represents "no scheduling
+      constraint was set"; the caller treats this as "immediately
+      due" (the common case — most tasks have no ``scheduled_for``
+      and fire on the next poll).
+
+    * ``datetime.max`` (aware, UTC) — value was a non-empty string
+      that didn't parse as ISO 8601. This is **Bug 12**: until this
+      change, the malformed branch returned ``None``, which collapsed
+      into case 1 and caused a task intended for next week to fire
+      immediately. The engine always writes via ``resolve_scheduled_for``
+      which validates before persisting, so if we see a malformed
+      string here, it's either row corruption, a pre-migration legacy
+      row, or a tampered dump — none of which should silently advance
+      the clock. Returning ``datetime.max`` defers the task indefinitely
+      (``max > now`` is always true), keeping the row visible to
+      operator tooling while refusing to execute it until the data is
+      fixed. We log loudly so corruption is visible in Sentry.
+
+    * aware ``datetime`` — value parsed. Compared against ``now`` in
+      the caller as usual.
     """
-    if not value:
+    if value is None:
         return None
     s = value.strip()
+    if not s:
+        # Whitespace-only or empty — treat as "no scheduling
+        # constraint set," same as None. Not data corruption, just
+        # a trivially-empty value.
+        return None
     if s.endswith("Z"):
         s = s[:-1] + "+00:00"
     try:
         dt = datetime.fromisoformat(s)
     except ValueError:
-        return None
+        # Bug 12: log-and-defer. See docstring for rationale.
+        logger.error(
+            "Malformed scheduled_for / next_attempt_at value %r; "
+            "deferring task indefinitely until the row is fixed.",
+            value,
+        )
+        return datetime.max.replace(tzinfo=timezone.utc)
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt
