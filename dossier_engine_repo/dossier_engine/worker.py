@@ -475,6 +475,20 @@ async def _execute_claimed_task(session, task: EntityRow, registry) -> None:
     released between claim and execute and two workers could race.
 
     Responsibilities inside this function:
+    * Acquire the dossier `FOR UPDATE` lock **before** doing anything
+      that could trigger INSERTs into `entities` (which take FK-induced
+      `FOR KEY SHARE` locks on referenced rows). Bug 74: user-facing
+      activities take the dossier lock first, then insert entities.
+      If the worker does the reverse — entity lock from
+      ``_claim_one_due_task``'s ``FOR UPDATE OF entities``, then the
+      dossier lock via the pipeline's ``ensure_dossier`` — the two
+      lock orders invert and two concurrent transactions on the same
+      dossier can deadlock. Grabbing the dossier lock here forces the
+      worker into the same order as user activities
+      (dossier → entities) so both paths are deadlock-free.
+      The later ``get_dossier_for_update`` inside the pipeline is a
+      no-op in the same transaction — Postgres is idempotent about
+      re-locking a row you already hold.
     * Resolve the dossier and plugin.
     * Re-fetch the task for latest version. The re-fetch is how we
       observe cancellations: the pipeline's `cancel_matching_tasks`
@@ -495,7 +509,10 @@ async def _execute_claimed_task(session, task: EntityRow, registry) -> None:
     repo = Repository(session)
     dossier_id = task.dossier_id
 
-    dossier = await repo.get_dossier(dossier_id)
+    # Acquire the dossier lock in the same order user-facing
+    # activities do. See Bug 74 in the review and the block-level
+    # docstring above for the full deadlock explanation.
+    dossier = await repo.get_dossier_for_update(dossier_id)
     if not dossier:
         logger.error(f"Task {task.id}: dossier {dossier_id} not found")
         return

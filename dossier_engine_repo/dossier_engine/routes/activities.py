@@ -26,7 +26,7 @@ from uuid import UUID
 from fastapi import Depends, FastAPI, HTTPException
 
 from ..auth import User
-from ..db import Repository, get_session_factory
+from ..db import Repository, run_with_deadlock_retry
 from ..engine import ActivityError, execute_activity
 from ..plugin import Plugin, PluginRegistry
 from ._errors import activity_error_to_http
@@ -71,25 +71,26 @@ def register(
         plugin, act_def = _resolve_plugin_and_def(
             registry, request.type, wf,
         )
-        session_factory = get_session_factory()
-        async with session_factory() as session:
-            async with session.begin():
-                repo = Repository(session)
-                return await _run_activity(
-                    repo=repo,
-                    plugin=plugin,
-                    act_def=act_def,
-                    dossier_id=dossier_id,
-                    activity_id=activity_id,
-                    user=user,
-                    role=request.role,
-                    used=request.used,
-                    generated=request.generated,
-                    relations=request.relations,
-                    remove_relations=request.remove_relations,
-                    workflow_name=wf,
-                    informed_by=request.informed_by,
-                )
+
+        async def _work(session):
+            repo = Repository(session)
+            return await _run_activity(
+                repo=repo,
+                plugin=plugin,
+                act_def=act_def,
+                dossier_id=dossier_id,
+                activity_id=activity_id,
+                user=user,
+                role=request.role,
+                used=request.used,
+                generated=request.generated,
+                relations=request.relations,
+                remove_relations=request.remove_relations,
+                workflow_name=wf,
+                informed_by=request.informed_by,
+            )
+
+        return await run_with_deadlock_retry(_work)
 
     async def _handle_batch(
         dossier_id: UUID,
@@ -99,51 +100,55 @@ def register(
     ):
         """Execute a batch of activities atomically."""
         wf = workflow_override or request.workflow
-        session_factory = get_session_factory()
-        async with session_factory() as session:
-            async with session.begin():
-                repo = Repository(session)
-                results = []
-                for item in request.activities:
-                    plugin, act_def = _resolve_plugin_and_def(
-                        registry, item.type, wf,
+
+        async def _work(session):
+            repo = Repository(session)
+            results = []
+            for item in request.activities:
+                plugin, act_def = _resolve_plugin_and_def(
+                    registry, item.type, wf,
+                )
+                try:
+                    response = await _run_activity(
+                        repo=repo,
+                        plugin=plugin,
+                        act_def=act_def,
+                        dossier_id=dossier_id,
+                        activity_id=UUID(item.activity_id),
+                        user=user,
+                        role=item.role,
+                        used=item.used,
+                        generated=item.generated,
+                        relations=item.relations,
+                        remove_relations=item.remove_relations,
+                        workflow_name=wf,
+                        informed_by=item.informed_by,
                     )
-                    try:
-                        response = await _run_activity(
-                            repo=repo,
-                            plugin=plugin,
-                            act_def=act_def,
-                            dossier_id=dossier_id,
-                            activity_id=UUID(item.activity_id),
-                            user=user,
-                            role=item.role,
-                            used=item.used,
-                            generated=item.generated,
-                            relations=item.relations,
-                            remove_relations=item.remove_relations,
-                            workflow_name=wf,
-                            informed_by=item.informed_by,
-                        )
-                    except HTTPException as e:
-                        prefix = (
-                            f"Activity '{item.type}' "
-                            f"(#{len(results) + 1}) failed: "
-                        )
-                        if isinstance(e.detail, dict):
-                            new_detail = {
-                                **e.detail,
-                                "detail": f"{prefix}{e.detail.get('detail', '')}",
-                            }
-                            raise HTTPException(e.status_code, detail=new_detail)
-                        raise HTTPException(
-                            e.status_code, detail=f"{prefix}{e.detail}",
-                        )
-                    await repo.session.flush()
-                    results.append(response)
-                return {
-                    "activities": results,
-                    "dossier": results[-1]["dossier"] if results else None,
-                }
+                except HTTPException as e:
+                    prefix = (
+                        f"Activity '{item.type}' "
+                        f"(#{len(results) + 1}) failed: "
+                    )
+                    if isinstance(e.detail, dict):
+                        new_detail = {
+                            **e.detail,
+                            "detail": f"{prefix}{e.detail.get('detail', '')}",
+                        }
+                        raise HTTPException(e.status_code, detail=new_detail)
+                    raise HTTPException(
+                        e.status_code, detail=f"{prefix}{e.detail}",
+                    )
+                await repo.session.flush()
+                results.append(response)
+            return {
+                "activities": results,
+                "dossier": results[-1]["dossier"] if results else None,
+            }
+
+        # A deadlock anywhere in the batch retries the whole batch with
+        # a fresh transaction. This matches the existing atomicity
+        # contract — either all items commit or none do.
+        return await run_with_deadlock_retry(_work)
 
     # --- Workflow-agnostic routes ---
 
@@ -313,25 +318,25 @@ def _register_typed_route(
             registry, act_name, workflow_name,
         )
 
-        session_factory = get_session_factory()
-        async with session_factory() as session:
-            async with session.begin():
-                repo = Repository(session)
-                return await _run_activity(
-                    repo=repo,
-                    plugin=plugin,
-                    act_def=act_def,
-                    dossier_id=dossier_id,
-                    activity_id=activity_id,
-                    user=user,
-                    role=request.role,
-                    used=request.used,
-                    generated=request.generated,
-                    relations=request.relations,
-                    remove_relations=request.remove_relations,
-                    workflow_name=request.workflow,
-                    informed_by=request.informed_by,
-                )
+        async def _work(session):
+            repo = Repository(session)
+            return await _run_activity(
+                repo=repo,
+                plugin=plugin,
+                act_def=act_def,
+                dossier_id=dossier_id,
+                activity_id=activity_id,
+                user=user,
+                role=request.role,
+                used=request.used,
+                generated=request.generated,
+                relations=request.relations,
+                remove_relations=request.remove_relations,
+                workflow_name=request.workflow,
+                informed_by=request.informed_by,
+            )
+
+        return await run_with_deadlock_retry(_work)
 
     # FastAPI uses function name for route uniqueness. Strip the
     # colon from the name since it's invalid in Python identifiers.

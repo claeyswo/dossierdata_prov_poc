@@ -2,7 +2,7 @@
 
 *8 passes across ~30,000 lines of Python + ~3,400 lines of YAML/Markdown. Frontend excluded per instruction.*
 
-**Legend:** ~~strikethrough~~ = fixed & tested in this session
+**Legend:** ~~strikethrough~~ = fixed & tested; 🔍 = investigated, not a real bug.
 
 ---
 
@@ -10,52 +10,46 @@
 
 | Status | Count | Items |
 |---|---|---|
-| ✅ Fixed & verified | 10 | Bugs 1, 2, 15, 16, 17, 44, 47, 68, 72 (coverage), 73 |
-| 🛑 Consciously deferred | 2 | Bug 45 (handled by MinIO migration), Bug 71 (test activities removed at deploy time) |
-| 📝 Closed by product decision | 1 | Bug 31 — RRN in `role`/`dossier_access`/ES ACL is acceptable |
-| 🧪 Test suite | **694/694** passing | engine 657, file_service 19, common/signing 18 |
-| 🏃 `test_requests.sh` | **25/25 OK lines, exit 0** | D1–D9 all green |
-| ✂️ Duplication | **D1 closed** | Four copies of "load dossier graph data" consolidated into `load_dossier_graph_rows` |
-| 📦 Pending | 62 bugs + 57 obs + 26 dups + 6 meta | See below |
+| ✅ Fixed & verified | 11 | Bugs 1, 2, 15, 16, 17, 44, 47, 68, 72 (coverage), 73, 74 |
+| 🔍 Investigated, not a bug | 1 | Bug 14 — cross-dossier `used` refs are persisted as local `type=external` rows via `ensure_external_entity`; the raw-UUID cross-dossier case is rejected at `resolve_used` with 422 |
+| 🛑 Consciously deferred / accepted | 3 | Bug 31 (RRN acceptable), Bug 45 (MinIO migration), Bug 71 (test activities accepted, removed at deploy time) |
+| 🧪 Test suite | **705/705** passing | engine 668, file_service 19, common/signing 18 |
+| 🏃 `test_requests.sh` | **25/25 OK, exit 0, zero deadlocks** | D1–D9 green |
+| ✂️ Duplication | **D1, D2, D25 closed** | Graph-loader consolidation |
+| 📦 Pending | 61 bugs + 57 obs + 24 dups + 6 meta | See below |
 
 ---
 
 ## Bugs
 
-### Must-fix — correctness, security, data integrity (21)
+### Must-fix — correctness, security, data integrity (20)
 
 | # | Pass | Summary | Location | Status |
 |---|------|---------|----------|--------|
-| ~~1~~ | 1 | ~~`remove_relations` — `r["relation_type"]` on frozen dataclass → `TypeError` on first use.~~ | `engine/pipeline/relations.py:440-443` | ✅ **Fixed.** |
-| ~~2~~ | 1 | ~~Same dispatch path also triggers on add-validator resolution for removes.~~ | `engine/pipeline/relations.py:442` | ✅ **Fixed.** |
+| ~~1~~ | 1 | ~~`remove_relations` — `r["relation_type"]` on frozen dataclass → `TypeError`.~~ | `engine/pipeline/relations.py:440-443` | ✅ |
+| ~~2~~ | 1 | ~~Add-validator dispatch path also triggers on removes.~~ | `engine/pipeline/relations.py:442` | ✅ |
 | 5 | 2 | `check_dossier_access` docstring claims default-deny but code asserts default-allow. | `routes/access.py:94-98` |  |
 | 6 | 2 | Alembic failure fallback runs `create_tables()` — half-migrated schema risk. | `app.py:329-334` |  |
-| 7 | 2 | Batch endpoint emits audit events per item before transaction commit. | `routes/activities.py` batch handler |  |
-| 14 | 3 | Cross-dossier `used` refs silently dropped from PROV-JSON export. | `routes/prov.py`→`prov_json.py` ``build_prov_graph`` | Now a one-line change in the shared builder. |
-| ~~15~~ | 3 | ~~Archive tempfile leak fills `/tmp` on heavy use.~~ | `routes/prov.py:752-755` | ✅ **Fixed.** Archive endpoint now returns an in-memory `Response` — no tempfile, no `FileResponse`, no cleanup-to-forget. |
-| ~~16~~ | 3 | ~~~80 lines of duplicate PROV-JSON build between `/prov` and `/archive`.~~ | `routes/prov.py:151-288` vs `697-742` | ✅ **Fixed.** Both endpoints call `build_prov_graph` in `dossier_engine/prov_json.py`. Columns + timeline also refactored. |
-| ~~17~~ | 3 | ~~Hardcoded font paths break on Alpine / RHEL / macOS / slim containers.~~ | `archive.py:240-243` | ✅ **Fixed.** New `dossier_engine/fonts.py` with platform candidate lists + `DOSSIER_FONT_DIR` env override + actionable error message naming the packages to install. `check_fonts_available()` enables fail-fast at startup. |
+| 7 | 2 | Batch endpoint emits audit events per item before transaction commit. | `routes/activities.py` |  |
+| 🔍 14 | 3 | **Investigated, not a bug.** Cross-dossier `used` refs are persisted as local `type=external` rows via `ensure_external_entity`; cross-dossier UUID refs are rejected at `resolve_used:89-92` with 422. The `if entity:` guard in `build_prov_graph` only drops rows on data-integrity violations (a UUID pointing at a row that no longer exists), not on cross-dossier cases. `_entity_key` already handles externals via the stored URI. | `routes/prov.py`→`prov_json.py` | Dropped from must-fix. |
+| ~~15~~ | 3 | ~~Archive tempfile leak fills `/tmp` on heavy use.~~ | `routes/prov.py:752-755` | ✅ |
+| ~~16~~ | 3 | ~~Duplicate PROV-JSON build between `/prov` and `/archive`.~~ | `routes/prov.py` | ✅ |
+| ~~17~~ | 3 | ~~Hardcoded font paths break on non-Debian.~~ | `archive.py:240-243` | ✅ |
 | 30 | 4 | `move_bijlagen_to_permanent` silently swallows per-file exceptions. | `dossier_toelatingen/tasks/__init__.py:139-150` |  |
 | 📝 31 | 4 | Closed by product decision. | `dossier_toelatingen/handlers/__init__.py:37-42` | Decided. |
-| ~~44~~ | 5 | ~~File service falls back to `temp/file_id` regardless of `dossier_id`.~~ | `file_service/app.py:156-212` | ✅ **Fixed.** |
-| 🛑 45 | 5 | Deferred. | `file_service/app.py:129, 186, 230-235` | MinIO migration handles it. |
-| ~~47~~ | 5 | ~~Upload tokens dossier-agnostic.~~ | `routes/files.py:62-67` | ✅ **Fixed** via dossier-binding at upload time. |
+| ~~44~~ | 5 | ~~File service falls back to `temp/file_id` regardless of `dossier_id`.~~ | `file_service/app.py:156-212` | ✅ |
+| 🛑 45 | 5 | Deferred — MinIO migration handles it. | `file_service/app.py` |  |
+| ~~47~~ | 5 | ~~Upload tokens dossier-agnostic.~~ | `routes/files.py:62-67` | ✅ |
 | 55 | 5 | `lineage.find_related_entity` doesn't filter by `dossier_id` defensively. | `lineage.py:76-77` |  |
 | 57 | 6 | `routes/entities.py` three endpoints skip `inject_download_urls`. | `routes/entities.py:42-186` |  |
 | 58 | 6 | `POST /{workflow}/validate/{name}` has no authentication. | `routes/reference.py:117-171` |  |
 | 62 | 6 | `/entities/{type}/{eid}/{vid}` doesn't verify `entity_id` matches. | `routes/entities.py:141-146` |  |
 | 63 | 7 | 404 before access check enables dossier-existence enumeration. | `routes/dossiers.py:79-81`, `routes/entities.py:203-205` |  |
-| ~~68~~ | 7 | ~~Initial-schema Alembic migration mutated retroactively.~~ | `alembic/versions/` | ✅ **Fixed** pre-deploy: migrations consolidated, append-only guard added. |
-| 🛑 71 | 8 | Deferred. | `dossier_toelatingen/workflow.yaml:671-742` | Will be removed at deploy time. |
-| ~~72~~ | 8 | ~~`bewerkRelaties` zero test coverage.~~ | `dossier_toelatingen/workflow.yaml:744+` | ✅ **Coverage added.** |
+| ~~68~~ | 7 | ~~Initial-schema Alembic migration mutated retroactively.~~ | `alembic/versions/` | ✅ |
+| 🛑 71 | 8 | **Accepted.** Deploy-time removal of test activities from `workflow.yaml`; no framework flag needed. | `dossier_toelatingen/workflow.yaml:671-742` |  |
+| ~~72~~ | 8 | ~~`bewerkRelaties` zero test coverage.~~ | `dossier_toelatingen/workflow.yaml:744+` | ✅ |
 
-### New issue surfaced this session (candidate Bug 74)
-
-A `DeadlockDetectedError` fired once in `test_requests.sh` at D1 Step 3 (`vervolledigAanvraag`) when the worker's 2-second poll landed concurrently with the user-facing write. Both touch `system:task` rows. The 500 response cascaded into D9 Step 9 failing due to a missing prerequisite version.
-
-This is a pre-existing timing sensitivity, not caused by the archive refactor (none of the refactored files are on the `vervolledigAanvraag` path). The spec passed cleanly on re-run. Worth tracking as **Bug 74 — worker/route deadlock on `system:task`**: should-fix, robustness. Candidate fixes: retry wrapper at the route level, or a more targeted lock ordering in the worker's poll→claim cycle.
-
-### Should-fix — robustness (36)
+### Should-fix — robustness (37)
 
 | # | Pass | Summary | Location | Status |
 |---|------|---------|----------|--------|
@@ -94,8 +88,8 @@ This is a pre-existing timing sensitivity, not caused by the archive refactor (n
 | 67 | 7 | `_errors.py` payload key collision. | `routes/_errors.py:28` |  |
 | 69 | 7 | Tombstone role shape inconsistent between dossiertype template and workflow.yaml. | `dossiertype_template.md:44-49` vs `workflow.yaml:148` |  |
 | 70 | 8 | `test_requests.sh` outputs dead `/prov/graph` URL. | `test_requests.sh:216`, `routes/prov.py:5` |  |
-| ~~73~~ | (impl) | ~~`conftest.py` TRUNCATE list omits `domain_relations`.~~ | `tests/conftest.py:181-189` | ✅ **Fixed.** |
-| 74 | (impl) | Worker/route deadlock on `system:task` rows. Surfaced by `test_requests.sh` D1 Step 3 hitting `DeadlockDetectedError` when the worker poll lands concurrently with `vervolledigAanvraag`. | worker poll vs user-facing activity writes | **New, surfaced this session.** |
+| ~~73~~ | (impl) | ~~`conftest.py` TRUNCATE list omits `domain_relations`.~~ | `tests/conftest.py:181-189` | ✅ |
+| ~~74~~ | (impl) | ~~Worker/route deadlock on `system:task` rows.~~ | `worker.py::_execute_claimed_task` + `routes/activities.py` | ✅ **Fixed.** Structural fix in the worker (acquire dossier lock before entity INSERTs — same order as user activities). Defence-in-depth: `run_with_deadlock_retry` helper in `db/session.py` detects SQLSTATE 40P01 and retries with a fresh transaction + exponential backoff + jitter. Both layers tested; shell spec now runs deadlock-free. |
 
 ### Lower-priority (16)
 
@@ -126,8 +120,8 @@ This is a pre-existing timing sensitivity, not caused by the archive refactor (n
 ### Code organization
 - Worker split into `poll.py`, `execute.py`, `retry.py`, `requeue.py`, `signals.py`
 - Unify relation shape in `ActivityState` (3 typed lists + 1 dict)
-- Split `prov.py` (now down from 792 → ~490 after this session's refactor)
-- Extract `prov_columns_layout.py` — 270 lines of pure algorithm inside a route registration (still applies; the layout algorithm at `prov_columns.py:110-399` was preserved as-is)
+- Split `prov.py` (792 → ~490 after this round's refactor)
+- Extract `prov_columns_layout.py` — 270 lines of pure algorithm inside a route registration
 - Untangle import-inside-function cycles
 - Rationalize `namespaces.py` singleton + scattered fallbacks
 
@@ -164,7 +158,7 @@ This is a pre-existing timing sensitivity, not caused by the archive refactor (n
 
 ### Test / deployment concerns
 - Test fixtures use direct `Repository` instances against real Postgres — no unit isolation story documented
-- `test_requests.sh` is an executable spec that isn't in CI *(confirmed passing in this session; flaked once on the new Bug 74 deadlock, passed on re-run)*
+- `test_requests.sh` is an executable spec that isn't in CI *(passes clean after Bug 74 fix)*
 - Schema-versioning tests require declaring test-only activities in production YAML
 - Dependency-override-friendly auth for tests
 - Signing key rotation support
@@ -172,20 +166,14 @@ This is a pre-existing timing sensitivity, not caused by the archive refactor (n
 - `DataMigration.transform` signature should widen
 - Cross-workflow task permission model
 
-### Specific refactors named
-- Add "Reads/Writes docstring matches state fields" lint
-- Share layout between archive and columns graph — *status:* data-loading now shared; the layout algorithms are still separate (archive.py uses a SVG timeline, prov_columns.py uses a three-band column layout)
-- `activity_view` mode complexity reduction
-- Pipeline architecture doc's `ActivityState` hazard documented but not enforced
-
 ---
 
-## Duplication (26 remaining; 1 closed this session)
+## Duplication (24 remaining; 3 closed this engagement)
 
 | # | What | Status |
 |---|------|--------|
-| ~~D1~~ | ~~Four copies of "load dossier graph data" (prov, prov_columns, archive × 2)~~ | ✅ **Closed.** Consolidated into `load_dossier_graph_rows` in `dossier_engine/prov_json.py`. All four endpoints (prov, archive, prov_columns, timeline) now call the shared loader. |
-| D2 | Two copies of PROV-JSON build | ✅ Also closed via `build_prov_graph`; was part of D1/Bug 16. |
+| ~~D1~~ | Four copies of "load dossier graph data" | ✅ Closed — `load_dossier_graph_rows` in `prov_json.py`. |
+| ~~D2~~ | Two copies of PROV-JSON build | ✅ Closed — `build_prov_graph` in `prov_json.py`. |
 | D3 | `prov_type_value`/`agent_type_value` helpers under-used |  |
 | D4 | Audit emission boilerplate (~15 sites) |  |
 | D5 | 4 copies of latest-version-per-entity_id subquery |  |
@@ -208,7 +196,7 @@ This is a pre-existing timing sensitivity, not caused by the archive refactor (n
 | D22 | `emit_audit` boilerplate with the same 7 fields per call site |  |
 | D23 | "Find systemAction activity def" pattern in 2 places |  |
 | D24 | Alembic initial schema indices duplicated by Python model `__table_args__` — drift risk |  |
-| D25 | Both archive.py and prov.py do their own PROV-JSON prefix building | ✅ Also closed — both now use `build_prov_graph` which handles prefixes once. |
+| ~~D25~~ | Both archive.py and prov.py do their own PROV-JSON prefix building | ✅ Closed — both use `build_prov_graph` which handles prefixes once. |
 | D26 | `sign_token` + `verify_token` share payload-string building logic |  |
 | D27 | Test setup helpers exist in 4+ test files with slight variations |  |
 
@@ -216,65 +204,60 @@ This is a pre-existing timing sensitivity, not caused by the archive refactor (n
 
 ## Meta-patterns (6)
 
-**M1. The "Reads/Writes contract in docstring" discipline has no enforcement.** Pipeline-architecture doc explicitly names this hazard. `finalization.py:52` lies about reading `state.used_rows`. Lint would catch drift at review time.
+**M1. Docstring "Reads/Writes" drift has no enforcement.** Lint would catch `finalize_dossier:52`'s claim of `state.used_rows` (not a real field).
 
-**M2. "Silent skip" as a default policy.** Unregistered validators skip, unrecognized activity_view modes skip, missing systemAction falls back to bare-name stale copy, `post_activity_hook` failures swallowed, bijlage move per-file failures swallowed, audit log errors swallowed.
+**M2. "Silent skip" as a default policy.** Unregistered validators skip, unrecognized activity_view modes skip, missing systemAction falls back to bare-name stale copy, failures swallowed across many places.
 
-**M3. Hardcoded paved-path values.** Many fail silently today. One example closed this session: Bug 17 (hardcoded font paths) now uses `dossier_engine/fonts.py`'s candidate list + env override.
+**M3. Hardcoded paved-path values.** One instance closed this engagement (Bug 17, fonts); others remain — `systeemgebruiker` in `entities.py:105`, signing-key default in `app.py:41`, `id.erfgoed.net` in `prov_iris.py:53-54`.
 
 **M4. Documentation drift across README, plugin guidebook, dossiertype template, pipeline architecture doc.** None subject to a test.
 
-**M5. Executable specs that don't execute.** `test_requests.sh` and guidebook YAML examples drift because they're outside the automated test suite. Partial relief: the shared-builder tests (`TestProvJsonSharedBuilder`) guard against re-divergence of `/prov` and `/archive` output shapes; the `TestSharedGraphLoader` tests guard the four-endpoint consolidation.
+**M5. Executable specs that don't execute.** `test_requests.sh` and guidebook YAML examples drift because they're outside the automated test suite. Partial relief: `TestProvJsonSharedBuilder` and `TestSharedGraphLoader` guard against graph-loader / PROV-JSON re-divergence.
 
-**M6. "Test" is a namespace, not a load-time gate.** Bug 71 ships `testDienAanvraagInV2` into production because the workflow loader has no concept of "test-only."
+**M6. "Test" is a namespace, not a load-time gate.** Bug 71 accepted — the deploy checklist, rather than a framework flag, keeps test activities out of production.
 
 ---
 
-## What was shipped this session
+## What was shipped in this engagement
 
-### Round 5 — archive cluster (Bugs 15, 16, 17) + Duplication D1
+### Round 1 — Bug 1/2 (remove_relations TypeError)
+Field access, 7 new tests in `TestProcessRemoveRelations`. `tests/conftest.py` TRUNCATE list extended (Bug 73).
 
-Four endpoints (`/prov`, `/archive`, `/prov/graph/columns`, `/prov/graph/timeline`) previously had their own near-copies of the same data-load logic. This session unifies them around a single loader while preserving the auth semantics you specified:
+### Round 2 — Bug 44/47 (file service security)
+Dossier-binding minted into upload tokens + stamped into `.meta`; file_service rejects moves whose target doesn't match the stamped binding. 5 `TestMoveEnforcesDossierBinding` + 2 `TestDownloadNoLongerFallsBackToTemp` tests. `test_requests.sh` upload helper + 13 call sites updated.
 
-| Endpoint | Auth | Graph shape |
-|---|---|---|
-| `/prov` | audit access | full, PROV-JSON via `build_prov_graph` |
-| `/archive` | audit access | full, embedded in PDF |
-| `/prov/graph/columns` | audit access | full, column-layout HTML |
-| `/prov/graph/timeline` | dossier access | filtered by `visible_types`, timeline HTML |
+### Round 3 — Bug 68 (Alembic consolidation)
+Pre-deploy: three migrations folded into one initial. `scripts/check_migrations_append_only.py` guard + README section explaining the rule.
 
-Concretely:
+### Round 4 — Bug 31 (product decision)
+No code change. RRN in `role`, `oe:dossier_access`, and the ES ACL is acceptable for this deployment (none are externally queryable). `agent_id`/`agent.uri` already use `user.id`/`user.uri` correctly at `persistence.py:63-84`.
 
-1. **`dossier_engine/fonts.py`** — new module. Candidate-path lookup for DejaVu fonts covering Debian/Ubuntu, Alpine, RHEL/Rocky/Fedora, Arch, macOS. `DOSSIER_FONT_DIR` env override. Clear `FileNotFoundError` naming the distro package to install. `check_fonts_available()` for optional startup fail-fast. (Bug 17.)
+### Round 5 — Archive cluster (Bugs 15, 16, 17) + Duplication D1/D2/D25
+- **`dossier_engine/fonts.py`** — new. Candidate paths for five platforms + `DOSSIER_FONT_DIR` env override + actionable error message. `check_fonts_available()` for optional startup fail-fast.
+- **`dossier_engine/prov_json.py`** — new. `load_dossier_graph_rows` returns a dataclass with four rowsets + pre-built indexes + agent lookup. `build_prov_graph` assembles PROV-JSON from it.
+- **`routes/prov.py`** — 792 → 506 lines. /prov and /archive both 1-line calls to the builder; archive uses in-memory `Response` (no tempfile, no `FileResponse`). Timeline uses the loader + applies `visible_types` filter post-load.
+- **`routes/prov_columns.py`** — columns endpoint uses the shared loader; layout algorithm unchanged.
+- 16 new tests (8 font, 3 shared-builder, 3 archive-endpoint, 2 shared-loader).
 
-2. **`archive.py`** — `ArchivePDF.__init__` switched from hardcoded `/usr/share/fonts/truetype/dejavu/*` to `find_font("regular"/"bold"/"italic"/"mono")`. (Bug 17 wired.)
+### Round 6 — Bug 74 (worker/route deadlock)
+Root cause: lock-order inversion. User activities take `dossiers FOR UPDATE` then INSERT entities (`FOR KEY SHARE` via FK). Workers took `entities FOR UPDATE SKIP LOCKED` via `_claim_one_due_task`, then read the dossier non-locking and later called `get_dossier_for_update` inside the pipeline — reverse order, deadlock under concurrency.
 
-3. **`dossier_engine/prov_json.py`** — new module with two public functions:
-   - `load_dossier_graph_rows(session, dossier_id)` returns a `DossierGraphRows` dataclass carrying activities, entities, associations, used, plus pre-built indexes (`assoc_by_activity`, `used_by_activity`, `entity_by_id`) and the agent URI lookup.
-   - `build_prov_graph(session, dossier_id)` assembles the full PROV-JSON dict; calls the loader internally.
-   - Helpers `agent_key_resolver(agent_rows)` and `entity_key_resolver()` return the key-resolution closures so callers that want their own rendering can reuse the URI-preferred-if-present policy.
+**Structural fix (primary).** In `worker.py::_execute_claimed_task`, replaced the non-locking `repo.get_dossier(dossier_id)` with `repo.get_dossier_for_update(dossier_id)` at the top of the function. Workers and user activities now acquire locks in the same order: **dossier → entities**. The pipeline's subsequent `get_dossier_for_update` is a no-op (Postgres is idempotent about re-locking within a transaction). Docstring at the lock acquisition explains the bug so the fix isn't accidentally reverted.
 
-4. **`routes/prov.py`** — ~300 fewer lines. /prov is a 1-line call to `build_prov_graph`. /archive is a 1-line call plus in-memory `Response` (Bug 15 closed — no tempfile, no `FileResponse`, no cleanup to forget). Timeline uses the loader and applies `visible_types` filtering in-Python.
+**Defence-in-depth (secondary).** New `run_with_deadlock_retry(work, max_attempts=3, base_backoff_seconds=0.05)` in `db/session.py`. Detects SQLSTATE 40P01 via `.orig.sqlstate` or `__cause__.sqlstate` (robust across driver versions). Retries with a fresh transaction + exponential backoff + ±25% jitter. Non-deadlock exceptions bubble out unchanged — the wrapper is strictly a deadlock safety net, not a generic retry mechanism. All three `_handle_*` methods in `routes/activities.py` converted to use it; batch handler retries the whole batch on deadlock, preserving atomicity.
 
-5. **`routes/prov_columns.py`** — columns endpoint uses the loader. The three-band column-layout algorithm is unchanged (it's the value this endpoint adds and is unique to it).
+11 unit tests (`tests/unit/test_deadlock_retry.py`) cover both the detection helper and the retry wrapper's contract (first-try success, retry-then-succeed, give-up-after-max, non-deadlock not retried, application errors not retried, single-attempt still raises, backoff grows exponentially, cause-chain detection).
 
-### New tests
-
-- `tests/unit/test_fonts.py` — 8 tests: happy path, all four styles resolve, unknown style raises, missing-everywhere produces actionable error naming distro packages, `DOSSIER_FONT_DIR` override wins, override with missing file falls through to candidates, `check_fonts_available` passes on installed system, `check_fonts_available` fails if any style is missing.
-- `tests/integration/test_prov_endpoints.py::TestProvJsonSharedBuilder` — 3 tests confirming the /prov endpoint output matches the builder's direct output, `prov:endedAtTime` appears on activities, empty sections are stripped.
-- `tests/integration/test_prov_endpoints.py::TestArchiveEndpoint` — 3 tests including a `/tmp` scan before/after the request that would fail loudly if the tempfile leak regressed.
-- `tests/integration/test_prov_endpoints.py::TestSharedGraphLoader` — 2 tests (populated indexes on a non-empty dossier; empty dossier is safe).
+### Round 7 — Bug 14 investigated, dropped
+Traced `resolve_used` at `engine/pipeline/used.py:72-92`: external URIs are persisted via `ensure_external_entity` as local `type=external` rows; cross-dossier UUID refs are rejected at line 89-92 with 422. The `if entity:` guard in `build_prov_graph` only drops rows if the `UsedRow.entity_id` points at a non-existent version — a data-integrity violation, not a cross-dossier case. `_entity_key` already handles `type=external` rows by returning the stored URI. Bug reclassified as 🔍 investigated, not a real bug.
 
 ### Verification performed
-
-- **Test suite:** **694/694** (engine 657, signing 18, file_service 19). Engine grew by 16 tests.
-- **End-to-end (shell spec):** `bash test_requests.sh` → **25 `OK:` assertions, 5 summary-pass lines, exit 0**. D1 through D9 green on a clean DB.
-- **Deadlock note:** one earlier run hit a pre-existing `DeadlockDetectedError` at D1 Step 3 between the worker poll and the user-facing write; tracked as new Bug 74.
+- **Test suite:** **705/705** (engine 668, signing 18, file_service 19). Engine grew by 27 tests across the engagement.
+- **Shell spec:** `bash test_requests.sh` → 25 `OK:` assertions, 5 summary-pass lines, exit 0, **zero deadlocks** in the PG log for the current run (historical deadlocks are from runs before Bug 74 was fixed).
+- **Bug 74 regression guard:** 11 unit tests covering detection + retry policy; structural fix prevents the known inversion from occurring at all.
 
 ### Where to go next (in priority order)
-
-1. **Bug 74 — worker/route deadlock.** Small scope; retry-on-deadlock at the route level or lock ordering in worker poll→claim.
-2. **Meta M1 + M4 + M5 — make docs executable.** The shared-builder tests added this session are an instance of M5 relief; scaling the approach to the guidebook's YAML examples would catch Bugs 64/65 automatically.
-3. **Bug 14 — cross-dossier refs dropped.** Now a single-spot change in `build_prov_graph`'s `used` loop.
-4. **Open decision: route-level `file_id` binding check at activity submit time.** Would close the residual PROV-pollution risk from Bug 47.
-5. **Consider `test_only: true` loader flag** for Bug 71's pattern.
+1. **Meta M4 + M5 — make docs executable.** Three small harnesses (guidebook YAML through plugin loader, `test_requests.sh` in CI, docstring field-name lint) catch the next round of drift automatically.
+2. **Bug 70** — dead `/prov/graph` URL in `test_requests.sh` output. One-line fix after Harness 2 is in place (CI run would flag it).
+3. **Duplication D4 + D22** — `emit_audit` boilerplate. High frequency (~15 sites), mechanical refactor.
+4. **Bug 63** — 404-before-access-check enumeration. Security but not urgent.
