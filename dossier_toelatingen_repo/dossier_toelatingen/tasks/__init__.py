@@ -128,6 +128,32 @@ async def move_bijlagen_to_permanent(context: ActivityContext):
     import os
     file_service_url = os.environ.get("FILE_SERVICE_URL", "http://localhost:8001")
 
+    # Look up the agent attributed to the triggering activity. The
+    # file_service uses this to reject cross-user attach attempts:
+    # if Bob's dienAanvraagIn references a file_id Alice uploaded,
+    # the temp metadata will say 'uploaded_by: alice' but we'll be
+    # passing 'expected_uploader_user_id: bob', and the move is
+    # rejected with 403 before bytes cross dossier boundaries.
+    #
+    # wasAssociatedWith is a 1:many edge in principle, but in this
+    # codebase every activity today has exactly one AssociationRow
+    # (one caller, one role). Take the first row's agent_id — if
+    # the schema ever grows multi-association activities, this
+    # check would need to reject on "any association's agent_id
+    # mismatches" rather than "the first row's agent_id mismatches".
+    from dossier_engine.db.models import AssociationRow
+    from sqlalchemy import select
+    expected_uploader = ""
+    if context.triggering_activity_id is not None:
+        result = await context.repo.session.execute(
+            select(AssociationRow.agent_id)
+            .where(AssociationRow.activity_id == context.triggering_activity_id)
+            .limit(1)
+        )
+        row = result.first()
+        if row is not None:
+            expected_uploader = row[0] or ""
+
     import aiohttp
     async with aiohttp.ClientSession() as session:
         for bijlage in bijlagen:
@@ -139,10 +165,21 @@ async def move_bijlagen_to_permanent(context: ActivityContext):
             try:
                 async with session.post(
                     f"{file_service_url}/internal/move",
-                    params={"file_id": fid, "dossier_id": dossier_id},
+                    params={
+                        "file_id": fid,
+                        "dossier_id": dossier_id,
+                        "expected_uploader_user_id": expected_uploader,
+                    },
                 ) as resp:
                     if resp.status == 200:
                         logger.info(f"[TASK] Moved bijlage {fid} → {dossier_id}/bijlagen/")
+                    elif resp.status == 403:
+                        error = await resp.text()
+                        logger.warning(
+                            f"[TASK] Refused to move bijlage {fid} — "
+                            f"uploader mismatch (activity attributed to "
+                            f"{expected_uploader!r}): {error}"
+                        )
                     else:
                         error = await resp.text()
                         logger.warning(f"[TASK] Failed to move bijlage {fid}: {error}")

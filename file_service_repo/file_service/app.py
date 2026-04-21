@@ -12,6 +12,7 @@ Usage:
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 from pathlib import Path
@@ -133,7 +134,6 @@ async def upload_file(
 
     # Store metadata
     meta_path = temp_dir / f"{file_id}.meta"
-    import json
     meta = {
         "filename": file.filename or file_id,
         "content_type": file.content_type or "application/octet-stream",
@@ -182,28 +182,25 @@ async def download_file(
 
     root = get_storage_root()
 
-    # Try permanent location first, then temp
-    permanent_path = root / dossier_id / "bijlagen" / file_id
-    temp_path = root / "temp" / file_id
-
-    if permanent_path.exists():
-        file_path = permanent_path
-    elif temp_path.exists():
-        file_path = temp_path
-    else:
+    # Permanent location only. Files in temp belong to an upload
+    # in-flight; they're not yet attached to a dossier and must not
+    # be downloadable until the move task has run. Removing the
+    # previous temp-fallback closes Bug 44 (cross-tenant exfiltration
+    # via temp) — the move task is the single legitimate reader of
+    # temp, and it runs as systeemgebruiker with per-file provenance.
+    file_path = root / dossier_id / "bijlagen" / file_id
+    if not file_path.exists():
         raise HTTPException(404, detail="File not found")
 
-    # Read metadata for filename and content_type
-    import json
+    # Read metadata for filename and content_type. Only the permanent
+    # location's .meta is consulted — temp metadata is irrelevant
+    # here (we no longer serve from temp) and reading it would be a
+    # second way to leak the uploader_user_id across tenants.
     meta = {}
-    for meta_candidate in [
-        permanent_path.parent / f"{file_id}.meta",
-        root / "temp" / f"{file_id}.meta",
-    ]:
-        if meta_candidate.exists():
-            with open(meta_candidate) as f:
-                meta = json.load(f)
-            break
+    meta_path = file_path.parent / f"{file_id}.meta"
+    if meta_path.exists():
+        with open(meta_path) as f:
+            meta = json.load(f)
 
     return FileResponse(
         path=str(file_path),
@@ -222,6 +219,20 @@ async def download_file(
 async def move_file(
     file_id: str = Query(...),
     dossier_id: str = Query(...),
+    expected_uploader_user_id: str = Query(
+        "",
+        description=(
+            "If set, the move is rejected with 403 unless the file's "
+            "temp metadata reports this user as the uploader. Closes "
+            "the cross-tenant attach variant of Bug 47: without this "
+            "check, Bob could reference Alice's in-flight file_id in "
+            "his own activity and have the worker (running as "
+            "systeemgebruiker) obediently copy Alice's bytes into "
+            "Bob's dossier. Worker passes the scheduling activity's "
+            "attributing agent here. Empty = skip the check for "
+            "back-compat paths that don't know the user yet."
+        ),
+    ),
 ):
     """Move file from temp to permanent dossier location.
     Internal endpoint — should only be accessible from the worker on the internal network.
@@ -236,6 +247,30 @@ async def move_file(
         if permanent_path.exists():
             return {"moved": True, "already_permanent": True}
         raise HTTPException(404, detail="File not found in temp or permanent storage")
+
+    # Uploader consistency check. Reads the temp .meta (written at
+    # upload time) and compares its `uploaded_by` against the
+    # expected uploader. Catches the attach-someone-else's-upload
+    # attack at the point it would otherwise succeed — before any
+    # bytes move across dossier boundaries.
+    if expected_uploader_user_id and temp_meta.exists():
+        try:
+            with open(temp_meta) as f:
+                meta = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            meta = {}
+        actual_uploader = meta.get("uploaded_by", "")
+        if actual_uploader and actual_uploader != expected_uploader_user_id:
+            raise HTTPException(
+                403,
+                detail=(
+                    f"Uploader mismatch: file {file_id} was uploaded by "
+                    f"'{actual_uploader}', but the activity attempting "
+                    f"to attach it is attributed to "
+                    f"'{expected_uploader_user_id}'. Cross-user attach "
+                    f"is not permitted."
+                ),
+            )
 
     # Create permanent directory
     perm_dir = root / dossier_id / "bijlagen"

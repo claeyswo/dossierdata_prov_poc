@@ -177,14 +177,38 @@ class TestUpload:
 
 class TestDownload:
 
-    async def test_valid_download_after_upload(self, file_client):
-        """Upload a file, then download it with a valid download
-        token. The response should return the file bytes."""
+    async def test_valid_download_after_upload_and_move(self, file_client):
+        """Upload a file, move it to a dossier's permanent location,
+        then download it with a valid download token for that
+        dossier. The response should return the file bytes.
+
+        Updated from the pre-Bug-44-fix behavior: downloads from
+        temp are no longer served. The realistic flow is
+        upload → /internal/move → download, which mirrors what the
+        engine + worker do in production."""
         fid = str(uuid4())
+        did = str(uuid4())
         await _upload(file_client, fid, b"download me")
 
-        token = _sign(fid, "download")
-        params = _qs(token)
+        # Move to permanent before attempting download.
+        move_r = await file_client.post(
+            "/internal/move",
+            params={"file_id": fid, "dossier_id": did},
+        )
+        assert move_r.status_code == 200
+
+        # Sign a download token for this specific dossier_id so the
+        # signature validates against the same triple we'll query.
+        from dossier_common.signing import sign_token, token_to_query_string
+        token = sign_token(
+            file_id=fid, action="download",
+            signing_key=SIGNING_KEY, user_id="u1",
+            dossier_id=did,
+        )
+        params = dict(
+            pair.split("=", 1)
+            for pair in token_to_query_string(token).split("&")
+        )
         r = await file_client.get(f"/download/{fid}", params=params)
         assert r.status_code == 200
         assert r.content == b"download me"
@@ -271,3 +295,227 @@ class TestInternalMove:
             params={"file_id": str(uuid4()), "dossier_id": str(uuid4())},
         )
         assert r.status_code == 404
+
+
+# --------------------------------------------------------------------
+# Bug 44 fix — download no longer falls back to temp
+# Bug 47 mitigation — /internal/move enforces uploader consistency
+# --------------------------------------------------------------------
+#
+# These tests pin down two security-relevant behaviors that were
+# added together:
+#
+# 1. The download endpoint no longer serves files from temp. Once a
+#    legitimate file_id leaks out of its tenant's boundary (via a
+#    log line, a buggy sibling endpoint, a Sentry event), the old
+#    code's temp-fallback allowed any user with a valid download
+#    token for any dossier to retrieve that file by naming its
+#    file_id in the URL. Removing the fallback forces the retrieval
+#    path through the permanent location — which is dossier-scoped
+#    on disk, closing the cross-tenant exfiltration path.
+#
+# 2. The /internal/move endpoint now accepts an optional
+#    expected_uploader_user_id and rejects with 403 when the file's
+#    temp metadata reports a different uploader. Combined with the
+#    worker wiring the triggering activity's attributed agent into
+#    that parameter, this closes the attach-someone-else's-upload
+#    variant: Bob can't reference Alice's in-flight file_id in his
+#    own dienAanvraagIn and have the worker cheerfully copy Alice's
+#    bytes into Bob's dossier.
+
+
+class TestDownloadNoLongerFallsBackToTemp:
+
+    async def test_download_before_move_returns_404(self, file_client):
+        """Upload a file. Do NOT call /internal/move. Request
+        download with a valid token. The old code would fall back
+        to temp and return the bytes; the new code must 404.
+
+        This is the primary defensive behavior: a file in temp is
+        an upload-in-flight, not yet attached to any dossier, and
+        must not be downloadable by its (dossier_id, file_id) token
+        pair until the move has placed it in the permanent
+        location."""
+        fid = str(uuid4())
+        did = str(uuid4())
+        await _upload(file_client, fid, b"should not be downloadable from temp")
+
+        # Sign a download token for the target dossier — the
+        # attacker here has a legitimate token pair for SOME
+        # dossier, and is testing whether the file_service will
+        # serve a temp-located file_id against that dossier's
+        # scope. Pre-Bug-44-fix: yes. Post-fix: 404.
+        from dossier_common.signing import sign_token, token_to_query_string
+        token = sign_token(
+            file_id=fid, action="download",
+            signing_key=SIGNING_KEY, user_id="u1",
+            dossier_id=did,
+        )
+        params = dict(
+            pair.split("=", 1)
+            for pair in token_to_query_string(token).split("&")
+        )
+
+        r = await file_client.get(f"/download/{fid}", params=params)
+        assert r.status_code == 404, (
+            f"expected 404 (no temp fallback), got {r.status_code}: "
+            f"{r.text}"
+        )
+
+    async def test_download_succeeds_after_move(self, file_client):
+        """Happy path: upload, move, then download → 200. Confirms
+        the fix doesn't break the normal flow."""
+        fid = str(uuid4())
+        did = str(uuid4())
+        await _upload(file_client, fid, b"downloadable after move")
+
+        move_r = await file_client.post(
+            "/internal/move",
+            params={"file_id": fid, "dossier_id": did},
+        )
+        assert move_r.status_code == 200
+
+        token = _sign(fid, "download", user_id="u1")
+        params = _qs(token)
+        # Re-sign with the correct dossier_id (the one we just
+        # moved into) so the signature matches.
+        from dossier_common.signing import sign_token
+        correct_token = sign_token(
+            file_id=fid, action="download",
+            signing_key=SIGNING_KEY, user_id="u1",
+            dossier_id=did,
+        )
+        from dossier_common.signing import token_to_query_string
+        correct_params = dict(
+            pair.split("=", 1)
+            for pair in token_to_query_string(correct_token).split("&")
+        )
+
+        r = await file_client.get(f"/download/{fid}", params=correct_params)
+        assert r.status_code == 200
+        assert r.content == b"downloadable after move"
+
+
+class TestMoveRejectsCrossUserAttach:
+
+    async def test_move_rejects_when_expected_uploader_mismatches(
+        self, file_client,
+    ):
+        """Alice uploads. Worker calls /internal/move with
+        expected_uploader_user_id=bob (simulating Bob's activity
+        trying to attach Alice's file). The file_service reads the
+        temp meta, sees uploaded_by=alice, rejects with 403.
+
+        This is the core cross-user attach defense."""
+        fid = str(uuid4())
+        did = str(uuid4())
+        # Sign the upload token as alice — that's what the file
+        # service stores as uploaded_by in the .meta file.
+        from dossier_common.signing import sign_token, token_to_query_string
+        import io
+        alice_token = sign_token(
+            file_id=fid, action="upload",
+            signing_key=SIGNING_KEY, user_id="alice",
+        )
+        alice_params = dict(
+            pair.split("=", 1)
+            for pair in token_to_query_string(alice_token).split("&")
+        )
+        await file_client.put(
+            f"/upload/{fid}",
+            params=alice_params,
+            files={"file": ("a.txt", io.BytesIO(b"alice's bytes"), "text/plain")},
+        )
+
+        # Worker attempts the move on behalf of Bob.
+        r = await file_client.post(
+            "/internal/move",
+            params={
+                "file_id": fid,
+                "dossier_id": did,
+                "expected_uploader_user_id": "bob",
+            },
+        )
+        assert r.status_code == 403
+        body = r.json()
+        assert "uploader mismatch" in body["detail"].lower()
+        assert "alice" in body["detail"]
+        assert "bob" in body["detail"]
+
+    async def test_move_succeeds_when_expected_uploader_matches(
+        self, file_client,
+    ):
+        """Alice uploads, worker moves with
+        expected_uploader_user_id=alice → 200. Confirms the check
+        doesn't reject the legitimate same-user path."""
+        fid = str(uuid4())
+        did = str(uuid4())
+        from dossier_common.signing import sign_token, token_to_query_string
+        import io
+        alice_token = sign_token(
+            file_id=fid, action="upload",
+            signing_key=SIGNING_KEY, user_id="alice",
+        )
+        alice_params = dict(
+            pair.split("=", 1)
+            for pair in token_to_query_string(alice_token).split("&")
+        )
+        await file_client.put(
+            f"/upload/{fid}",
+            params=alice_params,
+            files={"file": ("a.txt", io.BytesIO(b"alice's bytes"), "text/plain")},
+        )
+
+        r = await file_client.post(
+            "/internal/move",
+            params={
+                "file_id": fid,
+                "dossier_id": did,
+                "expected_uploader_user_id": "alice",
+            },
+        )
+        assert r.status_code == 200
+        assert r.json()["moved"] is True
+
+    async def test_move_allows_missing_expected_uploader_for_backcompat(
+        self, file_client,
+    ):
+        """When expected_uploader_user_id is omitted (empty string),
+        the check is skipped — preserves back-compat for any caller
+        that hasn't been updated to pass it yet. The toelatingen
+        worker DOES pass it; this path exists so a future caller
+        that genuinely doesn't know the user (e.g. an admin
+        bulk-move tool) isn't broken."""
+        fid = str(uuid4())
+        did = str(uuid4())
+        await _upload(file_client, fid, b"data")  # uploaded_by = u1 (the default)
+
+        # No expected_uploader_user_id passed.
+        r = await file_client.post(
+            "/internal/move",
+            params={"file_id": fid, "dossier_id": did},
+        )
+        assert r.status_code == 200
+
+    async def test_move_allows_when_meta_missing(self, file_client, tmp_path):
+        """A file in temp with no .meta file (legacy data, manual
+        placement, edge case) skips the uploader check rather than
+        erroring. The check is opportunistic: if we can't determine
+        the uploader, we fall back to the old permissive behavior
+        rather than blocking a legitimate operation."""
+        # Put a file directly in temp with no .meta companion.
+        fid = str(uuid4())
+        did = str(uuid4())
+        temp_dir = tmp_path / "storage" / "temp"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        (temp_dir / fid).write_bytes(b"legacy orphan")
+
+        r = await file_client.post(
+            "/internal/move",
+            params={
+                "file_id": fid,
+                "dossier_id": did,
+                "expected_uploader_user_id": "anybody",
+            },
+        )
+        assert r.status_code == 200
