@@ -70,6 +70,30 @@ The worker does NOT run migrations. It only connects to the database
 and expects the schema to already exist. Always start the API before
 the worker (or run `alembic upgrade head` manually first).
 
+### Migrations are append-only
+
+**Never edit a migration file that has ever been applied to a
+deployed environment.** Alembic tracks which revisions have run
+by hash in the `alembic_version` table. It does not compare
+content. If you mutate the body of an existing migration, the
+mutated form runs on fresh installs while older deployments —
+which already recorded the pre-mutation revision as "done" — will
+never re-run it. The result is two deployments with the same
+revision marker but divergent schemas, and the drift is invisible
+until something queries a column that exists in one install but
+not the other.
+
+If the schema needs to change, add a *new* migration file with a
+new revision ID. The `scripts/check_migrations_append_only.py`
+pre-commit guard enforces this: it rejects any diff that modifies
+or deletes an existing file under `alembic/versions/`.
+
+Before the first production deploy, this rule is relaxed — you
+can consolidate or refactor migrations freely because no
+`alembic_version` row exists yet in any deployment. After the
+first deploy, it's frozen. Treat that transition as a commitment
+to the current migration history.
+
 ### Manual migration commands
 
 ```bash

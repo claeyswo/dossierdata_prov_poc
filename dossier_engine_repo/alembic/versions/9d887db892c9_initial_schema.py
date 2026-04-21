@@ -25,6 +25,7 @@ def upgrade() -> None:
     sa.Column('id', sa.Text(), nullable=False),
     sa.Column('type', sa.Text(), nullable=False),
     sa.Column('name', sa.Text(), nullable=True),
+    sa.Column('uri', sa.Text(), nullable=True),
     sa.Column('properties', postgresql.JSONB(astext_type=sa.Text()), nullable=True),
     sa.Column('created_at', sa.DateTime(timezone=True), nullable=True),
     sa.Column('updated_at', sa.DateTime(timezone=True), nullable=True),
