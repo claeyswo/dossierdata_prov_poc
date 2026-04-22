@@ -846,3 +846,323 @@ class TestConditionFnValidation:
         msg = str(exc_info.value)
         # The known names should appear in the message, sorted.
         assert "fn_a" in msg and "fn_b" in msg
+
+
+class TestRelationDeclarationsValidation:
+    """Bug 78 (Round 26): ``validate_relation_declarations`` enforces
+    the strict relation-type contract — workflow-level declaration
+    with mandatory ``kind``, activity-level reference-by-name only,
+    no Style-3-by-type fallback. Each test below names the rule it
+    pins; paranoia-check discipline (Round 25) applies — each rule
+    must go red if the corresponding check is removed from the
+    validator.
+
+    Tests are organised by rule:
+      * Workflow-level: type required, kind required + valid, from_
+        types/to_types domain-only, unknown keys rejected.
+      * Activity-level: type required + must resolve, forbidden
+        workflow-scope keys rejected, unknown keys rejected,
+        validator/validators mutex, validators dict shape, process_
+        control restrictions.
+    """
+
+    # --- Workflow-level rules ---
+
+    def test_workflow_valid_shape_passes(self):
+        """Positive control: a well-formed workflow passes silently.
+        Covers both kinds, the optional from_types/to_types on domain
+        relations, and the activity-level reference-only pattern."""
+        from dossier_engine.plugin import validate_relation_declarations
+        validate_relation_declarations({
+            "relations": [
+                {"type": "oe:neemtAkteVan", "kind": "process_control",
+                 "description": "ack stale version"},
+                {"type": "oe:betreft", "kind": "domain",
+                 "from_types": ["entity"], "to_types": ["external_uri"]},
+                {"type": "oe:free", "kind": "domain"},  # no from_/to_types = any
+            ],
+            "activities": [
+                {"name": "submitAanvraag", "relations": [
+                    {"type": "oe:neemtAkteVan",
+                     "validator": "validate_ack"},
+                ]},
+                {"name": "bewerkRel", "relations": [
+                    {"type": "oe:betreft", "operations": ["add", "remove"],
+                     "validators": {"add": "add_fn", "remove": "rm_fn"}},
+                ]},
+            ],
+        })
+
+    def test_workflow_relation_missing_type_rejected(self):
+        from dossier_engine.plugin import validate_relation_declarations
+        with pytest.raises(ValueError, match="missing `type:`"):
+            validate_relation_declarations({
+                "relations": [{"kind": "domain"}],
+            })
+
+    def test_workflow_relation_missing_kind_rejected(self):
+        """The root cause of Bug 78 — ``kind`` declared optional
+        previously meant dispatch guessed from request shape and
+        ``_relation_kind`` became dead code. Now required."""
+        from dossier_engine.plugin import validate_relation_declarations
+        with pytest.raises(ValueError, match="kind:.*required"):
+            validate_relation_declarations({
+                "relations": [{"type": "oe:foo"}],
+            })
+
+    def test_workflow_relation_invalid_kind_rejected(self):
+        from dossier_engine.plugin import validate_relation_declarations
+        with pytest.raises(ValueError, match="must be one of"):
+            validate_relation_declarations({
+                "relations": [{"type": "oe:foo", "kind": "nonsense"}],
+            })
+
+    def test_workflow_from_types_on_process_control_rejected(self):
+        """``from_types``/``to_types`` are domain-only. Process-
+        control relations are activity→entity, not entity→entity,
+        so ref-type constraints don't apply."""
+        from dossier_engine.plugin import validate_relation_declarations
+        with pytest.raises(ValueError, match="only legal on `kind: domain`"):
+            validate_relation_declarations({
+                "relations": [{
+                    "type": "oe:foo", "kind": "process_control",
+                    "from_types": ["entity"],
+                }],
+            })
+
+    def test_workflow_to_types_on_process_control_rejected(self):
+        from dossier_engine.plugin import validate_relation_declarations
+        with pytest.raises(ValueError, match="only legal on `kind: domain`"):
+            validate_relation_declarations({
+                "relations": [{
+                    "type": "oe:foo", "kind": "process_control",
+                    "to_types": ["external_uri"],
+                }],
+            })
+
+    def test_workflow_unknown_key_rejected(self):
+        """Typos in workflow-level declarations fail fast. This is
+        the prevention for the ``_relation_kind``-style dead code —
+        a field that exists but isn't wired up gets rejected instead
+        of silently ignored."""
+        from dossier_engine.plugin import validate_relation_declarations
+        with pytest.raises(ValueError, match="unknown key"):
+            validate_relation_declarations({
+                "relations": [{
+                    "type": "oe:foo", "kind": "domain",
+                    "typo_field": "oops",
+                }],
+            })
+
+    def test_workflow_relation_not_dict_rejected(self):
+        from dossier_engine.plugin import validate_relation_declarations
+        with pytest.raises(ValueError, match="must be dicts"):
+            validate_relation_declarations({
+                "relations": ["oe:foo"],
+            })
+
+    def test_no_relations_section_ok(self):
+        """A workflow without a ``relations:`` block is valid —
+        plugins that don't use relations at all should work."""
+        from dossier_engine.plugin import validate_relation_declarations
+        validate_relation_declarations({})
+        validate_relation_declarations({"relations": []})
+        validate_relation_declarations({"activities": []})
+
+    # --- Activity-level rules ---
+
+    def test_activity_missing_type_rejected(self):
+        from dossier_engine.plugin import validate_relation_declarations
+        with pytest.raises(ValueError, match="missing `type:`"):
+            validate_relation_declarations({
+                "relations": [{"type": "oe:foo", "kind": "domain"}],
+                "activities": [{"name": "a", "relations": [{}]}],
+            })
+
+    def test_activity_references_undeclared_type_rejected(self):
+        """Activity can only reference types declared at workflow
+        level. This is the "single source of truth" part of option C."""
+        from dossier_engine.plugin import validate_relation_declarations
+        with pytest.raises(ValueError, match="not declared at workflow level"):
+            validate_relation_declarations({
+                "relations": [{"type": "oe:foo", "kind": "domain"}],
+                "activities": [{"name": "a", "relations": [
+                    {"type": "oe:bar"},  # not declared
+                ]}],
+            })
+
+    def test_activity_kind_field_rejected(self):
+        """Activity-level ``kind:`` is forbidden — the workflow-level
+        declaration is the single source of truth (option C in the
+        Round 26 design discussion)."""
+        from dossier_engine.plugin import validate_relation_declarations
+        with pytest.raises(ValueError, match="workflow level only"):
+            validate_relation_declarations({
+                "relations": [{"type": "oe:foo", "kind": "domain"}],
+                "activities": [{"name": "a", "relations": [
+                    {"type": "oe:foo", "kind": "domain"},  # redundant
+                ]}],
+            })
+
+    def test_activity_from_types_rejected(self):
+        from dossier_engine.plugin import validate_relation_declarations
+        with pytest.raises(ValueError, match="workflow level only"):
+            validate_relation_declarations({
+                "relations": [{"type": "oe:foo", "kind": "domain"}],
+                "activities": [{"name": "a", "relations": [
+                    {"type": "oe:foo", "from_types": ["entity"]},
+                ]}],
+            })
+
+    def test_activity_description_rejected(self):
+        from dossier_engine.plugin import validate_relation_declarations
+        with pytest.raises(ValueError, match="workflow level only"):
+            validate_relation_declarations({
+                "relations": [{"type": "oe:foo", "kind": "domain"}],
+                "activities": [{"name": "a", "relations": [
+                    {"type": "oe:foo", "description": "x"},
+                ]}],
+            })
+
+    def test_activity_unknown_key_rejected(self):
+        from dossier_engine.plugin import validate_relation_declarations
+        with pytest.raises(ValueError, match="unknown key"):
+            validate_relation_declarations({
+                "relations": [{"type": "oe:foo", "kind": "domain"}],
+                "activities": [{"name": "a", "relations": [
+                    {"type": "oe:foo", "typo_field": 1},
+                ]}],
+            })
+
+    def test_activity_validator_and_validators_mutex(self):
+        """Can't declare both ``validator:`` (single-string) and
+        ``validators:`` (dict) on the same relation — one or the
+        other, never both."""
+        from dossier_engine.plugin import validate_relation_declarations
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            validate_relation_declarations({
+                "relations": [{"type": "oe:foo", "kind": "domain"}],
+                "activities": [{"name": "a", "relations": [{
+                    "type": "oe:foo",
+                    "validator": "single_fn",
+                    "validators": {"add": "a", "remove": "r"},
+                }]}],
+            })
+
+    def test_activity_validators_partial_dict_rejected(self):
+        """``validators:`` dict must have exactly ``{add, remove}``.
+        Partial dicts (only ``add:`` or only ``remove:``) rejected —
+        the explicit pairing is part of the new contract (use
+        ``validator:`` single-string if you only need one)."""
+        from dossier_engine.plugin import validate_relation_declarations
+        with pytest.raises(ValueError, match=r"exactly `\{add, remove\}`"):
+            validate_relation_declarations({
+                "relations": [{"type": "oe:foo", "kind": "domain"}],
+                "activities": [{"name": "a", "relations": [{
+                    "type": "oe:foo",
+                    "validators": {"add": "a"},  # missing remove
+                }]}],
+            })
+
+    def test_activity_validators_not_dict_rejected(self):
+        from dossier_engine.plugin import validate_relation_declarations
+        with pytest.raises(ValueError, match="must be a dict"):
+            validate_relation_declarations({
+                "relations": [{"type": "oe:foo", "kind": "domain"}],
+                "activities": [{"name": "a", "relations": [{
+                    "type": "oe:foo",
+                    "validators": "not_a_dict",
+                }]}],
+            })
+
+    def test_activity_validators_dict_on_process_control_rejected(self):
+        """process_control relations have no remove operation; the
+        ``validators: {add, remove}`` dict form makes no sense for
+        them. Single ``validator:`` string is the only legal form."""
+        from dossier_engine.plugin import validate_relation_declarations
+        with pytest.raises(ValueError, match="process_control"):
+            validate_relation_declarations({
+                "relations": [{"type": "oe:foo", "kind": "process_control"}],
+                "activities": [{"name": "a", "relations": [{
+                    "type": "oe:foo",
+                    "validators": {"add": "a", "remove": "r"},
+                }]}],
+            })
+
+    def test_activity_operations_remove_on_process_control_rejected(self):
+        from dossier_engine.plugin import validate_relation_declarations
+        with pytest.raises(ValueError,
+                           match="operations: \\[remove\\].*process_control"):
+            validate_relation_declarations({
+                "relations": [{"type": "oe:foo", "kind": "process_control"}],
+                "activities": [{"name": "a", "relations": [{
+                    "type": "oe:foo",
+                    "operations": ["add", "remove"],
+                }]}],
+            })
+
+    def test_activity_single_validator_on_process_control_ok(self):
+        """Positive: process_control allows ``validator:`` (single-
+        string) — the only legal validator form for that kind."""
+        from dossier_engine.plugin import validate_relation_declarations
+        validate_relation_declarations({
+            "relations": [{"type": "oe:foo", "kind": "process_control"}],
+            "activities": [{"name": "a", "relations": [
+                {"type": "oe:foo", "validator": "validate_foo"},
+            ]}],
+        })
+
+
+class TestRelationValidatorRegistrations:
+    """Bug 78 (Round 26): cross-registry check at plugin load —
+    ``plugin.relation_validators`` dict keys must be validator NAMES,
+    not relation type names. A key that matches a declared workflow-
+    level relation type name re-creates the Style-3 by-type-name
+    fallback that Bug 78 removed, just through naming convention
+    rather than through the removed fallback code path."""
+
+    def test_no_collision_ok(self):
+        """Positive: validator names that don't match any declared
+        type name are fine."""
+        from dossier_engine.plugin import (
+            validate_relation_validator_registrations, Plugin,
+        )
+        async def fn(**k): pass
+        plugin = Plugin(
+            name="t", workflow={"relations": [
+                {"type": "oe:betreft", "kind": "domain"},
+            ]},
+            entity_models={},
+            relation_validators={"validate_betreft": fn},
+        )
+        # No raise.
+        validate_relation_validator_registrations(plugin)
+
+    def test_key_collides_with_declared_type_rejected(self):
+        """The Style-3 hazard: a validator function registered under
+        the relation type name as its key. Looks innocent but revives
+        the removed by-type-name fallback through naming convention."""
+        from dossier_engine.plugin import (
+            validate_relation_validator_registrations, Plugin,
+        )
+        async def fn(**k): pass
+        plugin = Plugin(
+            name="t", workflow={"relations": [
+                {"type": "oe:betreft", "kind": "domain"},
+            ]},
+            entity_models={},
+            relation_validators={"oe:betreft": fn},  # collision!
+        )
+        with pytest.raises(ValueError, match="Style-3"):
+            validate_relation_validator_registrations(plugin)
+
+    def test_empty_dict_ok(self):
+        """A plugin with no relation validators at all passes."""
+        from dossier_engine.plugin import (
+            validate_relation_validator_registrations, Plugin,
+        )
+        plugin = Plugin(
+            name="t", workflow={"relations": []},
+            entity_models={}, relation_validators={},
+        )
+        validate_relation_validator_registrations(plugin)

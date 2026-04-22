@@ -13,13 +13,13 @@
 | ✅ Fixed & verified | 32 | Bugs 1, 2, 5, 6, 7, 12, 15, 16, 17, 30, 32, 44, 47, 53, 54, 55, 56, 57, 58, 62, 64, 65, 66, 68, 69, 70, 72 (coverage), 73, 74, 75, 76, 77 + Obs-2 (duplicate "external") |
 | 🔍 Investigated, not a bug | 1 | Bug 14 — cross-dossier refs are `type=external` rows |
 | 🛑 Deferred / accepted | 4 | Bug 31 (RRN acceptable), Bug 45 (MinIO migration), Bug 63 (403 is correct HTTP), Bug 71 (test activities, deploy-time removal) |
-| 🧪 Test suite | **800/800** passing | engine 735, toelatingen 26, file_service 21, common/signing 18 |
+| 🧪 Test suite | **828/828** passing | engine 763, toelatingen 26, file_service 21, common/signing 18 |
 | 🏃 `test_requests.sh` | **25/25 OK, exit 0, zero deadlocks, zero worker crashes** | D1–D9 green |
 | ✂️ Duplication closed | **D1, D2, D4, D22, D25** | Graph-loader consolidation + audit-emit wrapper |
 | 🧰 Harnesses installed | **3** | Guidebook YAML lint + phase-docstring lint + CI shell-spec wrapper |
 | 🤖 CI wired | **GitHub Actions** | `.github/workflows/ci.yml` — 4 jobs: pytest, shell-spec, doc-harnesses, migrations-append-only |
 | 🎯 Must-fix walk | **Complete** | All 17 fixable must-fix bugs closed; the 5 open rows are deferred/investigated by product decision (Bugs 14, 31, 45, 63, 71) |
-| 📦 Pending | 26 should-fix + 16 lower-priority bugs + 29 observations + 21 dups + 5 meta (partial relief) | See below |
+| 📦 Pending | 26 should-fix + 16 lower-priority bugs + 31 observations + 21 dups + 5 meta (partial relief) | See below |
 
 Note: Bug 75 was discovered *by* harness 2 on its first run — a new bug surfaced and fixed in the same session as the harness that surfaced it.
 
@@ -203,8 +203,10 @@ The structural sweep catalogued observations clustering into five themes. **Coun
 - **Obs 92 — `activity_view` mode complexity reduction.** 5 modes; hard mental load for small feature value. **Open.**
 - **Obs 93 — Pipeline-architecture-doc ActivityState hazard enforcement.** **Closed** in Round 8 (harness 3 enforces it).
 - **Obs 94 — Migration consistency checks.** Filed in Round 19 CI postmortem (was provisionally numbered "Obs-58" at the time, renumbered here to avoid collision with the new Obs 58). Round 8's append-only guard catches **mutation** of existing migration files (Bug 68's original shape) but not **stale leftover files** from consolidation work — stale versions pass the append-only check yet fail at `alembic upgrade head`. Candidate follow-ups: CI migration preflight job (runs `alembic upgrade head` against a fresh Postgres; fails the build on rc≠0), or static consistency check scanning for redundant DDL across migration files. **Open.**
+- **Obs 95 — Plugin surface: dotted-path resolution for all Callable registries.** Eight `dict[str, Callable]` fields on `Plugin` (`handlers`, `validators`, `task_handlers`, `status_resolvers`, `task_builders`, `side_effect_conditions`, `relation_validators`, `field_validators`) are built inside each plugin's `create_plugin()` function and keyed by short names the YAML references. Meanwhile `entity_models` and `entity_schemas` already do the cleaner thing: the YAML carries a dotted Python path (`model: dossier_toelatingen.entities.Aanvraag`) and `_import_dotted` resolves it at plugin load. The short-name-dict pattern has three footguns: (1) typos in YAML fail at runtime-of-first-lookup, not load time; (2) key-space collisions (Bug 66's "relation_validators uses both names and types as keys" issue); (3) no compile-time signal for what code runs when you read a YAML file — you have to find `create_plugin()` and trace the dict construction. Proposed migration: convert all eight registries to dotted-path resolution, mirroring the `entity_models` pattern. Blast radius is every plugin's `workflow.yaml` + every `create_plugin()`; natural fit for Cat 5 (plugin-surface tightening, already flagged as "needs design first" in Round 23 triage). Deferred from Round 26's Bug 78 work — that round will keep `relation_validators` as-is while killing the Style-3 lookup-by-type-name fallback; the broader migration awaits Cat 5's design discussion. **Open.**
+- **Obs 96 — Existing load-time validators never invoked in production.** Three validators defined in `plugin.py` — `validate_workflow_version_references`, `validate_side_effect_conditions`, `validate_side_effect_condition_fn_registrations` — are unit-tested thoroughly (see `test_refs_and_plugin.py`) but never called by `app.py::load_config_and_registry` at startup. Only `_validate_plugin_prefixes` runs in production. Found while wiring up Bug 78's new `validate_relation_declarations` / `validate_relation_validator_registrations` in Round 26 — the Bug 78 validators are now called from `load_config_and_registry`, but the pre-existing three are silently unused. Fix is one-turn trivial: add three `for plugin in registry.all_plugins(): validate_*(plugin.workflow, ...)` calls next to the Bug 78 block. Unclear whether the omission was deliberate (perhaps the validators were considered too strict for early plugin development?) or accidental drift — worth a checkpoint before wiring them, because the production toelatingen YAML might have latent shape violations that only surface when the validators actually run. **Open.**
 
-**Observation totals:** 45 catalogued, Obs 50-94. **14 closed** (Obs 61, 63, 66, 67, 68, 69, 70, 71, 72, 73, 74, 83, 90, 93), **1 partially addressed** (Obs 52), **1 deferred by product decision** (Obs 84), **29 open**. Two of the remaining open observations are explicitly redundant with bugs (Obs 80 ↔ Bug 25; Obs 81 ↔ Bug 38) — the bug tables are authoritative for those; obs entries are cross-references. Round 24 closed six observations in the Cat 1 doc-fix batch, three of which were redundant with Bugs 56/66/69; Round 25 closed Obs 66 alongside Bugs 53/54. Most of the non-redundant open ones are not acute — the pattern is "code works today but will decay without attention."
+**Observation totals:** 47 catalogued, Obs 50-96. **14 closed** (Obs 61, 63, 66, 67, 68, 69, 70, 71, 72, 73, 74, 83, 90, 93), **1 partially addressed** (Obs 52), **1 deferred by product decision** (Obs 84), **31 open**. Two of the open observations are explicitly redundant with bugs (Obs 80 ↔ Bug 25; Obs 81 ↔ Bug 38) — the bug tables are authoritative for those; obs entries are cross-references. Round 24 closed six observations in the Cat 1 doc-fix batch, three of which were redundant with Bugs 56/66/69; Round 25 closed Obs 66 alongside Bugs 53/54; Round 26 opened Obs 95 (plugin-surface dotted-path migration, deferred to Cat 5) and Obs 96 (unwired load-time validators). Most of the non-redundant open ones are not acute — the pattern is "code works today but will decay without attention."
 
 ## Duplication targets (27 catalogued, 6 closed)
 
@@ -895,3 +897,69 @@ This extends Round 21's practice ("test docstrings state what they pin AND what 
 ### Where to go next (post-Cat-4)
 
 Cat 3 (caching & perf batch) is my recommendation for Round 26 — Bug 38 + Obs 75/76/77/78, all sharing the "cache what's expensively re-computed" pattern. One coherent batch round.
+
+### Round 26 — Bug 78 (plugin relation-type contract; drive-by, not filed)
+
+User found this while reading Round 24's Bug 66 guidebook fix. The contract described in the guidebook said `relation_validators` was keyed by relation type name *or* validator name depending on which of three "styles" an activity used — and the engine resolved each. Reading the code in anger: the `kind:` field was declarable but never consulted at runtime (dispatch guessed kind from request shape); `_relation_kind` was dead code; Style-3 by-type-name fallback ran invisibly when Styles 1/2 didn't match. The guidebook was honestly describing a contract that shouldn't exist.
+
+Filed as a drive-by (no Bug 78 row in the bug tables — user explicitly chose "don't file" in the pre-round scope discussion); shipped as Round 26.
+
+**Design decisions recorded in-round** (before any code was written — Round 18's "articulate minimum change first" lesson applied):
+
+- **Activity-level `kind:` forbidden**, workflow-level mandatory. Types are declared *once* at workflow level; activities reference by name only (option C in the scope discussion). Alternative "activity-level OR workflow-level fallback" (option A) was rejected as it preserved the ambiguity that made `_relation_kind` dead code.
+- **`from_types`/`to_types` at workflow level only**, domain-only. Missing means "any ref type accepted" — explicit semantic for unconstrained relations.
+- **Style 3 removed.** Plugin-level `relation_validators[<relation_type>]` fallback is gone. Activities must declare validators explicitly via `validator:` (single-string) or `validators:` (dict).
+- **Process_control restrictions:** `validators:` dict form and `operations: [remove]` forbidden on process_control relations (they have no remove semantic). Single `validator:` string is the only legal form.
+- **Fail-loud, no deprecation phase.** ValueError at plugin load; 422 at dispatch. No transition period — the contract being invisible was part of the problem. Any misaligned plugin YAML surfaces immediately.
+- **Dotted-path migration deferred** to Cat 5 (Obs 95 filed). User pointed out mid-round that `relation_validators` being a `dict[str, Callable]` re-introduces the indirection Obs 95 describes — but converting all eight Callable registries (handlers, validators, task_handlers, status_resolvers, task_builders, side_effect_conditions, relation_validators, field_validators) to dotted paths is a much bigger refactor. Bug 78 keeps the dict shape but enforces keys can't collide with declared type names (closes the Style-3 hazard structurally, not just by convention).
+
+**Load-time validation shipped:**
+- `validate_relation_declarations(workflow)` — shape-checks workflow-level + activity-level declarations. Enforces every rule above with ValueError on first violation. 21 negative cases + 3 positive controls covered by tests.
+- `validate_relation_validator_registrations(plugin)` — cross-checks `plugin.relation_validators` dict keys against declared type names; rejects Style-3-by-naming-convention collisions.
+- Both wired into `app.py::load_config_and_registry` (new block between `_validate_plugin_prefixes` and `set_namespaces`).
+
+**Runtime shipped:**
+- `_parse_relations` dispatches by workflow-level `kind`, not request shape. Kind resolved once per item via the now-wired `_relation_kind` helper. Shape-vs-kind mismatch produces 422 with an error naming the declared kind and the expected fields.
+- `_parse_remove_relations` has a defense-in-depth kind check — remove must target a `kind: domain` relation. Load-time validator already forbids `operations: [remove]` on process_control activity declarations, but the runtime guard catches callers that bypass load-time (test fixtures or future refactors).
+- `_relation_kind` rewired — consults workflow-level only, raises `ValueError` defensively if called with an invalid/unknown kind (shouldn't happen post-Bug-78; the raise is the "load-time validator got bypassed" signal).
+- `_resolve_validator`'s Style-3 fallback removed. Docstring updated to document the removal and the 3-styles → 2-styles simplification.
+
+**Production migration (inside the round):**
+- 4 redundant `kind:` lines removed from `workflow.yaml` activity declarations (dienAanvraagIn + bewerkRelaties block).
+- **Toelatingen plugin's `RELATION_VALIDATORS` dict key renamed** from `"oe:neemtAkteVan"` (type name — Style-3-by-naming-convention) to `"validate_neemt_akte_van"` (function name).
+- 3 `workflow.yaml` activity-level references to `oe:neemtAkteVan` updated to add explicit `validator: "validate_neemt_akte_van"`.
+
+**Finding caught by the new validator at shell-spec time.** The first full shell-spec run after wiring in the load-time validators failed with `ValueError: Plugin 'toelatingen': relation_validators dict has key(s) ['oe:neemtAkteVan'] that match declared relation type name(s). This re-creates the Style-3 by-type-name fallback that Bug 78 removed.` This was the validator doing its job — the toelatingen plugin had been relying on Style-3-by-naming-convention. Exactly the shape the validator was written to detect; the fix was the rename described above. Took ~5 minutes to resolve, which is evidence the error message is actionable.
+
+**Tests — 28 new, with full paranoia coverage:**
+
+- `TestRelationDeclarationsValidation` (21 tests) + `TestRelationValidatorRegistrations` (3 tests) in `test_refs_and_plugin.py`. Paranoia check: stubbed both validators to no-op, 19 of 24 went red — healthy shape because the 5 green are positive controls (`test_workflow_valid_shape_passes`, `test_no_relations_section_ok`, `test_activity_single_validator_on_process_control_ok`, `test_no_collision_ok`, `test_empty_dict_ok`) asserting valid inputs pass.
+- `TestBug78KindDispatch` (4 tests) in `test_middle_phases.py`. Paranoia check: reverted `_parse_relations` to shape-guessing + dropped the remove-relations kind check — 3 of 4 went red (3 negative tests + 1 happy-path control correctly stayed green). Classic 3-of-4 red pattern established in Round 19 / reinforced in Rounds 20-21-25.
+- 6 existing `TestProcessRelations` tests rewritten to match new contract (4 were Style 3 — converted to Style 2 with renamed dict keys; all now declare `kind: "process_control"` at workflow level).
+- 8 activity-level `"kind": "domain"` lines scripted-removed from `TestProcessRemoveRelations` tests (they worked at runtime because tests bypass load-time validation, but they documented a forbidden shape — cleanup).
+
+**Verification — Round 26:**
+- Engine: **756 + 7 Sentry-skipped** (was 728 + 7; +28 from Bug 78 work: 24 load-time + 4 runtime).
+- Toelatingen: **26** (unchanged — the rename was in the plugin's `RELATION_VALIDATORS` dict, not covered by unit tests).
+- Common/file_service unchanged at 18 / 21.
+- **828 total.**
+- Shell spec green: 25 OK, D1-D9, zero tracebacks. The real validation of Bug 78's runtime changes — the shell spec exercises `oe:neemtAkteVan` through the full HTTP stack, so the rename + YAML updates needed to work end-to-end for this to pass.
+
+**Finding filed for a later round: Obs 96.** While wiring my new validators into `app.py`, noticed that the three pre-existing load-time validators (`validate_workflow_version_references`, `validate_side_effect_conditions`, `validate_side_effect_condition_fn_registrations`) are defined and unit-tested but never called in production. Only `_validate_plugin_prefixes` runs at startup. Unclear whether the omission was deliberate or accidental drift — worth a checkpoint before wiring them because the production YAML might have latent shape violations that only surface when they actually run. One-turn fix, but deserves its own round with production YAML review.
+
+**Totals after Round 26:** 32 bugs fixed (unchanged — Bug 78 was drive-by, not filed). Should-fix table unchanged at 26 open / 15 closed. Observations: Obs 95 + Obs 96 opened this round, total **47 catalogued / 31 open / 14 closed / 1 partial / 1 deferred**. Test suite grew 800 → 828.
+
+### Process lesson reinforced
+
+Three rounds in a row (24 / 25 / 26) the paranoia check has caught or shaped the work:
+- **Round 24** caught a formatting inconsistency in my own bookkeeping (`**Open**` vs `**Open.**`) that would have poisoned future scripted counts.
+- **Round 25** caught a weak test I'd shipped with a comment acknowledging it was weak. Downgraded to sanity test with honest documentation.
+- **Round 26** caught a real production bug (toelatingen's Style-3-by-naming-convention) at shell-spec time — the load-time validator I'd just written fired on real data and produced an actionable error.
+
+**Takeaway:** paranoia-check has shifted from "thing I remember to do" to "thing I'd feel nervous shipping without." Round 19's practice has matured into a habit. The shape of the paranoia check varies (revert-and-rerun, script-and-recount, cross-test against production data) — the constant is "before declaring done, make one last attempt to prove the fix doesn't work."
+
+### Where to go next
+
+Cat 3 (caching & perf batch) is my recommendation for Round 27 — Bug 38 + Obs 75/76/77/78, all sharing the "cache what's expensively re-computed" pattern. One coherent batch round.
+
+Cat 7 (test/deployment polish) now has a new candidate in Obs 96 — wiring up the three unwired load-time validators. Small enough to fold into a broader Cat 7 round but worth the checkpoint I mentioned.

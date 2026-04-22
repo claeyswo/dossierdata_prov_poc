@@ -85,11 +85,49 @@ def _allowed_operations(activity_def: dict, rel_type: str) -> set[str]:
 def _relation_kind(
     plugin: Plugin, activity_def: dict, rel_type: str,
 ) -> str:
-    """Determine the kind (process_control or domain) for a relation
-    type. Checks activity-level first, then workflow-level. Defaults
-    to process_control for backwards compatibility."""
-    decl = _relation_type_declaration(plugin, activity_def, rel_type)
-    return decl.get("kind", "process_control")
+    """Resolve a relation type's kind (``"domain"`` or
+    ``"process_control"``) from the workflow-level declaration.
+
+    Post-Bug-78 (Round 26): activity-level ``kind:`` is forbidden at
+    load time (the load-time validator fails the plugin registration
+    if any activity-level relation declaration includes it). Only
+    workflow-level declarations carry ``kind:``, and the load-time
+    validator guarantees every declared type has a valid kind.
+
+    Therefore this function consults the workflow-level ``relations:``
+    block only. Returns the kind string; raises ``KeyError`` if the
+    type isn't declared (shouldn't happen — the permission gate in
+    ``_parse_relations`` catches undeclared types before this runs,
+    and the load-time validator catches them at plugin load). The
+    raise is a defensive assertion, not an expected path.
+
+    Before Bug 78 this function existed but was never called —
+    dispatch guessed kind from request item shape, making the
+    ``kind:`` field effectively decorative. It is now the
+    authoritative dispatch key in ``_parse_relations``.
+    """
+    for e in plugin.workflow.get("relations", []) or []:
+        if isinstance(e, dict) and e.get("type") == rel_type:
+            kind = e.get("kind")
+            if kind not in ("domain", "process_control"):
+                # Load-time validator should have caught this — if we
+                # get here, either validation was bypassed or the
+                # workflow was mutated post-load. Raise loudly rather
+                # than silently defaulting.
+                raise ValueError(
+                    f"Workflow-level declaration for relation "
+                    f"{rel_type!r} has invalid kind={kind!r}. "
+                    f"Load-time validation should have caught this; "
+                    f"this indicates a validator bypass or a "
+                    f"post-load mutation."
+                )
+            return kind
+    raise KeyError(
+        f"Relation type {rel_type!r} not declared at workflow level. "
+        f"The permission gate in _parse_relations should have "
+        f"rejected this before dispatch; reaching _relation_kind "
+        f"means validation was bypassed."
+    )
 
 
 def _relation_type_declaration(
@@ -187,7 +225,17 @@ async def _parse_relations(
     state: ActivityState, allowed: set[str],
 ) -> None:
     """Walk ``relations``, validate, resolve, and route to either
-    process-control or domain state lists."""
+    process-control or domain state lists.
+
+    **Bug 78 (Round 26): dispatch is driven by the workflow-level
+    ``kind:`` declaration**, not by request-item shape. The request
+    item's shape (``entity`` vs ``from+to``) is validated against the
+    declared kind; mismatch is a 422 with an informative message
+    naming the type and its declared kind. Prior behaviour guessed
+    kind from shape, which meant a plugin author could declare
+    ``kind: domain`` and a client could silently get process-control
+    dispatch by sending the wrong shape — the ``kind:`` field was
+    effectively decorative."""
     for rel_item in state.relation_items:
         rel_type = rel_item.get("type")
         if not rel_type:
@@ -207,15 +255,49 @@ async def _parse_relations(
                 f"adding relations of type '{rel_type}'.",
             )
 
-        # Route by whether the item has from/to (domain) or entity
-        # (process-control). The request model already validated that
-        # exactly one of the two forms is present.
+        # Bug 78: resolve kind from the workflow-level declaration
+        # (single source of truth; load-time validator enforces it's
+        # always present and ∈ {domain, process_control}). Then check
+        # the request item's shape against the declared kind.
+        kind = _relation_kind(state.plugin, state.activity_def, rel_type)
         from_ref = rel_item.get("from") or rel_item.get("from_ref")
-        is_domain = from_ref is not None
+        has_entity = rel_item.get("entity") is not None
+        has_domain_shape = from_ref is not None
 
-        if is_domain:
+        if kind == "domain":
+            if has_entity:
+                raise ActivityError(
+                    422,
+                    f"Relation type {rel_type!r} is declared as "
+                    f"`kind: domain` (entity→entity semantic). The "
+                    f"request sent an `entity:` field (process-control "
+                    f"shape). Use `from:` + `to:` for domain relations."
+                )
+            if not has_domain_shape:
+                raise ActivityError(
+                    422,
+                    f"Relation type {rel_type!r} is declared as "
+                    f"`kind: domain`. The request item requires "
+                    f"`from:` + `to:` fields: {rel_item!r}"
+                )
             await _handle_domain_add(state, rel_item, rel_type, from_ref)
-        else:
+        else:  # process_control
+            if has_domain_shape:
+                raise ActivityError(
+                    422,
+                    f"Relation type {rel_type!r} is declared as "
+                    f"`kind: process_control` (activity→entity "
+                    f"semantic). The request sent `from:`/`to:` fields "
+                    f"(domain shape). Use `entity:` for process-"
+                    f"control relations."
+                )
+            if not has_entity:
+                raise ActivityError(
+                    422,
+                    f"Relation type {rel_type!r} is declared as "
+                    f"`kind: process_control`. The request item "
+                    f"requires an `entity:` field: {rel_item!r}"
+                )
             await _handle_process_control(state, rel_item, rel_type)
 
 
@@ -331,6 +413,25 @@ async def _parse_remove_relations(
                 f"{sorted(_allowed_operations(state.activity_def, rel_type))}",
             )
 
+        # Bug 78 defense-in-depth: remove operations are legal only on
+        # domain relations. Load-time validation forbids
+        # ``operations: [remove]`` on process_control activity
+        # declarations, so the permission gate above already catches
+        # the problem — but pinning the kind check here means a
+        # future regression (e.g. someone loosens the load-time
+        # validator) still fails loud rather than dispatching a
+        # remove against a process_control relation.
+        kind = _relation_kind(state.plugin, state.activity_def, rel_type)
+        if kind != "domain":
+            raise ActivityError(
+                422,
+                f"Relation type {rel_type!r} is declared as "
+                f"`kind: {kind}`. Remove operations are only legal "
+                f"on `kind: domain` relations (process_control "
+                f"relations are stateless annotations with no remove "
+                f"semantic)."
+            )
+
         # Validate ref kinds against declared from_types / to_types.
         decl = _relation_type_declaration(
             state.plugin, state.activity_def, rel_type,
@@ -359,26 +460,33 @@ def _resolve_validator(
 
     Lookup order:
     1. Activity-level YAML ``validators:`` dict with per-operation
-       keys (``add`` / ``remove``). This is the new style::
+       keys (``add`` and ``remove``). Domain relations only — load-
+       time validation (Bug 78) forbids this form on process_control
+       relations::
 
            relations:
              - type: "oe:betreft"
-               kind: domain
                validators:
                  add: "validate_betreft_target"
                  remove: "validate_betreft_removable"
 
-    2. Activity-level YAML ``validator:`` string (legacy shorthand,
-       fires for all operations)::
+    2. Activity-level YAML ``validator:`` string (single-validator
+       form, fires for all operations). Works for both kinds::
 
            relations:
-             - type: "oe:betreft"
-               validator: "validate_betreft_target"
+             - type: "oe:neemtAkteVan"
+               validator: "validate_neemtAkteVan"
 
-    3. Plugin-level ``relation_validators[rel_type]`` (the original
-       process-control pattern, fires for all operations).
+    Returns None if no validator is registered.
 
-    Returns None if no validator is registered at any level.
+    **Bug 78 (Round 26) removed Style 3** — the prior plugin-level
+    ``relation_validators[rel_type]`` fallback. Activities must now
+    declare the validator explicitly via style 1 or 2, or run without
+    validation. The load-time
+    ``validate_relation_validator_registrations`` rejects plugins
+    whose ``relation_validators`` dict uses a declared relation type
+    name as a key, to prevent Style 3 from being silently re-created
+    by convention.
     """
     decls = _relation_declarations(activity_def)
     decl = decls.get(rel_type, {})
@@ -399,8 +507,10 @@ def _resolve_validator(
         if fn:
             return fn
 
-    # Style 3: plugin-level by relation type name.
-    return plugin.relation_validators.get(rel_type)
+    # No validator declared for this type+operation — return None.
+    # The caller (``_dispatch_validators``) treats None as "skip
+    # validation," consistent with opt-in semantics.
+    return None
 
 
 async def _dispatch_validators(

@@ -764,7 +764,7 @@ Everything a plugin can register:
 | `status_resolvers` | `dict[str, Callable]` | Status resolver name → async function (split-style) |
 | `task_builders` | `dict[str, Callable]` | Task builder name → async function (split-style) |
 | `validators` | `dict[str, Callable]` | Validator name → async function |
-| `relation_validators` | `dict[str, Callable]` | Relation type **OR** named validator → async validator. See "Relation-validator keying" below for the three resolution styles. |
+| `relation_validators` | `dict[str, Callable]` | Validator name → async function. Dict **keys are validator names**, NOT relation type names — the engine rejects collisions at plugin load time. See "Declaring relations" and "Relation-validator keying" below. |
 | `field_validators` | `dict[str, Callable]` | Validator name → async function |
 | `task_handlers` | `dict[str, Callable]` | Task function name → async function |
 | `pre_commit_hooks` | `list[Callable]` | Strict hooks (can veto activity) |
@@ -775,51 +775,91 @@ Everything a plugin can register:
 
 Most plugins use only `entity_models`, `handlers`, and perhaps `task_handlers`. Everything else is opt-in for when you need it.
 
-### Relation-validator keying
+### Declaring relations
 
-The `relation_validators` dict looks simple in the table above, but the engine's resolver checks **three styles in priority order** when a relation of type `T` is being added/removed by an activity. Plugins may mix styles across activities; the first one that resolves wins.
+Relation types are declared **once at workflow level** with mandatory `kind`. Activities reference them by type name and may add an `operations:` list and a validator. The engine rejects misaligned declarations at plugin load — see "Load-time validation" below.
 
-**Style 1 — per-operation validators (activity-level, recommended):**
+**Workflow level** (the single source of truth):
+
+```yaml
+relations:
+  - type: "oe:neemtAkteVan"
+    kind: "process_control"
+    description: "Acknowledge a newer version the activity chose not to act on."
+
+  - type: "oe:betreft"
+    kind: "domain"
+    from_types: ["entity"]
+    to_types: ["external_uri"]
+    description: "Link an entity to the external object it concerns."
+```
+
+Required fields: `type`, `kind` (must be `"domain"` or `"process_control"`). Optional: `from_types`, `to_types` (domain only — omit both to accept any ref type), `description`.
+
+**Activity level** (reference by name; no redeclaration):
 
 ```yaml
 activities:
-  - name: oe:beslissen
+  - name: "bewerkRelaties"
     relations:
       - type: "oe:betreft"
-        kind: domain
+        operations: ["add", "remove"]
         validators:
           add: "validate_betreft_target"
           remove: "validate_betreft_removable"
+
+      - type: "oe:neemtAkteVan"
+        validator: "validate_neemt_akte_van"
 ```
 
-The `validators` block is a dict with `add` and/or `remove` keys. Each value is a **named validator** that must be registered in the plugin's `relation_validators` dict under that same name (`plugin.relation_validators["validate_betreft_target"]`). Different functions run for add vs remove operations — the usual case when add-side needs to verify the target exists and remove-side needs to verify nothing else depends on it.
+Allowed fields: `type` (required, must match a workflow-level declaration), `operations` (optional), and one of `validator:` (single-string) or `validators:` (dict with BOTH `add` and `remove`) — never both. The fields `kind`, `from_types`, `to_types`, `description` are **forbidden at activity level** — they live at workflow level only.
 
-**Style 2 — single validator string (activity-level, legacy shorthand):**
+**Kind semantics:**
+- `process_control` relations are activity→entity annotations (`{entity: "ref"}`). Stateless; no remove operation. `validators:` dict form and `operations: [remove]` are forbidden on process_control activity declarations.
+- `domain` relations are entity→entity edges (`{from: "ref", to: "ref"}`). Support both add and remove. `from_types`/`to_types` at workflow level constrain the ref shape of each side.
+
+**Dispatch is kind-driven.** The engine resolves `kind` from the workflow-level declaration and dispatches the request accordingly. If the request's shape doesn't match the declared kind (e.g. client sends `{entity: ...}` on a `kind: domain` relation), the engine returns **422** with an error identifying the declared kind and the expected fields. The `kind:` field is load-bearing, not documentation — don't get it wrong and expect the engine to guess from the payload.
+
+### Relation-validator keying
+
+`plugin.relation_validators` is a `dict[str, Callable]` mapping **validator name → async function**. The dict keys are validator *names* — they must not match any declared relation type name (the engine's load-time `validate_relation_validator_registrations` rejects collisions explicitly).
+
+Activity-level YAML references validators by name in one of two forms:
+
+**Style 1 — per-operation validators (domain relations only):**
 
 ```yaml
-activities:
-  - name: oe:beslissen
-    relations:
-      - type: "oe:betreft"
-        validator: "validate_betreft_target"
+relations:
+  - type: "oe:betreft"
+    operations: ["add", "remove"]
+    validators:
+      add: "validate_betreft_target"
+      remove: "validate_betreft_removable"
 ```
 
-Single `validator:` key on the declaration fires for all operations (both add and remove). Legacy; prefer Style 1 when add/remove need different checks.
+`validators:` is a dict with both `add` and `remove` keys required — partial dicts are rejected at load time. Use when add and remove need different logic (add checks the target exists; remove checks no downstream dependency). This form is forbidden on `kind: process_control` relations (they have no remove semantic).
 
-**Style 3 — plugin-level by relation type name (original, fallback):**
+**Style 2 — single validator string:**
 
-```python
-plugin.relation_validators = {
-    "oe:betreft": validate_betreft,
-}
+```yaml
+relations:
+  - type: "oe:neemtAkteVan"
+    validator: "validate_neemt_akte_van"
 ```
 
-If styles 1 and 2 don't register anything, the resolver falls back to looking up the **relation type itself** as the dict key. Predates activity-level declarations. Still honored for back-compat but doesn't support per-operation split.
+Single `validator:` key fires for all operations. Works for both kinds. Use when one function handles both add/remove (rare for domain) or when the relation is process_control (where `validator:` is the only legal form).
 
 **Resolution order** (from `engine/pipeline/relations.py::_resolve_validator`):
 1. Activity-level `validators.{add,remove}` → plugin named-validator lookup.
 2. Activity-level `validator:` string → plugin named-validator lookup.
-3. Plugin-level `relation_validators[<relation_type>]` direct lookup.
-4. None (validation skipped for this relation).
+3. None (validation skipped for this relation).
 
-Note the key-space ambiguity in Style 1/2 vs Style 3: the plugin's `relation_validators` dict is used for **both** named-validator lookups (Styles 1/2) *and* by-type lookups (Style 3). Don't register a validator function under a name that collides with a relation type — Style 3's fallback would pick it up for unrelated activities. Convention is to prefix names like `validate_` to avoid collision with `oe:` relation types.
+**What's gone:** the previous "Style 3" — plugin-level fallback that looked up `plugin.relation_validators[<relation_type>]` when no activity-level validator was declared — was removed. It silently ran for activities that didn't opt in, made the dispatch order non-obvious, and (with the dict key matching the type name) invited accidental cross-activity coupling. If an activity wants a validator, it declares one explicitly.
+
+### Load-time validation
+
+At plugin load, the engine runs two validators in sequence:
+- `validate_relation_declarations(workflow)` — shape-checks every workflow-level and activity-level relation declaration. Fails fast with ValueError on missing kind, invalid kind, domain-only fields used on process_control, activity-level kind/from_types/to_types/description, unknown keys, partial `validators:` dicts, and `validators:` dict or `operations: [remove]` on process_control.
+- `validate_relation_validator_registrations(plugin)` — cross-checks `plugin.relation_validators` dict keys against declared relation type names; rejects collisions.
+
+A plugin that violates the contract fails to load at startup rather than producing silent misdispatches at runtime. If your plugin currently works but produces a ValueError after upgrading past Bug 78, the error message names the rule broken and the offending declaration — fix the YAML and reload.

@@ -140,5 +140,11 @@ async def validate_neemt_akte_van(
 
 
 RELATION_VALIDATORS = {
-    "oe:neemtAkteVan": validate_neemt_akte_van,
+    # Bug 78 (Round 26): dict keys must be validator NAMES, not
+    # relation type names. The old key "oe:neemtAkteVan" collided with
+    # the declared relation type, re-creating Style-3 by-type-name
+    # lookup through naming convention. Workflow YAML references this
+    # explicitly via `validator: "validate_neemt_akte_van"` on each
+    # activity that uses oe:neemtAkteVan.
+    "validate_neemt_akte_van": validate_neemt_akte_van,
 }

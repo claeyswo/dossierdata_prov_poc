@@ -287,7 +287,6 @@ activities:
 
     relations:
       - type: "oe:betreft"
-        kind: "domain"
         operations: [add]
 
   - name: "bewerkAanvraag"
@@ -409,6 +408,7 @@ activities:
     side_effects: []
     relations:
       - type: "oe:neemtAkteVan"
+        validator: "validate_neemt_akte_van"
     tasks: []
 
   - name: "tekenBeslissing"
@@ -453,6 +453,7 @@ activities:
     side_effects: []
     relations:
       - type: "oe:neemtAkteVan"
+        validator: "validate_neemt_akte_van"
     tasks: []
 
   - name: "neemBeslissing"
@@ -500,6 +501,7 @@ activities:
     side_effects: []
     relations:
       - type: "oe:neemtAkteVan"
+        validator: "validate_neemt_akte_van"
     tasks:
       - kind: "recorded"
         function: "log_beslissing_genomen"
@@ -764,13 +766,10 @@ activities:
 
     relations:
       - type: "oe:betreft"
-        kind: "domain"
         operations: [add, remove]
       - type: "oe:valtOnder"
-        kind: "domain"
         operations: [add, remove]
       - type: "oe:gerelateerd_aan"
-        kind: "domain"
         operations: [add, remove]
 
     validators: []

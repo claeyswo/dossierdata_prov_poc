@@ -278,6 +278,21 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
     for plugin in registry.all_plugins():
         _validate_plugin_prefixes(plugin, ns_registry)
 
+    # Bug 78 (Round 26): relation-type contract validation. Enforces
+    # the "types declared once at workflow level with kind; activities
+    # reference by name only" model. Two passes:
+    #   1. Shape-check the workflow + activity YAML. Runs on the raw
+    #      workflow dict — no Plugin object needed.
+    #   2. Cross-check plugin.relation_validators dict keys against
+    #      declared relation type names (reject Style-3 collisions).
+    from .plugin import (
+        validate_relation_declarations,
+        validate_relation_validator_registrations,
+    )
+    for plugin in registry.all_plugins():
+        validate_relation_declarations(plugin.workflow)
+        validate_relation_validator_registrations(plugin)
+
     set_namespaces(ns_registry)
 
     app = FastAPI(

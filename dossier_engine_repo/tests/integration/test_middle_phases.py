@@ -400,7 +400,11 @@ class TestProcessRelations:
         assert state.validated_relations == []
 
     async def test_missing_type_field_rejected(self, repo):
-        plugin = _RelationPlugin(workflow_relations=[{"type": "oe:x"}])
+        plugin = _RelationPlugin(
+            workflow_relations=[
+                {"type": "oe:x", "kind": "process_control"},
+            ],
+        )
         state = _state(
             repo, plugin=plugin,
             activity_def={"name": "test"},
@@ -415,7 +419,9 @@ class TestProcessRelations:
         """Workflow allows `oe:permitted`, activity tries to use
         `oe:forbidden`. 422 with the allowed set in the message."""
         plugin = _RelationPlugin(
-            workflow_relations=[{"type": "oe:permitted"}],
+            workflow_relations=[
+                {"type": "oe:permitted", "kind": "process_control"},
+            ],
         )
         state = _state(
             repo, plugin=plugin,
@@ -439,7 +445,9 @@ class TestProcessRelations:
         check), so we use a workflow that allows the relation
         type."""
         plugin = _RelationPlugin(
-            workflow_relations=[{"type": "oe:references"}],
+            workflow_relations=[
+                {"type": "oe:references", "kind": "process_control"},
+            ],
         )
         state = _state(
             repo, plugin=plugin,
@@ -459,7 +467,9 @@ class TestProcessRelations:
         in the dossier. 422 — we can't create an edge to nothing."""
         await _bootstrap_dossier(repo)
         plugin = _RelationPlugin(
-            workflow_relations=[{"type": "oe:references"}],
+            workflow_relations=[
+                {"type": "oe:references", "kind": "process_control"},
+            ],
         )
         state = _state(
             repo, plugin=plugin,
@@ -481,7 +491,9 @@ class TestProcessRelations:
         boot = await _bootstrap_dossier(repo)
         eid, vid = await _seed_entity(repo, boot, "oe:aanvraag")
         plugin = _RelationPlugin(
-            workflow_relations=[{"type": "oe:references"}],
+            workflow_relations=[
+                {"type": "oe:references", "kind": "process_control"},
+            ],
         )
         ref = f"oe:aanvraag/{eid}@{vid}"
         state = _state(
@@ -499,8 +511,16 @@ class TestProcessRelations:
 
     async def test_activity_opt_in_triggers_validator(self, repo):
         """Activity's own `relations:` block opts into
-        `oe:references`. A validator is registered. The phase
-        should call the validator with the entries list."""
+        `oe:references` with an activity-level `validator:` string
+        (Style 2). A validator is registered by name in the plugin's
+        `relation_validators` dict. The phase should call the
+        validator with the entries list.
+
+        Bug 78 (Round 26): the dict key is the validator's NAME
+        (``validate_references``), not the relation type name —
+        Style-3 type-name lookups were removed. The load-time
+        validator enforces this at plugin load (the validator key
+        can't collide with any declared relation type name)."""
         boot = await _bootstrap_dossier(repo)
         eid, vid = await _seed_entity(repo, boot, "oe:aanvraag")
 
@@ -509,15 +529,20 @@ class TestProcessRelations:
             called.append(kwargs)
 
         plugin = _RelationPlugin(
-            workflow_relations=[{"type": "oe:references"}],
-            relation_validators={"oe:references": validator},
+            workflow_relations=[
+                {"type": "oe:references", "kind": "process_control"},
+            ],
+            relation_validators={"validate_references": validator},
         )
         ref = f"oe:aanvraag/{eid}@{vid}"
         state = _state(
             repo, plugin=plugin,
             activity_def={
                 "name": "test",
-                "relations": [{"type": "oe:references"}],  # opt-in
+                "relations": [
+                    {"type": "oe:references",
+                     "validator": "validate_references"},
+                ],
             },
             relation_items=[{"type": "oe:references", "entity": ref}],
         )
@@ -534,7 +559,9 @@ class TestProcessRelations:
         may send it. The activity does NOT opt into it (no
         `relations:` block on the activity itself). The validator
         is registered but must NOT be called — this is the
-        opt-in contract."""
+        opt-in contract. Post-Bug-78, the validator is registered
+        by name (Style 2); there's no Style-3 fallback that could
+        accidentally fire it on a non-opt-in activity."""
         boot = await _bootstrap_dossier(repo)
         eid, vid = await _seed_entity(repo, boot, "oe:aanvraag")
 
@@ -543,8 +570,10 @@ class TestProcessRelations:
             called.append(kwargs)
 
         plugin = _RelationPlugin(
-            workflow_relations=[{"type": "oe:references"}],
-            relation_validators={"oe:references": validator},
+            workflow_relations=[
+                {"type": "oe:references", "kind": "process_control"},
+            ],
+            relation_validators={"validate_references": validator},
         )
         ref = f"oe:aanvraag/{eid}@{vid}"
         state = _state(
@@ -582,8 +611,21 @@ class TestProcessRelations:
         This is either a feature (activities can add their own
         validators without workflow coordination) or a bug
         (workflow-wide permission is supposed to be the source of
-        truth). Not deciding here — just locking in today's
-        answer."""
+        truth). Not deciding here — just locking in today's answer.
+
+        Bug 78 (Round 26) note: this test bypasses load-time
+        validation (tests construct `_RelationPlugin` directly,
+        not via `create_app`), so the "activity opts into a type
+        not declared at workflow level" shape still works at
+        runtime. At plugin load the new validator WOULD reject
+        this — `validate_relation_declarations` requires the
+        activity's relation type to resolve to a workflow-level
+        declaration. So this test pins runtime behaviour that
+        would be prevented from existing in the first place, which
+        is a slightly weaker pin than before. Kept as-is to
+        preserve the behaviour documentation; a future
+        refactor that fixes the union-vs-intersection question
+        should also revisit this."""
         await _bootstrap_dossier(repo)
 
         called = []
@@ -592,13 +634,16 @@ class TestProcessRelations:
 
         plugin = _RelationPlugin(
             workflow_relations=[],  # workflow permits nothing
-            relation_validators={"oe:references": validator},
+            relation_validators={"validate_references": validator},
         )
         state = _state(
             repo, plugin=plugin,
             activity_def={
                 "name": "test",
-                "relations": [{"type": "oe:references"}],
+                "relations": [
+                    {"type": "oe:references",
+                     "validator": "validate_references"},
+                ],
             },
             relation_items=[],  # no entries sent
         )
@@ -631,6 +676,146 @@ class TestProcessRelations:
 # down and document the shape the validator receives.
 
 
+class TestBug78KindDispatch:
+    """Bug 78 (Round 26): runtime dispatch in ``_parse_relations`` is
+    driven by the workflow-level ``kind:`` declaration, not by the
+    request item's shape. Shape-vs-kind mismatch produces a 422 with
+    an informative error naming the declared kind and the received
+    shape.
+
+    Before the fix, dispatch guessed kind from the request shape
+    (``has entity:`` → process-control; ``has from+to:`` → domain).
+    That made the ``kind:`` YAML field decorative — plugin authors
+    could declare ``kind: domain`` and a client could silently get
+    process-control dispatch by sending an ``entity:`` field.
+
+    Paranoia-check these: revert the kind-dispatch + shape-check in
+    ``_parse_relations`` to the old shape-guessing behaviour, rerun,
+    both shape-mismatch tests should go red (the old code would
+    happily dispatch by shape). The 422 messages should identify the
+    declared kind + request shape specifically so operators can fix
+    the misaligned request."""
+
+    async def test_domain_kind_rejects_entity_shape(self, repo):
+        """Workflow declares ``oe:betreft`` as domain. Client sends
+        ``{entity: ...}`` (process-control shape). Must 422 with a
+        message naming the declared kind and pointing to the right
+        fields (``from:`` + ``to:``)."""
+        await _bootstrap_dossier(repo)
+        plugin = _RelationPlugin(
+            workflow_relations=[
+                {"type": "oe:betreft", "kind": "domain"},
+            ],
+        )
+        state = _state(
+            repo, plugin=plugin,
+            activity_def={"name": "test"},
+            relation_items=[{
+                "type": "oe:betreft",
+                "entity": f"oe:aanvraag/{uuid4()}@{uuid4()}",
+            }],
+        )
+        with pytest.raises(ActivityError) as exc:
+            await process_relations(state)
+        assert exc.value.status_code == 422
+        msg = str(exc.value)
+        # Message identifies the declared kind and the right shape.
+        assert "kind: domain" in msg
+        assert "from:" in msg and "to:" in msg
+        assert "oe:betreft" in msg
+
+    async def test_process_control_kind_rejects_domain_shape(self, repo):
+        """Workflow declares ``oe:neemtAkteVan`` as process_control.
+        Client sends ``{from:, to:}`` (domain shape). Must 422."""
+        await _bootstrap_dossier(repo)
+        plugin = _RelationPlugin(
+            workflow_relations=[
+                {"type": "oe:neemtAkteVan", "kind": "process_control"},
+            ],
+        )
+        from_uri = "https://id.erfgoed.net/dossiers/d1/entities/oe:aanvraag/e1/v1"
+        to_uri = "https://id.erfgoed.net/erfgoedobjecten/60001"
+        state = _state(
+            repo, plugin=plugin,
+            activity_def={"name": "test"},
+            relation_items=[{
+                "type": "oe:neemtAkteVan",
+                "from": from_uri, "to": to_uri,
+            }],
+        )
+        with pytest.raises(ActivityError) as exc:
+            await process_relations(state)
+        assert exc.value.status_code == 422
+        msg = str(exc.value)
+        assert "kind: process_control" in msg
+        assert "entity:" in msg
+        assert "oe:neemtAkteVan" in msg
+
+    async def test_remove_rejected_on_process_control(self, repo):
+        """Defense-in-depth check in ``_parse_remove_relations``:
+        remove operations are domain-only. The load-time validator
+        forbids ``operations: [remove]`` on process_control activity
+        declarations, but this runtime guard catches the case where
+        a caller bypasses load-time validation (test fixtures, or a
+        future regression that loosens the load-time rule)."""
+        await _bootstrap_dossier(repo)
+        plugin = _RelationPlugin(
+            workflow_relations=[
+                {"type": "oe:foo", "kind": "process_control"},
+            ],
+        )
+        from_uri = "https://id.erfgoed.net/dossiers/d1/entities/oe:x/a/b"
+        to_uri = "https://id.erfgoed.net/anything"
+
+        state = _state(
+            repo, plugin=plugin,
+            activity_def={
+                "name": "test",
+                "relations": [
+                    # Bypass load-time — declare remove on a
+                    # process_control type at activity level.
+                    {"type": "oe:foo", "operations": ["remove"]},
+                ],
+            },
+            relation_items=[],
+        )
+        state.remove_relation_items = [{
+            "type": "oe:foo", "from": from_uri, "to": to_uri,
+        }]
+
+        with pytest.raises(ActivityError) as exc:
+            await process_relations(state)
+        assert exc.value.status_code == 422
+        msg = str(exc.value)
+        assert "process_control" in msg
+        assert "remove" in msg
+
+    async def test_domain_kind_happy_path_with_from_to(self, repo):
+        """Positive control: a domain-declared type with the right
+        shape dispatches correctly. Without this, the negative tests
+        above could pass because nothing routes correctly. Sanity
+        check that Bug 78's rewire didn't break the happy path."""
+        await _bootstrap_dossier(repo)
+        plugin = _RelationPlugin(
+            workflow_relations=[
+                {"type": "oe:betreft", "kind": "domain"},
+            ],
+        )
+        from_uri = "https://id.erfgoed.net/dossiers/d1/entities/oe:aanvraag/e1/v1"
+        to_uri = "https://id.erfgoed.net/erfgoedobjecten/12345"
+        state = _state(
+            repo, plugin=plugin,
+            activity_def={"name": "test"},
+            relation_items=[{
+                "type": "oe:betreft",
+                "from": from_uri, "to": to_uri,
+            }],
+        )
+        await process_relations(state)
+        assert len(state.validated_domain_relations) == 1
+        assert state.validated_domain_relations[0].relation_type == "oe:betreft"
+
+
 class TestProcessRemoveRelations:
 
     async def test_remove_relation_populates_state(self, repo):
@@ -658,7 +843,6 @@ class TestProcessRemoveRelations:
                 "relations": [
                     {
                         "type": "oe:betreft",
-                        "kind": "domain",
                         "operations": ["add", "remove"],
                     },
                 ],
@@ -723,7 +907,6 @@ class TestProcessRemoveRelations:
                 "relations": [
                     {
                         "type": "oe:betreft",
-                        "kind": "domain",
                         "operations": ["add", "remove"],
                         "validators": {
                             "remove": "validate_betreft_removable",
@@ -797,7 +980,6 @@ class TestProcessRemoveRelations:
                 "relations": [
                     {
                         "type": "oe:betreft",
-                        "kind": "domain",
                         "operations": ["add", "remove"],
                         "validators": {
                             "remove": "validate_betreft_remove",
@@ -805,7 +987,6 @@ class TestProcessRemoveRelations:
                     },
                     {
                         "type": "oe:valtOnder",
-                        "kind": "domain",
                         "operations": ["add", "remove"],
                         "validators": {
                             "remove": "validate_valt_onder_remove",
@@ -862,7 +1043,6 @@ class TestProcessRemoveRelations:
                 "relations": [
                     {
                         "type": "oe:betreft",
-                        "kind": "domain",
                         # operations omitted → defaults to {"add"}
                     },
                 ],
@@ -898,7 +1078,6 @@ class TestProcessRemoveRelations:
                 "relations": [
                     {
                         "type": "oe:betreft",
-                        "kind": "domain",
                         "operations": ["add", "remove"],
                     },
                 ],
@@ -932,7 +1111,6 @@ class TestProcessRemoveRelations:
                 "relations": [
                     {
                         "type": "oe:betreft",
-                        "kind": "domain",
                         "operations": ["add", "remove"],
                     },
                 ],
@@ -967,7 +1145,6 @@ class TestProcessRemoveRelations:
                 "relations": [
                     {
                         "type": "oe:betreft",
-                        "kind": "domain",
                         "operations": ["add", "remove"],
                     },
                 ],
