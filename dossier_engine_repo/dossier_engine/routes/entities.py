@@ -153,10 +153,22 @@ def register(app: FastAPI, *, get_user, global_access) -> None:
             )
 
             entity = await repo.get_entity(version_id)
+            # 404 on any URL segment mismatch. Before the Bug 62 fix
+            # the ``entity_id`` segment was not checked — the endpoint
+            # happily returned the version as long as the version
+            # existed in the right dossier with the right type, so a
+            # client with a stale or wrong ``entity_id`` in the URL
+            # would get a response whose actual ``entity_id`` field
+            # differed from what they asked for (silent mis-attribution).
+            # Fail fast on the mismatch instead; the URL
+            # ``(dossier, type, entity_id, version_id)`` tuple must
+            # address a single canonical row, not a set of rows where
+            # ``entity_id`` is decorative.
             if (
                 not entity
                 or entity.dossier_id != dossier_id
                 or entity.type != entity_type
+                or entity.entity_id != entity_id
             ):
                 raise HTTPException(404, detail="Entity version not found")
 

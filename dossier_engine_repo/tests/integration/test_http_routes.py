@@ -497,6 +497,73 @@ class TestGetEntityVersion:
         )
         assert r.status_code == 404
 
+    # --- Bug 62 regression tests -----------------------------------
+
+    async def test_bug62_wrong_entity_id_in_url_returns_404(
+        self, client, repo,
+    ):
+        """Bug 62: ``GET /dossiers/{id}/entities/{type}/{eid}/{vid}``
+        must 404 when the URL's ``entity_id`` segment doesn't match
+        the version's actual ``entity_id`` field. Before the fix,
+        the endpoint checked ``dossier_id`` and ``type`` but not
+        ``entity_id`` — so a caller passing any UUID as ``{eid}``
+        would get the version back as long as the version existed
+        in that dossier with that type, resulting in silent
+        mis-attribution (response ``entity_id`` differed from URL
+        ``entity_id``).
+
+        Seed two independent aanvragen in the same dossier + type so
+        both mismatch paths are exercised: asking for A's version
+        under B's eid must 404 even though A's version is a valid
+        real entity in the system."""
+        boot = await _bootstrap_dossier(repo)
+        # A: seed normally — get its real eid and vid back.
+        eid_a, vid_a = await _seed_entity(
+            repo, boot, "oe:aanvraag", content={"titel": "A"},
+        )
+        # B: independent logical entity, same type, same dossier.
+        eid_b, _ = await _seed_entity(
+            repo, boot, "oe:aanvraag", content={"titel": "B"},
+        )
+        assert eid_a != eid_b  # sanity
+        await _commit(repo)
+
+        # The real A version under A's eid — sanity check, should 200.
+        r_ok = await client.get(
+            f"/dossiers/{D1}/entities/oe:aanvraag/{eid_a}/{vid_a}",
+            headers={"X-POC-User": "alice"},
+        )
+        assert r_ok.status_code == 200, "sanity: correct URL must 200"
+
+        # A's vid under B's eid — must 404. Before Bug 62 fix this
+        # returned 200 with A's entity (silent mis-attribution).
+        r_mismatch = await client.get(
+            f"/dossiers/{D1}/entities/oe:aanvraag/{eid_b}/{vid_a}",
+            headers={"X-POC-User": "alice"},
+        )
+        assert r_mismatch.status_code == 404, (
+            f"Bug 62 regression: entity_id mismatch should 404, "
+            f"got {r_mismatch.status_code} body={r_mismatch.json()}"
+        )
+
+    async def test_bug62_random_entity_id_returns_404(
+        self, client, repo,
+    ):
+        """A completely random (never-seeded) entity_id in the URL
+        must also 404 — not just a real-but-wrong eid. Guards against
+        a future refactor that might check "entity_id exists in this
+        dossier" instead of "entity_id matches the version's field"."""
+        boot = await _bootstrap_dossier(repo)
+        _, vid = await _seed_entity(repo, boot, "oe:aanvraag")
+        await _commit(repo)
+
+        random_eid = uuid4()
+        r = await client.get(
+            f"/dossiers/{D1}/entities/oe:aanvraag/{random_eid}/{vid}",
+            headers={"X-POC-User": "alice"},
+        )
+        assert r.status_code == 404
+
     # --- Bug 57 regression tests -----------------------------------
 
     async def test_bug57_single_version_injects_file_download_urls(
