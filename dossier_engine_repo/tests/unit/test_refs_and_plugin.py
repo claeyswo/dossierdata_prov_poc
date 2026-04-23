@@ -1556,3 +1556,164 @@ class TestPendingEntityFieldParity:
             generated_by=uuid4(), derived_from=None,
         )
         assert pending.created_at is None
+
+
+# =====================================================================
+# Bug 4 / Round 31: Repository constructor type annotation resolvable
+# =====================================================================
+
+
+class TestRepositoryAnnotations:
+    """``Repository.__init__`` historically had a ``session: Session``
+    annotation where ``Session`` was never imported. The code ran
+    fine at runtime because ``from __future__ import annotations`` at
+    the top of ``db/models.py`` stringifies all annotations, so the
+    unresolved name never actually needed to resolve. But anything
+    that calls ``typing.get_type_hints(...)`` — IDE tooling, runtime
+    validators like FastAPI's dependency injection when a repo is
+    passed via Depends, static type checkers — hit a ``NameError``.
+
+    The intended type is ``AsyncSession``: every method on Repository
+    uses ``await self.session.execute(...)`` and ``await
+    self.session.get(...)``, and ``AsyncSession`` is the type that
+    supports those signatures. Round 31 corrects the annotation.
+
+    This test pins the resolution by calling ``get_type_hints`` — the
+    exact operation that used to fail. If the annotation regresses
+    (say, to ``"Session"`` or some new typo), this test goes red with
+    ``NameError: name 'Session' is not defined`` in the failure trace.
+    """
+
+    def test_repository_init_annotations_resolve(self):
+        import typing
+
+        from sqlalchemy.ext.asyncio import AsyncSession
+
+        from dossier_engine.db.models import Repository
+
+        # get_type_hints actually evaluates stringified annotations in
+        # their module context. On the pre-fix code this raised NameError
+        # for ``Session``; post-fix it returns cleanly.
+        hints = typing.get_type_hints(Repository.__init__)
+        assert "session" in hints
+        assert hints["session"] is AsyncSession
+
+
+# =====================================================================
+# Bug 27 / Round 31: DossierAccessEntry.activity_view contract
+# =====================================================================
+
+
+class TestDossierAccessEntryActivityView:
+    """Round 31 tightened ``DossierAccessEntry.activity_view`` from an
+    open ``str`` to ``Literal["all", "own"] | list[str] | dict``. The
+    ``"related"`` mode was removed. These tests pin the resulting
+    write-time contract — Pydantic rejects ``"related"`` and other
+    unknown strings, accepts the four documented shapes, and defaults
+    to ``"own"`` (the deny-more default; was ``"related"`` pre-Round-31).
+
+    Two-layer defense for ``"related"``:
+    * Write-time (this file): Pydantic rejects. Operators get a clean
+      ``ValidationError`` when constructing or updating an access entry.
+    * Read-time (``test_activity_visibility.py``): ``parse_activity_view``
+      routes the legacy string to deny-safe, so DB entries written
+      before Round 31 don't silently flip semantics.
+    """
+
+    def test_default_activity_view_is_own(self):
+        """Pre-Round-31 default was ``"related"`` — the broadest mode
+        of the three strings. Round 31 changed it to ``"own"`` (the
+        narrower mode) so access entries that omit ``activity_view``
+        err on the side of less visibility. ``"all"`` would be too
+        permissive for an unspecified default; ``"own"`` matches the
+        aanvrager-case of "show me my stuff" which is the most
+        common intent when the field is left blank."""
+        from dossier_engine.entities import DossierAccessEntry
+        entry = DossierAccessEntry()
+        assert entry.activity_view == "own"
+
+    def test_accepts_all_string(self):
+        from dossier_engine.entities import DossierAccessEntry
+        entry = DossierAccessEntry(activity_view="all")
+        assert entry.activity_view == "all"
+
+    def test_accepts_own_string(self):
+        from dossier_engine.entities import DossierAccessEntry
+        entry = DossierAccessEntry(activity_view="own")
+        assert entry.activity_view == "own"
+
+    def test_accepts_list_of_types(self):
+        from dossier_engine.entities import DossierAccessEntry
+        entry = DossierAccessEntry(
+            activity_view=["dienAanvraagIn", "neemBeslissing"],
+        )
+        assert entry.activity_view == [
+            "dienAanvraagIn", "neemBeslissing",
+        ]
+
+    def test_accepts_dict_with_mode_and_include(self):
+        from dossier_engine.entities import DossierAccessEntry
+        entry = DossierAccessEntry(
+            activity_view={
+                "mode": "own",
+                "include": ["neemBeslissing"],
+            },
+        )
+        assert entry.activity_view == {
+            "mode": "own",
+            "include": ["neemBeslissing"],
+        }
+
+    def test_rejects_related_string(self):
+        """The primary Round 31 deprecation pin. ``"related"`` was
+        removed as a supported mode — attempts to create or
+        deserialize an access entry with ``activity_view: "related"``
+        now fail at validation time. Any caller going through Pydantic
+        (the ``setDossierAccess`` side effect, plugin entity
+        validation via ``oe:dossier_access`` model binding) gets a
+        clean error at write time. See the module-level docstring
+        for the read-time counterpart."""
+        from pydantic import ValidationError
+
+        from dossier_engine.entities import DossierAccessEntry
+        try:
+            DossierAccessEntry(activity_view="related")
+        except ValidationError:
+            return
+        raise AssertionError(
+            "DossierAccessEntry should have rejected "
+            "activity_view='related' but accepted it. The Literal "
+            "type on the field must have regressed."
+        )
+
+    def test_rejects_unknown_string(self):
+        """Any string that isn't ``"all"`` or ``"own"`` is rejected —
+        not just ``"related"``. Guards against typos and forward-
+        compatibility assumptions (operators writing what they
+        *think* will be a future mode)."""
+        from pydantic import ValidationError
+
+        from dossier_engine.entities import DossierAccessEntry
+        try:
+            DossierAccessEntry(activity_view="banana")
+        except ValidationError:
+            return
+        raise AssertionError(
+            "DossierAccessEntry should have rejected "
+            "activity_view='banana' but accepted it."
+        )
+
+    def test_dossier_access_wrapper_composes_entries(self):
+        """The outer ``DossierAccess`` container just validates a list
+        of entries. Pins the composition so a future refactor that
+        tries to move validation logic up to the container goes red
+        if it forgets to delegate per-entry."""
+        from dossier_engine.entities import DossierAccess
+        access = DossierAccess(access=[
+            {"role": "oe:reader", "view": ["oe:aanvraag"],
+             "activity_view": "own"},
+            {"role": "oe:admin", "view": [], "activity_view": "all"},
+        ])
+        assert len(access.access) == 2
+        assert access.access[0].activity_view == "own"
+        assert access.access[1].activity_view == "all"

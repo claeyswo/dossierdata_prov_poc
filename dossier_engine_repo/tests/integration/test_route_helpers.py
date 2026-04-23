@@ -595,7 +595,14 @@ class TestGetVisibilityFromEntry:
         )
         assert mode == "own"
 
-    def test_entry_with_activity_view_related(self):
+    def test_entry_passes_through_legacy_related_value_verbatim(self):
+        """``get_visibility_from_entry`` is a pass-through; it doesn't
+        validate the ``activity_view`` value. Legacy ``"related"``
+        entries (mode removed in Round 31) land unchanged at this
+        layer and are deny-safed downstream in ``parse_activity_view``.
+        Pinning the pass-through shape so a future "cleanup" that
+        tries to filter ``"related"`` out here — instead of at the
+        proper evaluation layer — gets caught."""
         visible, mode = get_visibility_from_entry(
             {"view": ["oe:aanvraag"], "activity_view": "related"},
         )

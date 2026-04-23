@@ -10,16 +10,16 @@
 
 | Status | Count | Items |
 |---|---|---|
-| ✅ Fixed & verified | 35 | Bugs 1, 2, 5, 6, 7, 9, 12, 15, 16, 17, 20, 30, 32, 44, 47, 53, 54, 55, 56, 57, 58, 62, 64, 65, 66, 68, 69, 70, 72 (coverage), 73, 74, 75, 76, 77, 79 + Obs-2 (duplicate "external") |
+| ✅ Fixed & verified | 37 | Bugs 1, 2, 4, 5, 6, 7, 9, 12, 15, 16, 17, 20, 27, 30, 32, 44, 47, 53, 54, 55, 56, 57, 58, 62, 64, 65, 66, 68, 69, 70, 72 (coverage), 73, 74, 75, 76, 77, 79 + Obs-2 (duplicate "external") |
 | 🔍 Investigated, not a bug | 1 | Bug 14 — cross-dossier refs are `type=external` rows |
 | 🛑 Deferred / accepted | 5 | Bug 28 (POC auth slated for replacement), Bug 31 (RRN acceptable), Bug 45 (MinIO migration), Bug 63 (403 is correct HTTP), Bug 71 (test activities, deploy-time removal) |
-| 🧪 Test suite | **857/857** passing | engine 792 (unit 310 + integration 482), toelatingen 26, file_service 21, common/signing 18 |
+| 🧪 Test suite | **876/876** passing | engine 811 (unit 330 + integration 481), toelatingen 26, file_service 21, common/signing 18 |
 | 🏃 `test_requests.sh` | **25/25 OK, exit 0, zero deadlocks, zero worker crashes** | D1–D9 green |
 | ✂️ Duplication closed | **D1, D2, D4, D22, D25** | Graph-loader consolidation + audit-emit wrapper |
 | 🧰 Harnesses installed | **3** | Guidebook YAML lint + phase-docstring lint + CI shell-spec wrapper |
 | 🤖 CI wired | **GitHub Actions** | `.github/workflows/ci.yml` — 4 jobs: pytest, shell-spec, doc-harnesses, migrations-append-only |
 | 🎯 Must-fix walk | **Complete** | All 17 fixable must-fix bugs closed; the 5 open rows are deferred/investigated by product decision (Bugs 14, 31, 45, 63, 71) |
-| 📦 Pending | 25 should-fix + 16 lower-priority bugs + 31 observations + 21 dups + 5 meta (partial relief) | See below |
+| 📦 Pending | 23 should-fix + 16 lower-priority bugs + 31 observations + 21 dups + 5 meta (partial relief) | See below |
 
 Note: Bug 75 was discovered *by* harness 2 on its first run — a new bug surfaced and fixed in the same session as the harness that surfaced it.
 
@@ -59,7 +59,7 @@ Note: Bug 75 was discovered *by* harness 2 on its first run — a new bug surfac
 
 | # | Pass | Summary | Status |
 |---|------|---------|--------|
-| 4 | 2 | `Session` type annotation never imported. |  |
+| ~~4~~ | 2 | ~~`Session` type annotation never imported.~~ | ✅ **Fixed in Round 31.** `Repository.__init__` at `db/models.py:238` had `session: Session` with `Session` never imported. The code ran fine at runtime because `from __future__ import annotations` stringifies all annotations, but anything calling `typing.get_type_hints(...)` — IDE tooling, FastAPI's `Depends` type resolution, Pydantic's model-building — hit `NameError`. Intended type was always `AsyncSession` (every Repository method uses async). Fix: one-character type change. One regression test (`TestRepositoryAnnotations::test_repository_init_annotations_resolve`) that calls `get_type_hints` and asserts `AsyncSession` — the exact operation that was failing pre-fix. |
 | ~~9~~ | 2 | ~~N+1 in dossier detail view.~~ | ✅ **Fixed in Round 29.** `routes/dossiers.py::get_dossier` was calling per-activity `_user_is_agent` + `get_used_entity_ids_for_activity` in the visibility-filter loop, turning N activities into O(N) SELECTs under `activity_view: "own"` or `"related"`. Swapped for `load_dossier_graph_rows` (Round 5's consolidation already used by `routes/prov.py`) with dict-lookup closures. Measured 11 activities: **16 → 10 SELECTs** post-fix, independent of N. 3 regression tests added (2 behaviour pins + 1 query-count ceiling at 12). Removed dead `_user_is_agent` helper + unused imports. `get_all_latest_entities` kept as-is — it returns latest-per-entity_id which `graph_rows.entities` does not, and deduplicating client-side would be more code for no perf win. |
 | ~~12~~ | 2 | ~~`_parse_scheduled_for` silently returns None on unparseable dates.~~ | ✅ **Already fixed & tested.** Discovered during M2 Stage 2 startup: `worker.py:_parse_scheduled_for` was already implementing log-and-defer via `datetime.max.replace(tzinfo=timezone.utc)` on malformed ISO, with a 12-case `TestParseScheduledFor` in `test_worker_helpers.py` including explicit regression guards. The review had been carrying a stale open-bug entry; verified end-to-end (parses valid forms, returns None for genuine-empty, returns aware `datetime.max` for malformed with logger.error). No code change this round — bookkeeping correction only. |
 | 13 | 2 | Deprecated `@app.on_event("startup")`. |  |
@@ -69,7 +69,7 @@ Note: Bug 75 was discovered *by* harness 2 on its first run — a new bug surfac
 | — | 2 | Worker's recorded tasks don't pass `anchor_entity_id`/`anchor_type`. |  |
 | ~~20~~ | 3 | ~~`_PendingEntity` missing several fields → `AttributeError`.~~ | ✅ **Fixed in Round 30.** Five EntityRow columns (`type`, `dossier_id`, `generated_by`, `derived_from`, `tombstoned_by`) were missing from `_PendingEntity` despite the class's own docstring saying they had to stay in sync. Concrete crash path: `schedule_trekAanvraag_if_onvolledig` → `_build_trekAanvraag_task` → `find_related_entity(pending_beslissing, "oe:aanvraag")` → `lineage.py:123 start_entity.type` → 💥 AttributeError. Reachable when the activity's `used:` block doesn't include the aanvraag — structurally near-impossible in normal flow but reachable via data-migration artefacts or future flow variants. Added the four new constructor kwargs + hardcoded `tombstoned_by` and `created_at` as structural None invariants. Plus 3 new tests: programmatic `EntityRow.__table__.columns` parity scan (the maintenance guard the docstring always promised) + 2 invariant tests. Existing `test_pending_entity_carries_expected_fields` extended 4 → 11 assertions. Paranoia-checked with partial revert — parity test emits named-diff error message (`"_PendingEntity is missing EntityRow columns: [...]"`) when drift re-occurs. |
 | 25 | 3 | `common_index.reindex_all` loads all dossiers into memory. |  |
-| 27 | 3 | `DossierAccessEntry.activity_view: str` too narrow. |  |
+| ~~27~~ | 3 | ~~`DossierAccessEntry.activity_view: str` too narrow.~~ | ✅ **Fixed in Round 31.** Tightened to `Union[Literal["all", "own"], list[str], dict] = "own"`. The `"related"` mode was removed (not used in production, confusing semantics) — two-layer defense for legacy DB data: Pydantic rejects `"related"` at write time via `ValidationError`, `parse_activity_view` deny-safes it at read time (legacy entries produce empty timelines rather than silent semantic changes). Default changed `"related"` → `"own"` (deny-more). Incidentally discovered and fixed a pre-existing bug where `parse_activity_view` accepted arbitrary unrecognized strings verbatim (e.g. `"banana"` became `base="banana"`) — now falls through to deny-safe at parse time instead of relying on `is_activity_visible`'s terminal `return False`. 19 new tests (11 in new `tests/unit/test_activity_visibility.py`, 8 in `test_refs_and_plugin.py::TestDossierAccessEntryActivityView`), one Round-29 test deleted (`test_related_mode_includes_activities_touching_visible_entities` — was testing the removed mode). Paranoia-checked on both the read-time revert (1 of 11 red, the deprecation pin, exact shape) and write-time revert (4 of 8 red, the four type-depending tests). |
 | 28 | 3 | `POCAuthMiddleware` silently overwrites on duplicate usernames. | 🛑 **Deferred — POC-only, slated for removal.** User confirmed in Round 30 planning that `POCAuthMiddleware` is POC-only and will be replaced (JWT/OAuth) rather than hardened. Fixing a fail-loudly-on-config-error path in code that's on the exit ramp is sunk cost. Re-evaluate if/when real auth lands and similar duplicate-config hazards surface there. |
 | 19 | 3 | `GET /dossiers` has no `response_model`. |  |
 | — | 3 | Archive has no size cap. |  |
@@ -725,11 +725,11 @@ Standalone factual corrections to docstrings, README, and templates. Low risk, l
 
 Concrete behaviour bugs that are each ~30-100 lines of code + tests. Each wants its own round with verify-plan-fix-test-ship:
 
-- **Bug 4** — `Session` type annotation never imported. *Surface: typing only, runtime-safe but IDE-visible.*
+- ~~**Bug 4**~~ — ~~`Session` type annotation never imported.~~ ✅ **Shipped in Round 31.**
 - ~~**Bug 9**~~ — ~~N+1 in dossier detail view.~~ ✅ **Shipped in Round 29.**
 - **Bug 13** — Deprecated `@app.on_event("startup")`. *Modernization, small fix.*
 - ~~**Bug 20**~~ — ~~`_PendingEntity` missing several fields → `AttributeError`.~~ ✅ **Shipped in Round 30.**
-- **Bug 27** — `DossierAccessEntry.activity_view: str` too narrow (should be Literal). *Type tightening.*
+- ~~**Bug 27**~~ — ~~`DossierAccessEntry.activity_view: str` too narrow (should be Literal).~~ ✅ **Shipped in Round 31.** `"related"` mode also removed.
 - 🛑 ~~**Bug 28**~~ — ~~`POCAuthMiddleware` silently overwrites on duplicate usernames.~~ **Deferred — POC-only, slated for replacement with real auth.**
 - **Bug 34** — `authorize_activity` catches broad `Exception`. *Hides real errors.*
 - **Bug 39** — `TaskEntity.status: str` → `Literal[...]`. *Type tightening.*
@@ -1322,3 +1322,106 @@ Round 29 shipped Bug 9 with a shortcut (`routes/dossiers.py` importing from `pro
 1. **Fast turnaround on architectural feedback is better than batching.** The user's pushback arrived after Round 29 shipped but before Round 30.5 picked up — the right response was "do the split now, while the Bug 9 story is still in working memory," not "add it to a backlog." Round 30.5 took ~15 minutes; delaying it would have accumulated interest in the form of "future me has to re-understand why routes/dossiers imports from prov_json."
 
 2. **The original fix was right; the home was wrong.** Worth being explicit that user's correctness question and user's architecture question were separable — correctness confirmed in (1), architecture fixed in (2). If the correctness check had found a real gap, Round 30.5 would have been a different, bigger round. Keeping the two questions distinct mattered.
+
+### Round 31 — Bug 4 shipped + Bug 27 shipped + an incidentally-discovered pre-existing gap cleaned up
+
+Two scheduled Cat 2 items this round (Bug 4 was queued as the trivial closer, Bug 27 as the bigger type-tightening + policy decision), plus a third item that surfaced mid-flight while writing Bug 27's tests. Taking them in the order they landed.
+
+#### Bug 4 — `Session` type annotation never imported
+
+Trivial by intent, but still worth the honest write-up: the `Repository.__init__` signature in `db/models.py:238` was `def __init__(self, session: Session):` and `Session` was never imported at the top of the file. The code ran fine because `from __future__ import annotations` at the top of the module stringifies all annotations — `Session` was only a name that needed to resolve when something called `typing.get_type_hints(...)`.
+
+This is exactly the latent-failure shape the review's "IDE-visible" framing was pointing at: static analyzers, editors, runtime type-hint consumers (FastAPI's `Depends`, Pydantic's model-building, anything using `get_type_hints`) all tripped over the unresolved `Session` when they tried to actually look it up. The code didn't trip over itself because Python's lazy annotation model let the name stay unresolved.
+
+**Fix:** `session: Session` → `session: AsyncSession` (line 238). `AsyncSession` was already imported at line 28 — no new import needed. Every method on `Repository` uses `await self.session.execute(...)` and `await self.session.get(...)`, which is the `AsyncSession` interface — so this is the type the annotation always should have been.
+
+**Regression test:** one test in `test_refs_and_plugin.py::TestRepositoryAnnotations::test_repository_init_annotations_resolve`. It calls `typing.get_type_hints(Repository.__init__)` — the exact operation that was failing pre-fix — and asserts the returned dict maps `"session"` to `AsyncSession`. Paranoia-checked by reverting to `Session`; the test goes red with `NameError: name 'Session' is not defined` in the failure trace, which is precisely the latent bug surfacing at test time.
+
+Test count: 310 → 311 unit. No other tests touched.
+
+#### Bug 27 — `DossierAccessEntry.activity_view: str` too narrow + `"related"` mode removed
+
+This was the round's main piece. Three things bundled together because they were tangled in the same type and same code:
+
+1. **Narrow the Pydantic model** so it matches the runtime contract rather than pretending `activity_view` is any string.
+2. **Remove the `"related"` mode** — user's Round 29 call that I'd pushed back on; pulling the trigger now.
+3. **Tighten `parse_activity_view`** so unknown strings fall through to deny-safe instead of being accepted verbatim.
+
+**On (2) and the Round 29 pushback.** I'd argued against removing `"related"` citing "transparency semantics" and "citizens seeing activities that operated on their entities" as legitimate use cases. Looking at it again in Round 31: config.yaml didn't use `"related"`, toelatingen never deployed it, there was no citizen-facing UI that rendered it differently from `"own"`, and no test of it existed before I wrote one in Round 29 to pin behaviour for Bug 9. **I was defending a hypothetical against someone who knows the product.** The pushback shape was wrong — I made the user argue for it twice. Corrected in this round; the decision (kill it) was the right one and arriving at it faster would have been better. See the process note at the end of this writeup.
+
+**Final surface for `activity_view`**, post-Round-31:
+1. `"all"` — every activity visible
+2. `"own"` — only activities where the user is the PROV agent
+3. `list[str]` — only activities whose type is in the list
+4. `dict` with `mode: "own"` + `include: [...]` — "own" plus an unconditional-include list
+
+**Two-layer defense for legacy `"related"` in existing data.** Pydantic rejects it at **write** time (operators setting dossier access get a clean `ValidationError` — the `setDossierAccess` side effect won't persist). `parse_activity_view` deny-safes it at **read** time (legacy entries already in the DB don't silently flip semantics; they produce an empty timeline, and operators investigate). This is exactly the shape I'd have wanted for Bug 28 if that one had been shippable — fail-loudly-on-config-error at write, fail-safely-on-legacy-data at read.
+
+**Shipped (code):**
+- `entities.py` — `activity_view: str = "related"` → `activity_view: Union[Literal["all", "own"], list[str], dict] = "own"`. Default changed `"related"` → `"own"`: the narrower default, matching the aanvrager case "show me my own stuff" which is the most common unspecified intent.
+- `routes/_activity_visibility.py` — `parse_activity_view` no longer accepts arbitrary strings via `isinstance(raw, str)`. Only `"all"` and `"own"` match explicitly; everything else falls through to the deny-safe `ActivityViewMode(base="list", explicit_types=frozenset())` branch. `is_activity_visible` lost the `if mode.base == "related":` branch. Docstrings on both the module and the `ActivityViewMode` dataclass updated; the dataclass docstring now notes that legacy `"related"` values preserved through the dict shape route to the final `return False` at evaluation time.
+- `routes/access.py` — three docstring references to `"related"` updated or removed.
+- `routes/dossiers.py` — module docstring updated; the Bug 9 historical comment kept but annotated with a Round 31 note about the mode's removal.
+- `README.md` — activity_view table's row for `"related"` removed; round-reference note added.
+
+**Shipped (tests):**
+- New unit test file `tests/unit/test_activity_visibility.py` with 11 tests covering every `parse_activity_view` input shape. Previously this module had zero dedicated unit tests — it was exercised only via end-to-end route tests, which meant "what does X return?" required running the full app. Adding the unit coverage closes that gap *and* pins the Round 31 removal in the natural place.
+- `test_refs_and_plugin.py::TestDossierAccessEntryActivityView` — 8 tests for the Pydantic contract: default is `"own"`, the four valid shapes are accepted, `"related"` is rejected, unknown strings are rejected, the wrapper `DossierAccess` composes entries correctly. These pin the write-time enforcement layer.
+- `test_route_helpers.py::test_entry_with_activity_view_related` renamed to `test_entry_passes_through_legacy_related_value_verbatim` with a docstring explaining that `get_visibility_from_entry` is a pass-through and legacy `"related"` lands unchanged at this layer (deny-safing is the next layer's job). A future "cleanup" that tries to filter `"related"` at the wrong layer would go red here.
+- `test_http_routes.py::test_related_mode_includes_activities_touching_visible_entities` (from Round 29) — **deleted** with a comment pointing to the deprecation pins that replaced it. Testing a removed mode is cargo-cult.
+
+**Paranoia checks ✓ (two separate reverts).**
+- *Read-time:* partial revert of `parse_activity_view` (re-inserted the `"related"` string acceptance) → `test_related_string_falls_through_to_deny_safe` goes red with `AssertionError: assert 'related' == 'list'`. Other 10 activity_visibility tests stay green. Restored.
+- *Write-time:* revert of the Pydantic type (`Literal[...] | list | dict` → `str`) → 4 of 8 DossierAccessEntry tests go red: `test_rejects_related_string`, `test_rejects_unknown_string`, `test_accepts_list_of_types`, `test_accepts_dict_with_mode_and_include`. The 4 tests that stay green are the string-accepts-string tests (defaults, `"all"`, `"own"`), which pass on either type. Restored.
+
+Both reverts produce the *expected* subset of failures — not "everything fails" (which would mean the tests are over-coupled) and not "nothing fails" (which would mean the tests aren't exercising the contract). Correct shape.
+
+#### Incidental finding — pre-existing bug: `parse_activity_view` accepted arbitrary strings verbatim
+
+While writing the activity_visibility unit tests, I added `test_unrecognized_string_falls_through_to_deny_safe` expecting it to pass (the module docstring said *"Unrecognised → deny-safe default: show nothing"*). It failed pre-fix with `assert 'banana' == 'list'`.
+
+Tracing it: the `isinstance(raw, str)` branch at line 70–72 swallowed **all** strings via `ActivityViewMode(base=raw)` — not just `"own"` and `"related"`. A caller passing `activity_view: "typo"` got `base="typo"`, which then flowed into `is_activity_visible` and hit the final `return False`. So the end-to-end behaviour was deny-safe by accident (the evaluator didn't recognize the base), but the module's *documented* intent (deny-safe at parse time, deny-safe at eval time) wasn't what was happening — one of the two layers was passing through unchanged.
+
+Not a correctness bug in practice (the end-to-end shape was deny-safe), but a cleanliness bug that would bite anyone reading the code and reasoning about what `parse_activity_view` returns. The Bug 27 fix naturally resolved it: the new `parse_activity_view` only accepts `"all"` and `"own"` explicitly, everything else routes to the terminal deny-safe branch. This is reflected in the new test `test_unrecognized_string_falls_through_to_deny_safe` plus the existing `test_related_string_falls_through_to_deny_safe`.
+
+Not assigning a separate bug number for this — it's covered by the Bug 27 fix and writeup. If bookkeeping wants it tracked separately, could be filed as Bug 80; noting here that my lean is "don't, it's subsumed."
+
+#### Process lesson — the shape of disagreement
+
+Round 29 had me pushing back on user's "kill `related`" call. My argument: "it's the Pydantic default, it's tested, the semantics are transparency-oriented, production doesn't use it today but that's latent capability rather than mistake." The user agreed to do Bug 9 alone that round and I took the agreement as vindication of the pushback.
+
+Looking at Round 31's evidence: config.yaml didn't use `"related"`, toelatingen never deployed it, no citizen-facing UI distinguished `"related"` from `"own"`, and the only test of it was one I'd just written. The "latent capability" was a theoretical defense against someone who actually knew the product. The user wasn't wrong; I was making them argue for a decision they'd already made well.
+
+Two shapes of pushback to distinguish:
+
+1. **Pushback that probes** — "can you tell me more about why" / "here's a consideration I want to flag" / "one check before I proceed" — gives the other side information and lets them reaffirm or revise. This is good; it surfaces hidden context.
+
+2. **Pushback that forces re-argument** — "here's why you shouldn't do that, convince me" — shifts the burden of proof in a way that's wrong when the other side knows more than you. This is what I was doing.
+
+The tell for (2) vs (1) is who ends up doing the work. If the other side has to marshal evidence to re-justify a decision they'd already made, I've framed the conversation wrong. Carrying this forward: when a user who clearly knows the product calls for a removal, default to *probing for hidden context* (are there unstated constraints? deprecation order questions? migration concerns?) and not to *defending the status quo*.
+
+#### Verification
+
+- Engine unit: **311 → 330** (+19: 11 new activity_visibility tests, 8 new DossierAccessEntry tests).
+- Engine integration: **482 → 481** (-1: Round 29's `test_related_mode` deleted).
+- Toelatingen / common / file_service unchanged: **26 / 18 / 21**.
+- **Total: 876 / 876 passing** (was 858).
+
+#### Totals after Round 31
+
+**37 bugs fixed** (was 35 — Bug 4 and Bug 27 added). Should-fix table: **23 open** (was 25 — both bugs closed). Observations unchanged. Test suite grew 858 → 876 (+18 net).
+
+#### Where to go next
+
+Cat 2 still has Bugs 13, 34, 39, 43, 48, 50, 59, 60, 67 in the medium-priority band. Looking at those quickly:
+
+- **Bug 13** — Deprecated `@app.on_event("startup")`. Small modernization fix (lifespan handler). Independent, no policy question.
+- **Bug 34** — `authorize_activity` catches broad `Exception`. Hides real errors. Scope-contained, narrow surface.
+- **Bug 39** — `TaskEntity.status: str` → `Literal[...]`. Same shape as Bug 27, simpler (no policy decision — the four status values are all kept). Natural next type-tightening if we want to continue that theme.
+- **Bug 43** — `Aanvrager.model_post_init` raises `ValueError` without Pydantic shape. 422 error shape wrong. Bit of a weird one — worth a verify-before-plan pass.
+- **Bug 48** — `.meta` filename not sanitized. Security-adjacent. Worth prioritizing if there's any appetite for the security axis.
+- **Bug 50** — Migration fallback uses module-level `SYSTEM_ACTION_DEF` with bare name. Migration-specific, tooling concern.
+
+My recommendation order: **Bug 39** (direct sequel to Bug 27, same type-tightening pattern), then **Bug 48** (security-adjacent is worth landing), then **Bug 13** (small modernization), then **Bug 34**. Bugs 43 and 50 need more reconnaissance before I can order them confidently.
+
+Cat 3 (caching & perf) remains in the wings. If you want a change of pace after these type-tightening and small-fix rounds, that's the next batch-round candidate.

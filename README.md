@@ -820,17 +820,18 @@ They don't imply each other — a `beheerder` that appears in all three lists ge
 
 ## Activity Visibility
 
-The `activity_view` setting on access entries controls which activities a user sees in the dossier timeline. Five input forms, all normalised to an `ActivityViewMode` dataclass by `parse_activity_view()`:
+The `activity_view` setting on access entries controls which activities a user sees in the dossier timeline. Four input forms, all normalised to an `ActivityViewMode` dataclass by `parse_activity_view()`:
 
 | Form | Meaning |
 |---|---|
 | `"all"` | Every activity visible |
 | `"own"` | Only activities where the user is the PROV agent |
-| `"related"` | Activities that touched visible entities, plus the user's own |
 | `["dienAanvraagIn", "neemBeslissing"]` | Only these activity types |
 | `{"mode": "own", "include": ["neemBeslissing"]}` | Combined: own activities plus named types regardless of agent |
 
 The combined dict form is useful for aanvragers who should see their own actions plus all decisions, even if someone else made them. The shared module `routes/_activity_visibility.py` provides `parse_activity_view()` and `is_activity_visible()`, used by both the dossier-detail and PROV endpoints via callback-based lookups (no code duplication).
+
+> **Round 31:** The `"related"` mode (activities touching visible entities, plus the user's own) was removed. It wasn't used in production and had confusing semantics. Legacy `"related"` values in dossier_access entities fall through to a deny-safe default at read time; Pydantic rejects `"related"` at write time.
 
 ### Audit-level access
 

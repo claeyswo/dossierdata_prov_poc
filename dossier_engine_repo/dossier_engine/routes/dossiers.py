@@ -28,11 +28,13 @@ The detail endpoint does a fair bit of work:
    don't match.
 3. **Visibility filtering**: the calling user's `dossier_access`
    entry resolves to a set of visible entity-type prefixes and an
-   activity-view mode (`all`, `own`, `related`). Entities outside
-   the visible prefixes are dropped from `currentEntities`. Activities
-   are filtered per the view mode: `own` shows only activities where
-   the user is the agent, `related` shows activities that touched
-   visible entities (plus the user's own).
+   activity-view mode (`all`, `own`, list of types, or a combined
+   dict). Entities outside the visible prefixes are dropped from
+   `currentEntities`. Activities are filtered per the view mode:
+   `own` shows only activities where the user is the agent; a list
+   shows only listed types; the dict form combines `own` with an
+   unconditional include-list. The ``"related"`` mode was removed
+   in Round 31.
 """
 
 from __future__ import annotations
@@ -185,7 +187,10 @@ def register(app: FastAPI, *, registry, get_user, global_access) -> None:
             # round-trips per activity (``_user_is_agent`` +
             # ``get_used_entity_ids_for_activity``) which turned a
             # dossier with N activities into O(N) queries whenever the
-            # user's ``activity_view`` was ``"own"`` or ``"related"``.
+            # user's ``activity_view`` was ``"own"`` or ``"related"``
+            # (``"related"`` was removed in Round 31; the preload
+            # pattern still matters for ``"own"`` and for the list/dict
+            # modes that can trigger include-list evaluation).
             # The ``prov.py`` endpoints already used this pattern since
             # Round 5's D1/D2 consolidation; dossier-detail was the
             # straggler. The dict-lookup closures match the signatures

@@ -6,14 +6,28 @@ These are shared across all workflow plugins.
 from __future__ import annotations
 
 from pydantic import BaseModel
-from typing import Optional
+from typing import Literal, Optional, Union
 
 
 class DossierAccessEntry(BaseModel):
     role: Optional[str] = None
     agents: list[str] = []
     view: list[str] = []
-    activity_view: str = "related"  # "own", "related", "all"
+    # Activity visibility. Four accepted shapes:
+    #
+    # * ``"all"`` — every activity visible.
+    # * ``"own"`` — only activities where the user is the PROV agent.
+    # * ``list[str]`` — only activities whose type is in the list.
+    # * ``dict`` with ``mode: "own"`` + ``include: [<types>]`` — "own"
+    #   plus an unconditional include-list.
+    #
+    # The ``"related"`` mode was removed in Round 31; Pydantic rejects
+    # it at write time (operators get a validation error on
+    # ``setDossierAccess``) and ``parse_activity_view`` deny-safes it
+    # at read time for any legacy entry already in the DB. See
+    # ``routes/_activity_visibility.py`` module docstring for the
+    # read-path semantics.
+    activity_view: Union[Literal["all", "own"], list[str], dict] = "own"
 
 
 class DossierAccess(BaseModel):

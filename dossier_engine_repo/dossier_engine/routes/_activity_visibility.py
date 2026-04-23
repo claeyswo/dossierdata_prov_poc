@@ -10,8 +10,6 @@ The ``activity_view`` value in an access entry can be:
 
 * ``"all"`` — every activity is visible.
 * ``"own"`` — only activities where the user is the PROV agent.
-* ``"related"`` — activities that touched visible entities, plus
-  the user's own.
 * A ``list[str]`` of activity type names — only those types.
 * A ``dict`` combining a base mode with an include-list::
 
@@ -22,8 +20,15 @@ The ``activity_view`` value in an access entry can be:
   This means "show my own activities, PLUS always show any
   ``neemBeslissing`` regardless of who performed it."
 
-All five forms are handled by :func:`is_activity_visible`, which
-takes the raw ``activity_view`` value (string, list, or dict) and
+The ``"related"`` mode (activities that touched visible entities,
+plus the user's own) was removed in Round 31 — it wasn't used in
+production and the semantics were confusing enough that operators
+couldn't describe it without looking at the code. Stale configs
+still carrying ``"related"`` fall through to a deny-safe default
+so the change doesn't silently flip visibility.
+
+All forms are handled by :func:`is_activity_visible`, which takes
+the raw ``activity_view`` value (string, list, or dict) and
 returns True/False for a single activity. Callers loop over their
 activity list and call this once per activity — the function is
 deliberately stateless so it can be used in both the "build a
@@ -43,7 +48,12 @@ class ActivityViewMode:
     safe to store on request state and pass around."""
 
     base: str = "all"
-    """One of ``"all"``, ``"own"``, ``"related"``, or ``"list"``."""
+    """One of ``"all"``, ``"own"``, or ``"list"``. The value
+    ``"related"`` was valid before Round 31 and is still preserved
+    verbatim when it appears inside a dict shape's ``mode`` field;
+    :func:`is_activity_visible` routes all unrecognized base values
+    to a deny-safe ``return False`` so stale configs don't silently
+    flip behaviour."""
 
     include: frozenset[str] = field(default_factory=frozenset)
     """Activity type names that are always visible regardless of the
@@ -60,16 +70,21 @@ def parse_activity_view(raw: str | list[str] | dict | None) -> ActivityViewMode:
     Accepts every form the access system produces:
 
     * ``None`` or ``"all"`` → show everything.
-    * ``"own"`` / ``"related"`` → sentinel modes.
+    * ``"own"`` → only activities where the user is the agent.
     * ``["dienAanvraagIn", "neemBeslissing"]`` → explicit type list.
     * ``{"mode": "own", "include": ["neemBeslissing"]}`` → combined.
+
+    Anything else — unrecognized strings (including legacy ``"related"``,
+    removed in Round 31), non-string/list/dict types — falls through to
+    a deny-safe ``ActivityViewMode(base="list", explicit_types=frozenset())``.
+    This means stale configs surface as empty timelines rather than silent
+    semantic changes; see Round 31 writeup for rationale.
     """
     if raw is None or raw == "all":
         return ActivityViewMode(base="all")
 
-    if isinstance(raw, str):
-        # "own" or "related"
-        return ActivityViewMode(base=raw)
+    if raw == "own":
+        return ActivityViewMode(base="own")
 
     if isinstance(raw, list):
         return ActivityViewMode(base="list", explicit_types=frozenset(raw))
@@ -83,9 +98,16 @@ def parse_activity_view(raw: str | list[str] | dict | None) -> ActivityViewMode:
                 explicit_types=frozenset(base),
                 include=include,
             )
+        # Note: ``base`` here can still be any string the caller chose
+        # (including legacy ``"related"`` or typos). ``is_activity_visible``
+        # evaluates the result and falls through to ``return False`` for
+        # any base it doesn't recognize, which is the deny-safe shape. The
+        # include list is still honoured — a stale ``mode`` doesn't erase
+        # the explicit include list the operator wrote.
         return ActivityViewMode(base=base, include=include)
 
-    # Unrecognised → deny-safe default: show nothing.
+    # Unrecognised top-level shape (or unrecognised string that didn't
+    # match ``"all"`` / ``"own"``) → deny-safe default.
     return ActivityViewMode(base="list", explicit_types=frozenset())
 
 
@@ -125,13 +147,12 @@ async def is_activity_visible(
     if mode.base == "own":
         return await lookup_is_agent(activity_id, user_id)
 
-    if mode.base == "related":
-        used_ids = await lookup_used_entity_ids(activity_id)
-        if used_ids & visible_entity_ids:
-            return True
-        return await lookup_is_agent(activity_id, user_id)
-
     if mode.base == "list":
         return activity_type in mode.explicit_types
 
+    # Unrecognised base (including legacy ``"related"``, removed in
+    # Round 31) → deny-safe. parse_activity_view already routes most
+    # unknown strings through the ``base="list", explicit_types=frozenset()``
+    # branch, but the dict form preserves ``mode`` verbatim so a stale
+    # ``{"mode": "related"}`` config lands here.
     return False

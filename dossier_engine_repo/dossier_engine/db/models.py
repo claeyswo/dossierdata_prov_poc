@@ -235,7 +235,7 @@ class DomainRelationRow(Base):
 class Repository:
     """Database operations. All writes are INSERTs (append-only)."""
 
-    def __init__(self, session: Session):
+    def __init__(self, session: AsyncSession):
         self.session = session
         # Session-scoped cache: agents that have already been ensured in this
         # session. Lets `ensure_agent` short-circuit after the first call per

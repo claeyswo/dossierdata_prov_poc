@@ -49,10 +49,15 @@ Activity visibility (``activity_view``)
 ---------------------------------------
 - ``"all"`` — all activities in the timeline are visible (sentinel).
 - ``"own"`` — only activities where the user is the PROV agent.
-- ``"related"`` — activities that touched visible entities, plus
-  the user's own.
 - A list of activity type names, e.g. ``["dienAanvraagIn",
   "bewerkAanvraag"]`` — only activities of those types are visible.
+- A dict ``{"mode": "own", "include": [<types>]}`` — ``"own"`` plus
+  an unconditional-include list of activity types always visible
+  regardless of agent.
+
+The ``"related"`` mode was removed in Round 31 (not used in
+production, confusing semantics); see ``_activity_visibility.py``
+module docstring.
 """
 
 from __future__ import annotations
@@ -159,8 +164,8 @@ def get_visibility_from_entry(
           See the module docstring's design principle.
 
         activity_view_mode:
-          ``"all"`` / ``"own"`` / ``"related"`` — sentinel values
-          with built-in semantics.
+          ``"all"`` / ``"own"`` — sentinel values with built-in
+          semantics (the ``"related"`` mode was removed in Round 31).
           A ``list[str]`` of activity type names — only those types
           are shown in the timeline.
           A ``dict`` with ``mode`` (a sentinel) and ``include``
@@ -227,9 +232,11 @@ def get_visibility_from_entry(
         visible_types = set()
 
     # --- Activity visibility ---
-    # Can be a string sentinel ("all", "own", "related") or a list
-    # of activity type names.  Returned as-is; the caller dispatches
-    # on type.
+    # Can be a string sentinel ("all", "own") or a list of activity
+    # type names, or a dict of mode+include. Returned as-is; the
+    # caller dispatches on type via ``parse_activity_view``. Legacy
+    # ``"related"`` values from pre-Round-31 configs are preserved
+    # here and deny-safed at evaluation time.
     activity_view = entry.get("activity_view", "all")
 
     return visible_types, activity_view

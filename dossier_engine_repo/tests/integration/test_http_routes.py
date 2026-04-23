@@ -458,86 +458,15 @@ class TestDossierDetailActivityViewFiltering:
         assert str(system_act) not in visible_ids, \
             "setDossierAccess (agent=system) hidden under 'own'"
 
-    async def test_related_mode_includes_activities_touching_visible_entities(
-        self, client, repo,
-    ):
-        """Under ``activity_view: "related"``, the citizen sees
-        activities where (a) they are the agent, OR (b) the activity
-        used a version of an entity they can see (``view: [...]``).
-
-        Seed: three activities. Activity A generates an ``oe:aanvraag``
-        that the citizen can see. Activity B is authored by a
-        different user and does NOT touch ``oe:aanvraag``. Activity C
-        is authored by a different user but USES the aanvraag version.
-        Expected visibility: A (citizen is the agent) and C (used the
-        visible entity). B should be hidden.
-        """
-        boot_act = await _bootstrap_dossier(repo)
-        await repo.ensure_agent("citizen", "natuurlijk_persoon", "Citizen", {})
-
-        # Activity A: generates the aanvraag, authored by the citizen.
-        act_a = await _seed_extra_activity(
-            repo, activity_type="dienAanvraagIn",
-            agent_id="citizen", agent_name="Citizen",
-            agent_type="natuurlijk_persoon",
-        )
-        aanvraag_eid, aanvraag_vid = await _seed_entity(
-            repo, act_a, "oe:aanvraag",
-            content={"titel": "test"},
-        )
-
-        # Activity B: unrelated activity, authored by admin, touches
-        # no aanvraag.
-        act_b = await _seed_extra_activity(
-            repo, activity_type="unrelatedActivity",
-            agent_id="admin", agent_name="Admin",
-            agent_type="natuurlijk_persoon",
-        )
-
-        # Activity C: authored by admin, USES the aanvraag version.
-        # This is the "related by usage" case that the `"related"` mode
-        # is about — the activity didn't come from the citizen but
-        # operated on the citizen's entity.
-        act_c = await _seed_extra_activity(
-            repo, activity_type="reviewAanvraag",
-            agent_id="admin", agent_name="Admin",
-            agent_type="natuurlijk_persoon",
-        )
-        from dossier_engine.db.models import UsedRow
-        repo.session.add(UsedRow(
-            activity_id=act_c, entity_id=aanvraag_vid,
-        ))
-        await repo.session.flush()
-
-        # Grant citizen "related" view over oe:aanvraag.
-        await _seed_access_entity(
-            repo, generated_by=boot_act,
-            access_entries=[
-                {"role": "aanvrager", "view": ["oe:aanvraag"],
-                 "activity_view": "related"},
-            ],
-        )
-        await _commit(repo)
-
-        r = await client.get(
-            f"/dossiers/{D1}", headers={"X-POC-User": "citizen"},
-        )
-        assert r.status_code == 200
-        visible_ids = {a["id"] for a in r.json()["activities"]}
-
-        # act_a: citizen is the agent — visible under "own" half of
-        # the "related" OR.
-        assert str(act_a) in visible_ids, \
-            "citizen-authored activity must be visible under 'related'"
-        # act_c used the visible entity version — the key "related"
-        # case. If this assertion fails after the refactor, the
-        # used_by_activity index was built wrong.
-        assert str(act_c) in visible_ids, \
-            "activity that used a visible entity version must be visible"
-        # act_b didn't touch oe:aanvraag and the citizen isn't the
-        # agent — hidden.
-        assert str(act_b) not in visible_ids, \
-            "activity unrelated to visible entities and to citizen is hidden"
+    # Round 31: ``test_related_mode_includes_activities_touching_visible_entities``
+    # was removed when the ``"related"`` mode itself was removed. The
+    # deprecation is pinned in ``tests/unit/test_activity_visibility.py::
+    # TestParseActivityView::test_related_string_falls_through_to_deny_safe``
+    # (parse layer) and in the new Pydantic rejection tests for
+    # ``DossierAccessEntry`` (write layer). A pre-Round-31 config
+    # still carrying ``activity_view: "related"`` results in an empty
+    # activity timeline at read time — deny-safe — rather than silent
+    # semantic change.
 
 
 class TestDossierDetailQueryCount:
