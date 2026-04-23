@@ -10,16 +10,16 @@
 
 | Status | Count | Items |
 |---|---|---|
-| ✅ Fixed & verified | 34 | Bugs 1, 2, 5, 6, 7, 9, 12, 15, 16, 17, 30, 32, 44, 47, 53, 54, 55, 56, 57, 58, 62, 64, 65, 66, 68, 69, 70, 72 (coverage), 73, 74, 75, 76, 77, 79 + Obs-2 (duplicate "external") |
+| ✅ Fixed & verified | 35 | Bugs 1, 2, 5, 6, 7, 9, 12, 15, 16, 17, 20, 30, 32, 44, 47, 53, 54, 55, 56, 57, 58, 62, 64, 65, 66, 68, 69, 70, 72 (coverage), 73, 74, 75, 76, 77, 79 + Obs-2 (duplicate "external") |
 | 🔍 Investigated, not a bug | 1 | Bug 14 — cross-dossier refs are `type=external` rows |
-| 🛑 Deferred / accepted | 4 | Bug 31 (RRN acceptable), Bug 45 (MinIO migration), Bug 63 (403 is correct HTTP), Bug 71 (test activities, deploy-time removal) |
-| 🧪 Test suite | **854/854** passing | engine 789 (unit 307 + integration 482), toelatingen 26, file_service 21, common/signing 18 |
+| 🛑 Deferred / accepted | 5 | Bug 28 (POC auth slated for replacement), Bug 31 (RRN acceptable), Bug 45 (MinIO migration), Bug 63 (403 is correct HTTP), Bug 71 (test activities, deploy-time removal) |
+| 🧪 Test suite | **857/857** passing | engine 792 (unit 310 + integration 482), toelatingen 26, file_service 21, common/signing 18 |
 | 🏃 `test_requests.sh` | **25/25 OK, exit 0, zero deadlocks, zero worker crashes** | D1–D9 green |
 | ✂️ Duplication closed | **D1, D2, D4, D22, D25** | Graph-loader consolidation + audit-emit wrapper |
 | 🧰 Harnesses installed | **3** | Guidebook YAML lint + phase-docstring lint + CI shell-spec wrapper |
 | 🤖 CI wired | **GitHub Actions** | `.github/workflows/ci.yml` — 4 jobs: pytest, shell-spec, doc-harnesses, migrations-append-only |
 | 🎯 Must-fix walk | **Complete** | All 17 fixable must-fix bugs closed; the 5 open rows are deferred/investigated by product decision (Bugs 14, 31, 45, 63, 71) |
-| 📦 Pending | 26 should-fix + 16 lower-priority bugs + 31 observations + 21 dups + 5 meta (partial relief) | See below |
+| 📦 Pending | 25 should-fix + 16 lower-priority bugs + 31 observations + 21 dups + 5 meta (partial relief) | See below |
 
 Note: Bug 75 was discovered *by* harness 2 on its first run — a new bug surfaced and fixed in the same session as the harness that surfaced it.
 
@@ -67,10 +67,10 @@ Note: Bug 75 was discovered *by* harness 2 on its first run — a new bug surfac
 | — | 2 | `file_service.signing_key` default accepted at startup. |  |
 | — | 2 | No plugin-load cross-check that `handler:`/`validator:` names resolve. |  |
 | — | 2 | Worker's recorded tasks don't pass `anchor_entity_id`/`anchor_type`. |  |
-| 20 | 3 | `_PendingEntity` missing several fields → `AttributeError`. |  |
+| ~~20~~ | 3 | ~~`_PendingEntity` missing several fields → `AttributeError`.~~ | ✅ **Fixed in Round 30.** Five EntityRow columns (`type`, `dossier_id`, `generated_by`, `derived_from`, `tombstoned_by`) were missing from `_PendingEntity` despite the class's own docstring saying they had to stay in sync. Concrete crash path: `schedule_trekAanvraag_if_onvolledig` → `_build_trekAanvraag_task` → `find_related_entity(pending_beslissing, "oe:aanvraag")` → `lineage.py:123 start_entity.type` → 💥 AttributeError. Reachable when the activity's `used:` block doesn't include the aanvraag — structurally near-impossible in normal flow but reachable via data-migration artefacts or future flow variants. Added the four new constructor kwargs + hardcoded `tombstoned_by` and `created_at` as structural None invariants. Plus 3 new tests: programmatic `EntityRow.__table__.columns` parity scan (the maintenance guard the docstring always promised) + 2 invariant tests. Existing `test_pending_entity_carries_expected_fields` extended 4 → 11 assertions. Paranoia-checked with partial revert — parity test emits named-diff error message (`"_PendingEntity is missing EntityRow columns: [...]"`) when drift re-occurs. |
 | 25 | 3 | `common_index.reindex_all` loads all dossiers into memory. |  |
 | 27 | 3 | `DossierAccessEntry.activity_view: str` too narrow. |  |
-| 28 | 3 | `POCAuthMiddleware` silently overwrites on duplicate usernames. |  |
+| 28 | 3 | `POCAuthMiddleware` silently overwrites on duplicate usernames. | 🛑 **Deferred — POC-only, slated for removal.** User confirmed in Round 30 planning that `POCAuthMiddleware` is POC-only and will be replaced (JWT/OAuth) rather than hardened. Fixing a fail-loudly-on-config-error path in code that's on the exit ramp is sunk cost. Re-evaluate if/when real auth lands and similar duplicate-config hazards surface there. |
 | 19 | 3 | `GET /dossiers` has no `response_model`. |  |
 | — | 3 | Archive has no size cap. |  |
 | — | 3 | `app.py:69` appends `SYSTEM_ACTION_DEF` by reference. |  |
@@ -193,7 +193,7 @@ The structural sweep catalogued observations clustering into five themes. **Coun
 - **Obs 82 — Test fixtures against real Postgres.** Direct `Repository` instances; no unit-isolation story documented. **Open.**
 - **Obs 83 — `test_requests.sh` in CI.** **Closed** in Round 8 + Round 9 (`scripts/ci_run_shell_spec.sh` harness 2 + GitHub Actions `shell-spec` job).
 - **Obs 84 — Schema-versioning test activities in production YAML** (covered by Bug 71). **Deferred by product decision** (deploy-time checklist removes them).
-- **Obs 85 — Dependency-override-friendly auth for tests.** Replace `POCAuthMiddleware` instance with FastAPI `dependency_overrides`. **Open.**
+- **Obs 85 — Dependency-override-friendly auth for tests.** Replace `POCAuthMiddleware` instance with FastAPI `dependency_overrides`. **Open — but see Bug 28 in the should-fix table: `POCAuthMiddleware` is slated for replacement with real auth (JWT/OAuth). Revisit this observation if the dependency-override pattern should carry forward into the real auth layer; the "tests can swap the auth dependency per case" affordance is general and useful regardless of which middleware is behind it.**
 - **Obs 86 — Signing key rotation** (only one key accepted today). **Open.**
 - **Obs 87 — Migration framework top-level audit log** (who/when/command). **Open.**
 - **Obs 88 — `DataMigration.transform` signature** should widen to `(content, row)`. **Open.**
@@ -728,9 +728,9 @@ Concrete behaviour bugs that are each ~30-100 lines of code + tests. Each wants 
 - **Bug 4** — `Session` type annotation never imported. *Surface: typing only, runtime-safe but IDE-visible.*
 - ~~**Bug 9**~~ — ~~N+1 in dossier detail view.~~ ✅ **Shipped in Round 29.**
 - **Bug 13** — Deprecated `@app.on_event("startup")`. *Modernization, small fix.*
-- **Bug 20** — `_PendingEntity` missing several fields → `AttributeError`. *Sev 3, can crash on specific input shapes.*
+- ~~**Bug 20**~~ — ~~`_PendingEntity` missing several fields → `AttributeError`.~~ ✅ **Shipped in Round 30.**
 - **Bug 27** — `DossierAccessEntry.activity_view: str` too narrow (should be Literal). *Type tightening.*
-- **Bug 28** — `POCAuthMiddleware` silently overwrites on duplicate usernames. *Boot-time validation gap; should fail loudly.*
+- 🛑 ~~**Bug 28**~~ — ~~`POCAuthMiddleware` silently overwrites on duplicate usernames.~~ **Deferred — POC-only, slated for replacement with real auth.**
 - **Bug 34** — `authorize_activity` catches broad `Exception`. *Hides real errors.*
 - **Bug 39** — `TaskEntity.status: str` → `Literal[...]`. *Type tightening.*
 - **Bug 43** — `Aanvrager.model_post_init` raises ValueError without Pydantic shape. *422 error shape wrong.*
@@ -1223,3 +1223,63 @@ Cat 2 cherry-picks continue per user's preference — one-by-one, sev-ordered. P
 4. **Bug 4** — unused `Session` import. Trivial, good "close a ticket cheaply" round if appetite is low.
 
 Cat 3 (caching & perf) remains in the wings but unchanged in priority — user's Cat 2 walk is the active track.
+
+### Round 30 — Bug 28 deferred + Bug 20 shipped
+
+Two actions this round: a small bookkeeping deferral on Bug 28, then the actual fix for Bug 20.
+
+**Bug 28 deferred.** User confirmed that `POCAuthMiddleware` is POC-only and slated for replacement with real auth (JWT/OAuth), so hardening its duplicate-username handling is sunk cost. Marked in the Should-fix table and the Cat 2 cherry-pick list. Obs 85 (dependency-override-friendly auth for tests) also cross-referenced, since it's in the same neighborhood — the "dependency_overrides" affordance may still be worth carrying into the real auth layer, so Obs 85 stayed open with a note rather than being closed outright. Bug 28 is now tagged 🛑 **Deferred — POC-only, slated for removal** rather than closed-as-fixed; the distinction matters for the Fixed vs Deferred counts and for anyone auditing the queue later.
+
+**Bug 20 (Round 30 proper) — `_PendingEntity` missing fields → `AttributeError`.**
+
+**Verify-before-plan pass (per review's entry: "needs a verify-before-plan pass to find which input shapes trigger it"):** traced the concrete crash path through the code. `_PendingEntity` is the engine's duck-typed stand-in for `EntityRow` used inside the generated-phase so handlers can read entities the current activity is generating before they hit the database. The class's own docstring says *"When you add a column to EntityRow, also add it here, or context.get_typed will fail with AttributeError on pending entities."* That rule had drifted — five columns were missing (`type`, `dossier_id`, `generated_by`, `derived_from`, `tombstoned_by`).
+
+**Concrete crash path:** `schedule_trekAanvraag_if_onvolledig` (task builder, wired to both `neemBeslissing` and `tekenBeslissing` activities) → `_build_trekAanvraag_task` → `context.get_used_row("oe:beslissing")` returns a `_PendingEntity` (because the current activity is generating the beslissing) → `find_related_entity(beslissing_pending, "oe:aanvraag")` → `lineage.py:123 start_entity.type` → 💥 `AttributeError`.
+
+**Production reachability:** narrow but real. Requires no `oe:aanvraag` in the activity's `used:` block. In normal toelatingen flow the `used:` block declares aanvraag with `required: false, auto_resolve: "latest"`, which finds the existing aanvraag and skips the lineage walk. The crash fires when no aanvraag exists at beslissing time — structurally near-impossible in well-formed data (workflow rules wouldn't normally let you reach beslissing without an aanvraag), but reachable via data-migration artefacts, manual DB repair, or a future flow variant. The existing tests in `test_build_trekAanvraag_task.py` didn't catch this because they construct `beslissing_row` as `SimpleNamespace(entity_id=...)` and mock `find_related_entity`, so the walker's `.type`/`.generated_by` reads never happen in tests.
+
+**Fix shape (Option A per plan).** Brought `_PendingEntity` into compliance with its own docstring rather than refactoring the method contract. Option B (refuse to return a `_PendingEntity` from `get_used_row`) was considered and rejected: the class is duck-typed stand-in by design, and callers already correctly read `entity_id`/`content`/`attributed_to` off it — Option B would have been an invasive contract change for a narrow fix.
+
+**Shipped:**
+- `engine/context.py::_PendingEntity.__init__` — accepts four new kwargs (`type`, `dossier_id`, `generated_by`, `derived_from`) and hardcodes `tombstoned_by=None` and `created_at=None` as class invariants. Docstring updated to explain the two-invariant (`tombstoned_by`/`created_at` can never be non-None for pending entities, because tombstoning and INSERT-time timestamps both happen at persistence time, which runs *after* the activity that constructs the pending entity).
+- `engine/pipeline/generated.py` — the construction site at line 116 now passes all four new fields from `state.dossier_id`, `state.activity_id`, `entity_type`, and the already-computed `derived_from_version` (which is now hoisted to a local so it's not computed twice).
+
+**Tests added (+3 in `tests/unit/test_refs_and_plugin.py`, +5 assertions in `tests/integration/test_process_generated.py`):**
+
+- `TestPendingEntityFieldParity::test_pending_entity_has_every_entity_row_column` — the maintenance guard the class docstring promised. Enumerates `EntityRow.__table__.columns` and asserts every name is a readable attribute on a `_PendingEntity` instance. If anyone adds a new column to `EntityRow` without updating `_PendingEntity`, this test goes red with a message that names the missing columns. This is deliberately a programmatic scan (not a hand-enumerated assert list) because the whole point is to track `EntityRow` over time — a hand-enumerated version would itself need maintaining.
+- `TestPendingEntityFieldParity::test_pending_entity_tombstoned_by_is_none` and `...created_at_is_none` — pin the two structural invariants documented in the `_PendingEntity` docstring. Small tests, cheap to keep, help future readers understand *why* these are hardcoded rather than constructor kwargs.
+- `test_process_generated.py::test_happy_path_populates_state` — extended the existing `pending_entity_carries_expected_fields` assertions (4 → 11). Pins the new fields **as they're populated by the real production call site**, not by a unit-level fixture. This is the behaviour-pin that would have caught the original bug if it had been written thoroughly when `_PendingEntity` was introduced.
+
+**Paranoia check ✓.** Partial revert (dropped `type`, `dossier_id`, `generated_by` but kept `derived_from` and the invariants) confirmed:
+- The integration test goes red with the exact production crash shape: `AttributeError: '_PendingEntity' object has no attribute 'type'`.
+- The parity test goes red with a clean, named diff: `"_PendingEntity is missing EntityRow columns: ['dossier_id', 'generated_by', 'type']"`.
+- The two invariant tests stay green (they're not about the reverted fields).
+
+This is the right shape: the parity test catches structural drift, the extended-happy-path test catches the concrete bug, and the invariant tests catch accidental un-hardcoding. Restored; all four back to green.
+
+**Test count note.** I considered adding a regression test that calls `find_related_entity` with a real `_PendingEntity` end-to-end (the exact production crash path). Decided against: the parity test already catches the root cause, and adding a "the walker doesn't crash on a pending start entity" test would duplicate coverage with the integration test's `test_pending_entity_carries_expected_fields` plus the existing `TestFindRelatedEntity` walker tests. Round 25's "don't ship weak tests" lesson applies — one strong parity test plus one strong behaviour test is better than three tests that overlap.
+
+**Verification:**
+- Engine unit: **310** (was 307; +3 new parity tests).
+- Engine integration: **482** (unchanged; the existing test was extended, not added).
+- Toelatingen / common / file_service unchanged at **26 / 18 / 21**.
+- **Total: 857 / 857 passing** (was 854).
+
+**Totals after Round 30:** **35 bugs fixed** (was 34 — Bug 20 added). Bug 28 counts as deferred, not fixed — the Engagement-summary "Deferred / accepted" row now has 5 items (Bugs 14, 31, 45, 63, 71, 28). Should-fix table: **25 open** (was 26 — Bug 20 closed). Observations unchanged. Test suite grew 854 → 857.
+
+### Process lesson — "the class's own docstring is documentation of intent, not a guarantee of compliance"
+
+The `_PendingEntity` docstring explicitly said *"When you add a column to EntityRow, also add it here."* Someone wrote that rule knowing the drift hazard; the drift happened anyway. Two takeaways worth capturing:
+
+1. **Intent-documentation without a test is cargo-cult correctness.** A rule stated in a docstring is a request for future contributors to cooperate. It's more useful than nothing, but meaningfully less useful than a test that enforces it. Round 30's `TestPendingEntityFieldParity` converts the rule into an enforced invariant — if the rule re-drifts, CI goes red and names what broke. Upgrading a rule from "I hope people read this" to "this is enforced" is usually a one-shot test and always worth the turn.
+
+2. **Duck-typed stand-ins accumulate drift.** `_PendingEntity` quacks like `EntityRow` — same attribute names, same semantic roles — but the two are unrelated classes held together only by discipline. Drift is the default state; compliance requires active maintenance. If a similar stand-in pattern appears for another class (e.g. a pending `ActivityRow` for side-effect pipelines), the same parity-test pattern should apply on day one.
+
+### Where to go next
+
+Cat 2 cherry-pick track continues. My recommendation order for the remaining priority items:
+
+1. **Bug 27** — `DossierAccessEntry.activity_view: str` too narrow (should be `Literal`). Type tightening. **Natural place to settle the `"related"` mode question** — the `Literal[...]` declaration forces a decision on which modes stay.
+2. **Bug 4** — unused `Session` import. Trivial closer.
+
+After those, Cat 2 still has Bugs 34, 39, 43, 48, 50, 59, 60, 67 — the longer tail. Cat 3 (caching batch) also remains available.

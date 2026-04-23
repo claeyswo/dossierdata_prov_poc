@@ -1453,3 +1453,106 @@ class TestBuildCallableRegistries:
         assert "dossier_toelatingen.handlers.resolve_beslissing_status" in plugin.status_resolvers
         assert "dossier_toelatingen.handlers.schedule_trekAanvraag_if_onvolledig" in plugin.task_builders
         assert "dossier_toelatingen.relation_validators.validate_neemt_akte_van" in plugin.relation_validators
+
+
+# =====================================================================
+# Bug 20 / Round 30: _PendingEntity field parity with EntityRow
+# =====================================================================
+
+
+class TestPendingEntityFieldParity:
+    """``_PendingEntity`` is a duck-typed stand-in for ``EntityRow``
+    used inside the engine's generated-phase so handlers can read
+    entities the current activity is generating before they hit
+    the database. The class's own docstring says:
+
+        When you add a column to EntityRow, also add it here, or
+        context.get_typed will fail with AttributeError on pending
+        entities.
+
+    That rule had drifted. Five EntityRow columns were missing from
+    ``_PendingEntity`` (``type``, ``dossier_id``, ``generated_by``,
+    ``derived_from``, ``tombstoned_by``) — which produced an
+    AttributeError when a pending entity was passed to the lineage
+    walker via a task builder. Concrete crash path:
+    ``schedule_trekAanvraag_if_onvolledig`` → ``_build_trekAanvraag_task``
+    → ``find_related_entity(beslissing_pending, "oe:aanvraag")`` →
+    ``lineage.py:123 start_entity.type`` → 💥.
+
+    This test is the maintenance guard: it enumerates every
+    ``EntityRow`` column at test time and asserts each is a readable
+    attribute on a ``_PendingEntity`` instance. Adding a new column
+    to ``EntityRow`` without updating ``_PendingEntity`` goes red here.
+    """
+
+    def test_pending_entity_has_every_entity_row_column(self):
+        from uuid import uuid4
+
+        from dossier_engine.db.models import EntityRow
+        from dossier_engine.engine.context import _PendingEntity
+
+        # Construct a pending entity with the same constructor shape
+        # production code uses. Values are placeholder — the test is
+        # about attribute presence, not attribute correctness.
+        pending = _PendingEntity(
+            content={"any": "value"},
+            entity_id=uuid4(),
+            id=uuid4(),
+            attributed_to="test",
+            schema_version=None,
+            type="oe:test",
+            dossier_id=uuid4(),
+            generated_by=uuid4(),
+            derived_from=None,
+        )
+
+        entity_row_columns = set(EntityRow.__table__.columns.keys())
+        missing = []
+        for col_name in sorted(entity_row_columns):
+            if not hasattr(pending, col_name):
+                missing.append(col_name)
+
+        assert not missing, (
+            f"_PendingEntity is missing EntityRow columns: {missing}. "
+            f"See the class's own docstring: every EntityRow column "
+            f"must be readable on _PendingEntity or context.get_typed "
+            f"(and anything that reads the row through it) will fail "
+            f"with AttributeError on pending entities."
+        )
+
+    def test_pending_entity_tombstoned_by_is_none(self):
+        """Pending entities cannot be tombstoned — the row doesn't
+        exist yet, so there's no version to mark as dead. The
+        invariant is structural, not a design choice: tombstoning
+        happens in the persistence phase, which only runs after
+        the current activity's pending entities are written out."""
+        from uuid import uuid4
+
+        from dossier_engine.engine.context import _PendingEntity
+
+        pending = _PendingEntity(
+            content={}, entity_id=uuid4(), id=uuid4(),
+            attributed_to="t", schema_version=None,
+            type="oe:x", dossier_id=uuid4(),
+            generated_by=uuid4(), derived_from=None,
+        )
+        assert pending.tombstoned_by is None
+
+    def test_pending_entity_created_at_is_none(self):
+        """Same reasoning as tombstoned_by: ``created_at`` is set by
+        the database at INSERT time (``default=lambda: datetime.now(...)``
+        on the column). For a not-yet-persisted pending entity, the
+        canonical value is None — callers that care about creation
+        time of a pending entity are asking the wrong question; use
+        the activity's ``started_at`` instead."""
+        from uuid import uuid4
+
+        from dossier_engine.engine.context import _PendingEntity
+
+        pending = _PendingEntity(
+            content={}, entity_id=uuid4(), id=uuid4(),
+            attributed_to="t", schema_version=None,
+            type="oe:x", dossier_id=uuid4(),
+            generated_by=uuid4(), derived_from=None,
+        )
+        assert pending.created_at is None

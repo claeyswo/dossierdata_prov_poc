@@ -233,10 +233,32 @@ class TestProcessGenerated:
         assert "oe:aanvraag" in state.resolved_entities
         pending = state.resolved_entities["oe:aanvraag"]
         assert isinstance(pending, _PendingEntity)
+        # Bug 20 (Round 30): _PendingEntity must expose every column
+        # EntityRow has, so handlers and the lineage walker can read
+        # them uniformly whether the entity is pending or persisted.
+        # Before this round, the following attributes were missing,
+        # causing AttributeError whenever a pending entity reached
+        # code expecting a full EntityRow — the concrete production
+        # path was schedule_trekAanvraag_if_onvolledig →
+        # find_related_entity(pending_beslissing, "oe:aanvraag"),
+        # which reads ``.type`` at lineage.py:123 and ``.generated_by``
+        # at lineage.py:126. The crash fires only when there's no
+        # ``oe:aanvraag`` in the activity's ``used:`` block — a
+        # structural edge case that workflow rules normally prevent
+        # but the type system does not.
         assert pending.entity_id == entity_id
         assert pending.id == version_id
         assert pending.content == {"titel": "Test", "bedrag": 100.0}
         assert pending.attributed_to == "u1"  # from state.user.id
+        # Newly required under Bug 20.
+        assert pending.type == "oe:aanvraag"
+        assert pending.dossier_id == D1
+        assert pending.generated_by == state.activity_id
+        assert pending.derived_from is None  # fresh entity, no parent version
+        assert pending.tombstoned_by is None  # pending entities cannot be tombstoned
+        # Previously-existing but kept as part of the contract pin.
+        assert pending.schema_version is None  # _NoValidationPlugin returns None
+        assert pending.created_at is None  # set at persist time, not here
 
     async def test_derived_from_version_extracted_into_normalized_dict(
         self, repo,

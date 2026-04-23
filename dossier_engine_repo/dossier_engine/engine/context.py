@@ -37,19 +37,67 @@ class _PendingEntity:
     The engine constructs one of these for every entity the current
     activity is generating, so handlers running in the same activity can
     read them via `context.get_typed()` before the database row exists.
-    Quacks like `EntityRow` for the fields handlers care about.
+    Quacks like `EntityRow` for **every** column handlers or the
+    engine's own walkers might read — not just ``content``.
 
-    When you add a column to `EntityRow`, also add it here, or
-    `context.get_typed` will fail with AttributeError on pending entities.
+    Bug 20 (Round 30): ``type``, ``dossier_id``, ``generated_by``,
+    ``derived_from``, and ``tombstoned_by`` were missing from earlier
+    versions of this class. The concrete production crash path was
+    ``_build_trekAanvraag_task`` calling ``find_related_entity`` with
+    a pending beslissing; the walker reads ``start_entity.type`` and
+    ``start_entity.generated_by`` at the top of its loop and hit
+    ``AttributeError``. Structurally reachable when the activity's
+    ``used:`` block doesn't include the aanvraag — workflow rules
+    normally prevent it, but the class's type surface doesn't.
+
+    When you add a column to ``EntityRow``, also add it here, or
+    ``context.get_typed`` (and any walker that reads the row through
+    it) will fail with ``AttributeError`` on pending entities.
+    ``tests/unit/test_refs_and_plugin.py::TestPendingEntityFieldParity``
+    enumerates every ``EntityRow`` column at test time and fails
+    loudly if this class drifts again.
+
+    Two fields are invariantly ``None`` for pending entities:
+
+    * ``tombstoned_by`` — pending entities cannot be tombstoned;
+      tombstoning happens in the persistence phase, which runs after
+      the current activity's pending entities are written out.
+    * ``created_at`` — set by the database at INSERT time via the
+      column default. Callers asking for the creation time of a
+      pending entity are asking the wrong question; use the
+      activity's ``started_at`` instead.
     """
 
-    def __init__(self, content, entity_id, id, attributed_to, schema_version=None):
+    def __init__(
+        self,
+        content,
+        entity_id,
+        id,
+        attributed_to,
+        schema_version=None,
+        *,
+        type: str | None = None,
+        dossier_id=None,
+        generated_by=None,
+        derived_from=None,
+    ):
         self.content = content
         self.entity_id = entity_id
         self.id = id
         self.attributed_to = attributed_to
-        self.created_at = None
         self.schema_version = schema_version
+        # Bug 20: additional EntityRow columns that handlers + the
+        # lineage walker may read. Declared explicitly on the
+        # constructor so the caller cannot silently forget one —
+        # if any EntityRow column is missing from this signature,
+        # the parity test goes red.
+        self.type = type
+        self.dossier_id = dossier_id
+        self.generated_by = generated_by
+        self.derived_from = derived_from
+        # Invariantly None for pending entities — see class docstring.
+        self.tombstoned_by = None
+        self.created_at = None
 
 
 class ActivityContext:

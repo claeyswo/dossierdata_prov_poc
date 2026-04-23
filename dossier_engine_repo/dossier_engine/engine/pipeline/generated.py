@@ -102,23 +102,36 @@ async def process_generated(state: ActivityState) -> None:
         )
         _validate_content(state, entity_type, new_schema_version, content)
 
+        derived_from_version = _parse_derived_from_version(derived_from_ref)
+
         state.generated.append({
             "version_id": parsed.version_id,
             "entity_id": parsed.entity_id,
             "type": entity_type,
             "content": content,
-            "derived_from": _parse_derived_from_version(derived_from_ref),
+            "derived_from": derived_from_version,
             "ref": entity_ref,
             "schema_version": new_schema_version,
         })
 
         # Make the pending entity visible to handlers via context.get_typed.
+        # Bug 20 (Round 30): populate every EntityRow-equivalent field so
+        # handlers and the lineage walker can read the pending entity
+        # uniformly. Before this, ``type``, ``dossier_id``,
+        # ``generated_by``, and ``derived_from`` were missing from
+        # _PendingEntity's constructor — reading any of them from a
+        # pending row raised AttributeError. See the _PendingEntity
+        # docstring for the full rationale.
         state.resolved_entities[entity_type] = _PendingEntity(
             content=content,
             entity_id=parsed.entity_id,
             id=parsed.version_id,
             attributed_to=state.user.id,
             schema_version=new_schema_version,
+            type=entity_type,
+            dossier_id=state.dossier_id,
+            generated_by=state.activity_id,
+            derived_from=derived_from_version,
         )
 
 
