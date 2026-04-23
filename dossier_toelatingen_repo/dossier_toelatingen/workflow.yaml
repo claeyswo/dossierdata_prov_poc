@@ -243,6 +243,19 @@ relations:
     description: >
       Cross-dossier relation — links this dossier to another related dossier.
 
+# =====================================================================
+# Field-level validators
+# =====================================================================
+# Exposed as POST /{workflow}/validate/{url_key}. Unlike the other seven
+# Callable registries, the key stays a short user-facing string because
+# it's part of the HTTP URL — but resolution still uses dotted paths so
+# misconfiguration fails at plugin load, not at first-request time
+# (Obs 95 / Round 28).
+
+field_validators:
+  erfgoedobject: "dossier_toelatingen.field_validators.erfgoedobject"
+  handeling: "dossier_toelatingen.field_validators.handeling"
+
 activities:
 
   - name: "dienAanvraagIn"
@@ -272,7 +285,7 @@ activities:
     status: "ingediend"
 
     validators:
-      - name: "valideer_indiening"
+      - name: "dossier_toelatingen.validators.valideer_indiening"
         description: "Valideert de aanvraag bij indiening"
 
     side_effects:
@@ -281,9 +294,9 @@ activities:
 
     tasks:
       - kind: "recorded"
-        function: "move_bijlagen_to_permanent"
+        function: "dossier_toelatingen.tasks.move_bijlagen_to_permanent"
       - kind: "recorded"
-        function: "send_ontvangstbevestiging"
+        function: "dossier_toelatingen.tasks.send_ontvangstbevestiging"
 
     relations:
       - type: "oe:betreft"
@@ -318,7 +331,7 @@ activities:
     status: "ingediend"
 
     validators:
-      - name: "valideer_indiening"
+      - name: "dossier_toelatingen.validators.valideer_indiening"
         description: "Valideert de bewerkte aanvraag"
 
     side_effects:
@@ -327,7 +340,7 @@ activities:
 
     tasks:
       - kind: "recorded"
-        function: "move_bijlagen_to_permanent"
+        function: "dossier_toelatingen.tasks.move_bijlagen_to_permanent"
 
   - name: "vervolledigAanvraag"
     label: "Vervolledig aanvraag"
@@ -363,7 +376,7 @@ activities:
     status: "ingediend"
 
     validators:
-      - name: "valideer_indiening"
+      - name: "dossier_toelatingen.validators.valideer_indiening"
         description: "Valideert de vervolledigde aanvraag"
 
     side_effects:
@@ -372,9 +385,9 @@ activities:
 
     tasks:
       - kind: "recorded"
-        function: "move_bijlagen_to_permanent"
+        function: "dossier_toelatingen.tasks.move_bijlagen_to_permanent"
       - kind: "recorded"
-        function: "send_ontvangstbevestiging"
+        function: "dossier_toelatingen.tasks.send_ontvangstbevestiging"
 
   - name: "doeVoorstelBeslissing"
     label: "Doe voorstel beslissing"
@@ -408,7 +421,7 @@ activities:
     side_effects: []
     relations:
       - type: "oe:neemtAkteVan"
-        validator: "validate_neemt_akte_van"
+        validator: "dossier_toelatingen.relation_validators.validate_neemt_akte_van"
     tasks: []
 
   - name: "tekenBeslissing"
@@ -423,9 +436,9 @@ activities:
     # tasks from the named builder(s). No handler — this activity
     # doesn't compute entity content beyond what the client submits
     # (the handtekening), so no handler is needed.
-    status_resolver: "resolve_beslissing_status"
+    status_resolver: "dossier_toelatingen.handlers.resolve_beslissing_status"
     task_builders:
-      - "schedule_trekAanvraag_if_onvolledig"
+      - "dossier_toelatingen.handlers.schedule_trekAanvraag_if_onvolledig"
 
     authorization:
       access: "roles"
@@ -453,7 +466,7 @@ activities:
     side_effects: []
     relations:
       - type: "oe:neemtAkteVan"
-        validator: "validate_neemt_akte_van"
+        validator: "dossier_toelatingen.relation_validators.validate_neemt_akte_van"
     tasks: []
 
   - name: "neemBeslissing"
@@ -467,9 +480,9 @@ activities:
     # Split-style hooks (same as tekenBeslissing — the status and
     # task logic are identical whether the beslissing is taken
     # directly or triggered via tekenBeslissing).
-    status_resolver: "resolve_beslissing_status"
+    status_resolver: "dossier_toelatingen.handlers.resolve_beslissing_status"
     task_builders:
-      - "schedule_trekAanvraag_if_onvolledig"
+      - "dossier_toelatingen.handlers.schedule_trekAanvraag_if_onvolledig"
 
     authorization:
       access: "roles"
@@ -501,10 +514,10 @@ activities:
     side_effects: []
     relations:
       - type: "oe:neemtAkteVan"
-        validator: "validate_neemt_akte_van"
+        validator: "dossier_toelatingen.relation_validators.validate_neemt_akte_van"
     tasks:
       - kind: "recorded"
-        function: "log_beslissing_genomen"
+        function: "dossier_toelatingen.tasks.log_beslissing_genomen"
 
   - name: "trekAanvraagIn"
     label: "Trek aanvraag in"
@@ -548,7 +561,7 @@ activities:
     can_create_dossier: false
     client_callable: false
     default_role: "systeem"
-    handler: "set_dossier_access"
+    handler: "dossier_toelatingen.handlers.set_dossier_access"
 
     authorization:
       access: "roles"
@@ -575,7 +588,7 @@ activities:
     can_create_dossier: false
     client_callable: false
     default_role: "systeem"
-    handler: "set_verantwoordelijke_organisatie"
+    handler: "dossier_toelatingen.handlers.set_verantwoordelijke_organisatie"
 
     authorization:
       access: "roles"
@@ -604,7 +617,7 @@ activities:
       - activity: "setDossierAccess"
     tasks:
       - kind: "recorded"
-        function: "log_organisatie_aangeduid"
+        function: "dossier_toelatingen.tasks.log_organisatie_aangeduid"
 
   - name: "duidBehandelaarAan"
     label: "Duid behandelaar aan"
@@ -612,7 +625,7 @@ activities:
     can_create_dossier: false
     client_callable: false
     default_role: "systeem"
-    handler: "duid_behandelaar_aan"
+    handler: "dossier_toelatingen.handlers.duid_behandelaar_aan"
 
     authorization:
       access: "roles"
@@ -641,7 +654,7 @@ activities:
     side_effects: []
     tasks:
       - kind: "recorded"
-        function: "send_behandelaar_notificatie"
+        function: "dossier_toelatingen.tasks.send_behandelaar_notificatie"
 
   - name: "setSystemFields"
     label: "Stel systeemvelden in"
@@ -649,7 +662,7 @@ activities:
     can_create_dossier: false
     client_callable: false
     default_role: "systeem"
-    handler: "set_system_fields"
+    handler: "dossier_toelatingen.handlers.set_system_fields"
 
     authorization:
       access: "roles"

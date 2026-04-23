@@ -155,27 +155,35 @@ class HandelingResponse(BaseModel):
     error: Optional[str] = None
 
 
-FIELD_VALIDATORS = {
-    "erfgoedobject": FieldValidator(
-        fn=validate_erfgoedobject,
-        request_model=ErfgoedobjectRequest,
-        response_model=ErfgoedobjectResponse,
-        summary="Valideer erfgoedobject URI",
-        description=(
-            "Controleer of de URI verwijst naar een gekend "
-            "erfgoedobject in de inventaris. Retourneert het "
-            "label, type en gemeente bij succes."
-        ),
+# Module-level FieldValidator bindings. Obs 95 / Round 28: these used
+# to live in a ``FIELD_VALIDATORS = {...}`` dict that ``create_plugin()``
+# passed to ``Plugin(...)``. Under the dotted-path migration the
+# workflow YAML's ``field_validators:`` block resolves each URL key
+# (e.g. ``erfgoedobject``) to its dotted path
+# (``dossier_toelatingen.field_validators.erfgoedobject``) at plugin
+# load time. The URL key itself stays user-facing — it ends up in
+# ``POST /{workflow}/validate/{url_key}`` — so ``field_validators`` is
+# the one registry whose key is NOT the dotted path.
+erfgoedobject = FieldValidator(
+    fn=validate_erfgoedobject,
+    request_model=ErfgoedobjectRequest,
+    response_model=ErfgoedobjectResponse,
+    summary="Valideer erfgoedobject URI",
+    description=(
+        "Controleer of de URI verwijst naar een gekend "
+        "erfgoedobject in de inventaris. Retourneert het "
+        "label, type en gemeente bij succes."
     ),
-    "handeling": FieldValidator(
-        fn=validate_handeling,
-        request_model=HandelingRequest,
-        response_model=HandelingResponse,
-        summary="Valideer handeling voor erfgoedobject",
-        description=(
-            "Controleer of een handeling (renovatie, sloop, ...) "
-            "toegelaten is voor het type erfgoedobject (monument, "
-            "landschap, ...) waarnaar de URI verwijst."
-        ),
+)
+
+handeling = FieldValidator(
+    fn=validate_handeling,
+    request_model=HandelingRequest,
+    response_model=HandelingResponse,
+    summary="Valideer handeling voor erfgoedobject",
+    description=(
+        "Controleer of een handeling (renovatie, sloop, ...) "
+        "toegelaten is voor het type erfgoedobject (monument, "
+        "landschap, ...) waarnaar de URI verwijst."
     ),
-}
+)

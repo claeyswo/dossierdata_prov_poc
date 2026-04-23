@@ -19,16 +19,11 @@ import yaml
 from dossier_engine.plugin import (
     Plugin,
     build_entity_registries_from_workflow,
+    build_callable_registries_from_workflow,
     validate_workflow_version_references,
     validate_side_effect_conditions,
     validate_side_effect_condition_fn_registrations,
 )
-
-from .handlers import HANDLERS, STATUS_RESOLVERS, TASK_BUILDERS, SIDE_EFFECT_CONDITIONS
-from .validators import VALIDATORS
-from .relation_validators import RELATION_VALIDATORS
-from .field_validators import FIELD_VALIDATORS
-from .tasks import TASK_HANDLERS
 
 logger = logging.getLogger("toelatingen.index")
 
@@ -197,12 +192,21 @@ def create_plugin() -> Plugin:
     """Create and return the toelatingen plugin.
 
     Entity model and versioned schema registries are built from the
-    workflow YAML's `entity_types` block — each entry declares its
-    `model` (default/unversioned) and optional `schemas` mapping
+    workflow YAML's ``entity_types`` block — each entry declares its
+    ``model`` (default/unversioned) and optional ``schemas`` mapping
     version strings to fully-qualified Pydantic class paths. This is
     the single source of truth for the versioning picture; the engine
-    cross-checks every activity's `new_version` / `allowed_versions`
+    cross-checks every activity's ``new_version`` / ``allowed_versions``
     against it at load time.
+
+    The eight Callable registries (handlers, validators, task_handlers,
+    status_resolvers, task_builders, side_effect_conditions,
+    relation_validators, field_validators) are built from the same YAML
+    via ``build_callable_registries_from_workflow`` — each activity
+    declaration names its callables by fully-qualified dotted path,
+    which the engine resolves at load time (Obs 95 / Round 28). This
+    plugin therefore does not maintain any per-registry short-name
+    dicts of its own — all registration happens in ``workflow.yaml``.
     """
 
     workflow_path = os.path.join(os.path.dirname(__file__), "workflow.yaml")
@@ -210,10 +214,12 @@ def create_plugin() -> Plugin:
         workflow = yaml.safe_load(f)
 
     entity_models, entity_schemas = build_entity_registries_from_workflow(workflow)
+    callables = build_callable_registries_from_workflow(workflow)
+
     validate_workflow_version_references(workflow, entity_schemas)
     validate_side_effect_conditions(workflow)
     validate_side_effect_condition_fn_registrations(
-        workflow, SIDE_EFFECT_CONDITIONS,
+        workflow, callables["side_effect_conditions"],
     )
 
     # Build the constants object. Precedence: env vars (via
@@ -231,14 +237,14 @@ def create_plugin() -> Plugin:
         workflow=workflow,
         entity_models=entity_models,
         entity_schemas=entity_schemas,
-        handlers=HANDLERS,
-        status_resolvers=STATUS_RESOLVERS,
-        task_builders=TASK_BUILDERS,
-        side_effect_conditions=SIDE_EFFECT_CONDITIONS,
-        validators=VALIDATORS,
-        relation_validators=RELATION_VALIDATORS,
-        field_validators=FIELD_VALIDATORS,
-        task_handlers=TASK_HANDLERS,
+        handlers=callables["handlers"],
+        status_resolvers=callables["status_resolvers"],
+        task_builders=callables["task_builders"],
+        side_effect_conditions=callables["side_effect_conditions"],
+        validators=callables["validators"],
+        relation_validators=callables["relation_validators"],
+        field_validators=callables["field_validators"],
+        task_handlers=callables["task_handlers"],
         post_activity_hook=update_search_index,
         search_route_factory=register_search_routes,
         build_common_doc_for_dossier=_build_common_doc,

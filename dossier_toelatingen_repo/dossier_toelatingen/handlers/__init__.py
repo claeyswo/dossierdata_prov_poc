@@ -398,39 +398,12 @@ async def duid_behandelaar_aan(context: ActivityContext, content: dict | None) -
     )
 
 
-# Registry of all handlers
-HANDLERS = {
-    "set_dossier_access": set_dossier_access,
-    "set_verantwoordelijke_organisatie": set_verantwoordelijke_organisatie,
-    "set_system_fields": set_system_fields,
-    "handle_beslissing": handle_beslissing,  # legacy path; still registered
-    "duid_behandelaar_aan": duid_behandelaar_aan,
-}
-
-# Split-style status resolvers. Each function returns a status
-# string (or None) given the activity context. Referenced from YAML
-# via ``status_resolver: "name"`` on an activity.
-STATUS_RESOLVERS = {
-    "resolve_beslissing_status": resolve_beslissing_status,
-}
-
-# Split-style task builders. Each returns a list of task dicts
-# (possibly empty). Referenced from YAML via ``task_builders: [...]``
-# on an activity. Multiple builders can apply to one activity; the
-# engine concatenates their results.
-TASK_BUILDERS = {
-    "schedule_trekAanvraag_if_onvolledig": schedule_trekAanvraag_if_onvolledig,
-}
-
-
-# Named predicates for gating side-effect execution. YAML references
-# these via ``condition_fn: "name"`` on a side-effect entry. Each is
-# an async function taking an ActivityContext and returning bool:
-# True means "run the side effect," False means skip.
-#
-# Choose this form when the gate is more than simple field equality
-# (for which ``condition: {entity_type, field, value}`` is clearer
-# inline in YAML). Empty by default — no workflow currently needs a
-# non-equality gate; the registry exists so plugins can add one
-# without engine changes.
-SIDE_EFFECT_CONDITIONS = {}
+# Obs 95 / Round 28: registry dicts (``HANDLERS``, ``STATUS_RESOLVERS``,
+# ``TASK_BUILDERS``, ``SIDE_EFFECT_CONDITIONS``) previously lived here
+# and were passed to ``Plugin(...)`` by ``create_plugin()``. They've
+# been removed — the engine now builds these registries directly from
+# ``workflow.yaml`` via ``build_callable_registries_from_workflow``,
+# resolving dotted paths at plugin load time. The functions themselves
+# remain module-level (importable as
+# ``dossier_toelatingen.handlers.set_dossier_access`` etc.), which is
+# what the new YAML references. See Round 28 writeup for rationale.

@@ -16,6 +16,8 @@ async def valideer_indiening(context: ActivityContext) -> bool:
     return True
 
 
-VALIDATORS = {
-    "valideer_indiening": valideer_indiening,
-}
+# Obs 95 / Round 28: the ``VALIDATORS = {"valideer_indiening": ...}``
+# registry dict has been removed. Workflow YAML now references this
+# callable as ``dossier_toelatingen.validators.valideer_indiening``
+# and the engine resolves it at plugin load via
+# ``build_callable_registries_from_workflow``.

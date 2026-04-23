@@ -1166,3 +1166,290 @@ class TestRelationValidatorRegistrations:
             entity_models={}, relation_validators={},
         )
         validate_relation_validator_registrations(plugin)
+
+
+# =====================================================================
+# Obs 95 / Round 28: dotted-path callable resolution
+# =====================================================================
+
+
+class TestImportDottedCallable:
+    """``_import_dotted_callable`` is the underlying resolver used by
+    ``build_callable_registries_from_workflow``. It mirrors
+    ``_import_dotted`` but accepts any Python object (callables,
+    ``FieldValidator`` instances) rather than requiring a ``BaseModel``
+    subclass. These tests cover its error-attribution behaviour — the
+    ``context`` kwarg is what makes plugin-load errors actionable by
+    naming the activity + YAML field where the bad path came from.
+    """
+
+    def test_resolves_a_real_callable(self):
+        from dossier_engine.plugin import _import_dotted_callable
+        # Use a stable stdlib function so this test has no dep on the
+        # toelatingen plugin being installed.
+        obj = _import_dotted_callable("os.path.join")
+        from os.path import join as real_join
+        assert obj is real_join
+
+    def test_non_string_raises(self):
+        from dossier_engine.plugin import _import_dotted_callable
+        import pytest
+        with pytest.raises(ValueError, match="Invalid dotted path"):
+            _import_dotted_callable(None)
+        with pytest.raises(ValueError, match="Invalid dotted path"):
+            _import_dotted_callable(42)
+
+    def test_missing_dot_raises(self):
+        from dossier_engine.plugin import _import_dotted_callable
+        import pytest
+        with pytest.raises(ValueError, match="must be a fully-qualified"):
+            _import_dotted_callable("just_a_name")
+
+    def test_bad_module_raises_with_context(self):
+        from dossier_engine.plugin import _import_dotted_callable
+        import pytest
+        with pytest.raises(ValueError, match="Cannot import module"):
+            _import_dotted_callable("no.such.module.function")
+
+    def test_missing_attribute_raises_with_context(self):
+        from dossier_engine.plugin import _import_dotted_callable
+        import pytest
+        with pytest.raises(ValueError, match="has no attribute"):
+            _import_dotted_callable(
+                "os.path.no_such_function",
+                context="activity 'x' handler",
+            )
+        # Context string appears in the message so operators know
+        # which YAML field produced the bad path.
+        try:
+            _import_dotted_callable(
+                "os.path.no_such_function",
+                context="activity 'x' handler",
+            )
+        except ValueError as e:
+            assert "activity 'x' handler" in str(e)
+
+    def test_empty_context_omits_where_fragment(self):
+        """When context is the default empty string, the error message
+        shouldn't contain a dangling `(in )` fragment."""
+        from dossier_engine.plugin import _import_dotted_callable
+        try:
+            _import_dotted_callable("os.path.no_such_function")
+        except ValueError as e:
+            assert "(in " not in str(e)
+
+
+class TestBuildCallableRegistries:
+    """``build_callable_registries_from_workflow`` is the Obs 95 /
+    Round 28 replacement for hand-built per-plugin registry dicts. The
+    tests use ``os.path.join`` etc. as stable real callables — any
+    module-level importable name works; the tests are about the
+    traversal of the workflow dict, not about the specific callable
+    shapes.
+    """
+
+    def test_empty_workflow_returns_eight_empty_dicts(self):
+        from dossier_engine.plugin import build_callable_registries_from_workflow
+        result = build_callable_registries_from_workflow({})
+        assert set(result.keys()) == {
+            "handlers", "validators", "task_handlers",
+            "status_resolvers", "task_builders",
+            "side_effect_conditions", "relation_validators",
+            "field_validators",
+        }
+        for reg_name, reg in result.items():
+            assert reg == {}, f"{reg_name!r} should be empty"
+
+    def test_activity_level_handler_resolves(self):
+        from dossier_engine.plugin import build_callable_registries_from_workflow
+        wf = {"activities": [
+            {"name": "act1", "handler": "os.path.join"},
+        ]}
+        result = build_callable_registries_from_workflow(wf)
+        from os.path import join
+        assert result["handlers"] == {"os.path.join": join}
+
+    def test_activity_level_status_resolver_resolves(self):
+        from dossier_engine.plugin import build_callable_registries_from_workflow
+        wf = {"activities": [
+            {"name": "act1", "status_resolver": "os.path.join"},
+        ]}
+        result = build_callable_registries_from_workflow(wf)
+        assert "os.path.join" in result["status_resolvers"]
+
+    def test_task_builders_list(self):
+        from dossier_engine.plugin import build_callable_registries_from_workflow
+        wf = {"activities": [
+            {"name": "act1", "task_builders": ["os.path.join", "os.path.split"]},
+        ]}
+        result = build_callable_registries_from_workflow(wf)
+        assert set(result["task_builders"].keys()) == {
+            "os.path.join", "os.path.split",
+        }
+
+    def test_validators_list_uses_name_key(self):
+        from dossier_engine.plugin import build_callable_registries_from_workflow
+        wf = {"activities": [
+            {"name": "act1", "validators": [
+                {"name": "os.path.join", "description": "x"},
+            ]},
+        ]}
+        result = build_callable_registries_from_workflow(wf)
+        assert "os.path.join" in result["validators"]
+
+    def test_tasks_list_uses_function_key(self):
+        from dossier_engine.plugin import build_callable_registries_from_workflow
+        wf = {"activities": [
+            {"name": "act1", "tasks": [
+                {"kind": "recorded", "function": "os.path.join"},
+            ]},
+        ]}
+        result = build_callable_registries_from_workflow(wf)
+        assert "os.path.join" in result["task_handlers"]
+
+    def test_side_effect_condition_fn(self):
+        from dossier_engine.plugin import build_callable_registries_from_workflow
+        wf = {"activities": [
+            {"name": "act1", "side_effects": [
+                {"activity": "other", "condition_fn": "os.path.join"},
+            ]},
+        ]}
+        result = build_callable_registries_from_workflow(wf)
+        assert "os.path.join" in result["side_effect_conditions"]
+
+    def test_workflow_level_relation_types_validator(self):
+        from dossier_engine.plugin import build_callable_registries_from_workflow
+        wf = {"relation_types": [
+            {"type": "oe:x", "validator": "os.path.join"},
+        ]}
+        result = build_callable_registries_from_workflow(wf)
+        assert "os.path.join" in result["relation_validators"]
+
+    def test_workflow_level_relation_types_validators_dict(self):
+        from dossier_engine.plugin import build_callable_registries_from_workflow
+        wf = {"relation_types": [
+            {"type": "oe:x", "validators": {
+                "add": "os.path.join", "remove": "os.path.split",
+            }},
+        ]}
+        result = build_callable_registries_from_workflow(wf)
+        assert set(result["relation_validators"].keys()) == {
+            "os.path.join", "os.path.split",
+        }
+
+    def test_activity_level_relation_validator(self):
+        from dossier_engine.plugin import build_callable_registries_from_workflow
+        wf = {"activities": [
+            {"name": "act1", "relations": [
+                {"type": "oe:x", "validator": "os.path.join"},
+            ]},
+        ]}
+        result = build_callable_registries_from_workflow(wf)
+        assert "os.path.join" in result["relation_validators"]
+
+    def test_deduplication_across_activities(self):
+        """If two activities reference the same path, it resolves once
+        and ends up once in the registry."""
+        from dossier_engine.plugin import build_callable_registries_from_workflow
+        wf = {"activities": [
+            {"name": "a", "handler": "os.path.join"},
+            {"name": "b", "handler": "os.path.join"},
+        ]}
+        result = build_callable_registries_from_workflow(wf)
+        assert len(result["handlers"]) == 1
+        assert "os.path.join" in result["handlers"]
+
+    def test_field_validators_block_uses_url_key(self):
+        """field_validators is the one registry where the key is NOT
+        the dotted path — it's the URL segment. The dotted path is only
+        used for resolution.
+        """
+        from dossier_engine.plugin import build_callable_registries_from_workflow
+        wf = {"field_validators": {
+            "my_url_key": "os.path.join",
+        }}
+        result = build_callable_registries_from_workflow(wf)
+        assert "my_url_key" in result["field_validators"]
+        assert "os.path.join" not in result["field_validators"]
+        from os.path import join
+        assert result["field_validators"]["my_url_key"] is join
+
+    def test_bad_path_fails_fast_with_context(self):
+        """A typo in the YAML dotted path should raise at build time
+        with enough context that the operator can find the bad YAML
+        field.
+        """
+        from dossier_engine.plugin import build_callable_registries_from_workflow
+        import pytest
+        wf = {"activities": [
+            {"name": "myactivity", "handler": "no.such.module.anything"},
+        ]}
+        with pytest.raises(ValueError) as exc:
+            build_callable_registries_from_workflow(wf)
+        msg = str(exc.value)
+        assert "myactivity" in msg
+        assert "handler" in msg
+
+    def test_bad_path_in_side_effect_mentions_side_effect(self):
+        from dossier_engine.plugin import build_callable_registries_from_workflow
+        import pytest
+        wf = {"activities": [
+            {"name": "act1", "side_effects": [
+                {"activity": "downstream", "condition_fn": "bad.path.fn"},
+            ]},
+        ]}
+        with pytest.raises(ValueError) as exc:
+            build_callable_registries_from_workflow(wf)
+        assert "act1" in str(exc.value)
+        assert "downstream" in str(exc.value)
+        assert "condition_fn" in str(exc.value)
+
+    def test_non_string_values_are_silently_skipped(self):
+        """YAML shape drift (e.g. None, list-where-string-expected)
+        should not crash the builder — shape validation lives in the
+        other plugin validators (validate_relation_declarations etc.).
+        The builder's job is just to resolve what is clearly a path.
+        """
+        from dossier_engine.plugin import build_callable_registries_from_workflow
+        wf = {"activities": [
+            {"name": "a", "handler": None},
+            {"name": "b", "status_resolver": 42},
+            {"name": "c", "task_builders": [None, "os.path.join", 99]},
+        ]}
+        result = build_callable_registries_from_workflow(wf)
+        assert result["handlers"] == {}
+        assert result["status_resolvers"] == {}
+        assert "os.path.join" in result["task_builders"]
+
+    def test_toelatingen_plugin_loads_via_builder(self):
+        """End-to-end: the real toelatingen plugin's create_plugin()
+        builds all eight registries using the builder and ends up with
+        every expected callable reachable via its dotted path. This
+        pins the Obs 95 migration at the integration-seam level.
+        """
+        from dossier_toelatingen import create_plugin
+        plugin = create_plugin()
+
+        # Every registry is keyed by dotted path except field_validators.
+        for reg_name in (
+            "handlers", "validators", "task_handlers",
+            "status_resolvers", "task_builders",
+            "side_effect_conditions", "relation_validators",
+        ):
+            reg = getattr(plugin, reg_name)
+            for key in reg:
+                assert "." in key, (
+                    f"{reg_name!r} key {key!r} is not a dotted path"
+                )
+
+        # field_validators is keyed by URL segment.
+        assert "erfgoedobject" in plugin.field_validators
+        assert "handeling" in plugin.field_validators
+
+        # Spot-check one key from each non-empty registry:
+        assert "dossier_toelatingen.handlers.set_dossier_access" in plugin.handlers
+        assert "dossier_toelatingen.validators.valideer_indiening" in plugin.validators
+        assert "dossier_toelatingen.tasks.send_ontvangstbevestiging" in plugin.task_handlers
+        assert "dossier_toelatingen.handlers.resolve_beslissing_status" in plugin.status_resolvers
+        assert "dossier_toelatingen.handlers.schedule_trekAanvraag_if_onvolledig" in plugin.task_builders
+        assert "dossier_toelatingen.relation_validators.validate_neemt_akte_van" in plugin.relation_validators

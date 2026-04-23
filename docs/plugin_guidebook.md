@@ -128,7 +128,7 @@ When the default "store what the client sent" isn't enough — you need to compu
 ```yaml
 activities:
   - name: "neemBeslissing"
-    handler: "handle_beslissing"
+    handler: "my_plugin.handlers.handle_beslissing"
     used:
       - "oe:aanvraag"
     generates:
@@ -152,11 +152,14 @@ async def handle_beslissing(context, content):
     status = "goedgekeurd" if content["beslissing"] == "positief" else "afgewezen"
 
     return HandlerResult(content=content, status=status)
-
-HANDLERS = {"handle_beslissing": handle_beslissing}
 ```
 
-Register on the plugin: `Plugin(..., handlers=HANDLERS)`.
+The YAML references the handler by its **fully-qualified dotted path** —
+`my_plugin.handlers.handle_beslissing`. The engine resolves the path at plugin
+load time and populates `plugin.handlers` from the workflow YAML (Obs 95 /
+Round 28). Plugin authors don't hand-build short-name dicts anymore — keeping
+a function module-level is all the "registration" needed. A typo in the path
+fails at plugin startup with a clear error naming the activity and YAML field.
 
 **Handler signature:** `async def handler(context: ActivityContext, content: dict) -> HandlerResult`. The `content` dict is the client-supplied payload from the request's `generated` block (already validated against the Pydantic model). `context` is the activity context — the Part 2 reference has the full method list.
 
@@ -171,11 +174,11 @@ Handlers can return `content + status + tasks` all at once, but as a handler gro
 ```yaml
 activities:
   - name: "neemBeslissing"
-    handler: "handle_beslissing"
-    status_resolver: "resolve_beslissing_status"
+    handler: "my_plugin.handlers.handle_beslissing"
+    status_resolver: "my_plugin.handlers.resolve_beslissing_status"
     task_builders:
-      - "build_trekAanvraag_task"
-      - "build_appeal_notification_task"
+      - "my_plugin.handlers.build_trekAanvraag_task"
+      - "my_plugin.handlers.build_appeal_notification_task"
 ```
 
 ```python
@@ -227,17 +230,16 @@ Resolves the entity of the given type (which must be in the current activity's `
 **Function form** (anything the dict form can't express):
 
 ```yaml
-condition_fn: "is_publication_not_frozen"
+condition_fn: "my_plugin.handlers.is_publication_not_frozen"
 ```
 
 ```python
 async def is_publication_not_frozen(ctx):
     return not ctx.constants.publication_freeze_active
-
-SIDE_EFFECT_CONDITIONS = {
-    "is_publication_not_frozen": is_publication_not_frozen,
-}
 ```
+
+Register by placing the function at module level and referencing its
+fully-qualified dotted path from YAML — same pattern as handlers.
 
 Use for date comparisons, value-in-set checks, boolean combinations, anything that isn't `field == value`. Both forms receive the same `ActivityContext` your handlers see.
 
@@ -280,20 +282,34 @@ async def validate_erfgoedobject(payload: dict) -> dict:
     # ... call external service, resolve, etc.
     return {"ok": True, "label": "Some label"}
 
-FIELD_VALIDATORS = {
-    "erfgoedobject": FieldValidator(
-        fn=validate_erfgoedobject,
-        request_model=ErfgoedobjectRequest,
-        response_model=ErfgoedobjectResponse,
-        summary="Valideer erfgoedobject URI",
-        description="Controleer of de URI verwijst naar een gekend erfgoedobject.",
-    ),
-}
+# Module-level FieldValidator binding. The workflow YAML references this
+# by dotted path (``my_plugin.field_validators.erfgoedobject``) in the
+# top-level ``field_validators:`` block; the engine resolves it at plugin
+# load time.
+erfgoedobject = FieldValidator(
+    fn=validate_erfgoedobject,
+    request_model=ErfgoedobjectRequest,
+    response_model=ErfgoedobjectResponse,
+    summary="Valideer erfgoedobject URI",
+    description="Controleer of de URI verwijst naar een gekend erfgoedobject.",
+)
 ```
+
+In `workflow.yaml`, register the URL key → dotted path mapping:
+
+```yaml
+field_validators:
+  erfgoedobject: "my_plugin.field_validators.erfgoedobject"
+```
+
+`field_validators:` is the one registry whose keys are NOT dotted paths — the
+key (`erfgoedobject` here) ends up in the HTTP URL
+`POST /{workflow}/validate/{key}`, so it stays a user-facing short string.
+The *value* is the dotted path the engine resolves.
 
 The frontend calls `POST /{workflow}/validate/erfgoedobject` with a JSON body; the engine validates against `request_model`, invokes the function, validates the return against `response_model`, and serves the result with proper OpenAPI documentation.
 
-**Plain-callable form** (legacy): you can also register a bare async function without request/response models. Typed `FieldValidator` is strongly preferred — the OpenAPI schemas let the frontend code-gen typed clients.
+**Plain-callable form** (legacy): you can also point the dotted path at a bare async function without request/response models. Typed `FieldValidator` is strongly preferred — the OpenAPI schemas let the frontend code-gen typed clients.
 
 ### Relations — linking entities to other entities or external URIs
 
@@ -323,11 +339,11 @@ activities:
       - type: "oe:betreft"
         operations: ["add", "remove"]
         validators:
-          add: "validate_betreft_target"
-          remove: "validate_betreft_removable"
+          add: "my_plugin.relation_validators.validate_betreft_target"
+          remove: "my_plugin.relation_validators.validate_betreft_removable"
 
       - type: "oe:neemtAkteVan"
-        validator: "validate_neemt_akte_van"
+        validator: "my_plugin.relation_validators.validate_neemt_akte_van"
 ```
 
 This is the post-Bug-78 contract (Round 26). Load-time validation rejects misaligned YAML with a clear error. See Part 2 → *Relations reference* for the full rules.
@@ -350,7 +366,7 @@ activities:
   - name: "dienAanvraagIn"
     tasks:
       - kind: "fire_and_forget"
-        function: "send_ontvangstbevestiging_email"
+        function: "my_plugin.tasks.send_ontvangstbevestiging_email"
 ```
 
 ```python
@@ -359,10 +375,6 @@ async def send_ontvangstbevestiging_email(ctx):
     # The activity has already succeeded by the time this runs;
     # failure here doesn't roll anything back.
     ...
-
-TASK_HANDLERS = {
-    "send_ontvangstbevestiging_email": send_ontvangstbevestiging_email,
-}
 ```
 
 Task function signature: `async def fn(ctx: ActivityContext) -> None`. Exceptions are caught and logged; they don't affect the activity's transaction. No worker involvement — the function runs synchronously during the pipeline's task-processing phase, right after persistence.
@@ -376,9 +388,9 @@ activities:
   - name: "dienAanvraagIn"
     tasks:
       - kind: "recorded"
-        function: "send_ontvangstbevestiging"
+        function: "my_plugin.tasks.send_ontvangstbevestiging"
       - kind: "recorded"
-        function: "check_behandeltermijn"
+        function: "my_plugin.tasks.check_behandeltermijn"
         scheduled_for: "+20d"
 ```
 
@@ -386,11 +398,6 @@ activities:
 async def send_ontvangstbevestiging(ctx):
     # ctx is an ActivityContext. Send email, generate PDF, etc.
     pass
-
-TASK_HANDLERS = {
-    "send_ontvangstbevestiging": send_ontvangstbevestiging,
-    "check_behandeltermijn": check_behandeltermijn,
-}
 ```
 
 Task function signature: `async def fn(ctx: ActivityContext) -> None`. Return value is ignored — the worker only cares whether the function raised. Success or failure is recorded as a new version of the task entity, so "did this task run and did it succeed" is queryable after the fact.
@@ -452,7 +459,7 @@ activities:
   - name: "publiceerBeslissing"
     tasks:
       - kind: "cross_dossier_activity"
-        function: "create_subsidy_notice"
+        function: "my_plugin.tasks.create_subsidy_notice"
         target_activity: "ontvangBesluit"
         scheduled_for: "+0"
 ```
@@ -978,7 +985,7 @@ Kinds 2-4 produce `system:task` entities and survive server restarts. Kind 1 doe
 
 ```yaml
 - kind: "fire_and_forget"
-  function: "name_in_task_handlers"
+  function: "my_plugin.tasks.fn_name"
 ```
 
 No `scheduled_for`, `anchor_type`, or `cancel_if_activities` — fire_and_forget runs once, inline, synchronously during the activity's task-processing phase.
@@ -995,7 +1002,7 @@ No `scheduled_for`, `anchor_type`, or `cancel_if_activities` — fire_and_forget
 
 ```yaml
 - kind: "recorded"
-  function: "name_in_task_handlers"
+  function: "my_plugin.tasks.fn_name"
   scheduled_for: "+20d"           # optional
   anchor_type: "oe:aanvraag"      # optional — used to anchor deduplication
 ```
@@ -1030,7 +1037,7 @@ No `scheduled_for`, `anchor_type`, or `cancel_if_activities` — fire_and_forget
 
 ```yaml
 - kind: "cross_dossier_activity"
-  function: "name_in_task_handlers"
+  function: "my_plugin.tasks.fn_name"
   target_activity: "ontvangBesluit"
   scheduled_for: "+0"             # can be any scheduling shape
 ```

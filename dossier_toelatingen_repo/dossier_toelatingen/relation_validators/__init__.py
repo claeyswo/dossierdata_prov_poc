@@ -139,12 +139,12 @@ async def validate_neemt_akte_van(
         )
 
 
-RELATION_VALIDATORS = {
-    # Bug 78 (Round 26): dict keys must be validator NAMES, not
-    # relation type names. The old key "oe:neemtAkteVan" collided with
-    # the declared relation type, re-creating Style-3 by-type-name
-    # lookup through naming convention. Workflow YAML references this
-    # explicitly via `validator: "validate_neemt_akte_van"` on each
-    # activity that uses oe:neemtAkteVan.
-    "validate_neemt_akte_van": validate_neemt_akte_van,
-}
+# Obs 95 / Round 28: the ``RELATION_VALIDATORS`` dict has been removed.
+# Workflow YAML now references relation validators by dotted path
+# (``validator: "dossier_toelatingen.relation_validators.validate_neemt_akte_van"``)
+# and the engine resolves them at plugin load via
+# ``build_callable_registries_from_workflow``. Bug 78's structural
+# guard — keys must be validator names, not relation type names — is
+# automatically preserved because dotted paths contain dots while
+# relation type names contain colons (``oe:neemtAkteVan``), so the two
+# key-spaces cannot collide.

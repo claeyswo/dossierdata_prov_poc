@@ -226,10 +226,8 @@ async def move_bijlagen_to_permanent(context: ActivityContext):
         )
 
 
-TASK_HANDLERS = {
-    "send_ontvangstbevestiging": send_ontvangstbevestiging,
-    "log_beslissing_genomen": log_beslissing_genomen,
-    "log_organisatie_aangeduid": log_organisatie_aangeduid,
-    "send_behandelaar_notificatie": send_behandelaar_notificatie,
-    "move_bijlagen_to_permanent": move_bijlagen_to_permanent,
-}
+# Obs 95 / Round 28: the ``TASK_HANDLERS`` dict has been removed.
+# Workflow YAML now references task functions by dotted path
+# (``function: "dossier_toelatingen.tasks.send_ontvangstbevestiging"``)
+# and the engine resolves them at plugin load via
+# ``build_callable_registries_from_workflow``.

@@ -362,10 +362,16 @@ activities:
     #       return [{"kind": "scheduled_activity", "target_activity": "trekAanvraagIn",
     #                "scheduled_for": "+30d", "cancel_if_activities": ["vervolledigAanvraag"]}]
     #
-    # Register them on the Plugin alongside handlers:
-    #   Plugin(..., handlers=HANDLERS,
-    #          status_resolvers=STATUS_RESOLVERS,
-    #          task_builders=TASK_BUILDERS)
+    # Register them by dotted path in this activity's YAML:
+    #   status_resolver: "your_plugin.handlers.resolve_beslissing_status"
+    #   task_builders:
+    #     - "your_plugin.handlers.schedule_trekAanvraag_if_onvolledig"
+    #
+    # The engine resolves the paths at plugin load time via
+    # ``build_callable_registries_from_workflow`` and populates
+    # ``plugin.status_resolvers`` / ``plugin.task_builders`` automatically.
+    # Plugin authors do NOT hand-build short-name dicts anymore (Obs 95 /
+    # Round 28 — see plugin_guidebook.md "Dotted-path registration").
     #
     # See docs/plugin_guidebook.md "Split-style hooks" for decision
     # criteria (when to split vs keep a monolithic handler).
@@ -545,13 +551,13 @@ activities:
       # Runs inline during activity execution. No entity, no PROV.
       # If it fails, the activity still succeeds.
       - kind: "fire_and_forget"
-        function: "send_notification_email"
+        function: "your_plugin.tasks.send_notification_email"
 
       # --- Type 2: Recorded task ---
       # Worker picks it up, calls the function, creates a completed version.
       # PROV: activity → task_v1 (scheduled) → completeTask → task_v2 (completed)
       - kind: "recorded"
-        function: "log_audit_event"
+        function: "your_plugin.tasks.log_audit_event"
 
       # --- Type 3: Scheduled activity (same dossier) ---
       # Worker executes the target activity at the scheduled time.
@@ -588,7 +594,7 @@ activities:
       # PROV in target: target_activity (informed by urn:dossier:source/activity/id,
       #                                  used urn:dossier:source)
       - kind: "cross_dossier_activity"
-        function: "find_related_dossier"
+        function: "your_plugin.tasks.find_related_dossier"
         target_activity: "ontvangMelding"
         allow_multiple: true
 
@@ -605,7 +611,8 @@ activities:
 
 ## Task Functions
 
-Task functions are defined in the plugin's `tasks/` module and registered in `TASK_HANDLERS`.
+Task functions are defined in the plugin's `tasks/` module and referenced from the
+YAML by fully-qualified dotted path (Obs 95 / Round 28).
 
 ```python
 # Type 1 and 2: receives ActivityContext
@@ -627,15 +634,28 @@ async def find_related_dossier(context: ActivityContext):
         target_dossier_id="d5000000-...",
         content={"bericht": "Gerelateerd dossier is goedgekeurd"},
     )
-
-TASK_HANDLERS = {
-    "send_notification_email": send_notification_email,
-    "log_audit_event": log_audit_event,
-    "find_related_dossier": find_related_dossier,
-}
 ```
 
-Type 3 has no function — the worker just executes the target activity.
+Register each function by referencing its fully-qualified dotted path from the
+activity's `tasks:` list in `workflow.yaml`:
+
+```yaml
+tasks:
+  - kind: "fire_and_forget"
+    function: "your_plugin.tasks.send_notification_email"
+  - kind: "recorded"
+    function: "your_plugin.tasks.log_audit_event"
+  - kind: "cross_dossier_activity"
+    function: "your_plugin.tasks.find_related_dossier"
+    target_activity: "ontvangMelding"
+```
+
+The engine resolves each path at plugin load time. A typo fails fast with a
+clear error naming the activity and YAML field — no more runtime-of-first-
+invocation footguns from short-name dicts.
+
+Type 3 (`scheduled_activity`) has no function — the worker just executes the
+target activity.
 
 ---
 
