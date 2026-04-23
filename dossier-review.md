@@ -10,16 +10,16 @@
 
 | Status | Count | Items |
 |---|---|---|
-| ✅ Fixed & verified | 38 | Bugs 1, 2, 4, 5, 6, 7, 9, 12, 15, 16, 17, 20, 27, 30, 32, 39, 44, 47, 53, 54, 55, 56, 57, 58, 62, 64, 65, 66, 68, 69, 70, 72 (coverage), 73, 74, 75, 76, 77, 79 + Obs-2 (duplicate "external") |
+| ✅ Fixed & verified | 39 | Bugs 1, 2, 4, 5, 6, 7, 9, 12, 13, 15, 16, 17, 20, 27, 30, 32, 39, 44, 47, 53, 54, 55, 56, 57, 58, 62, 64, 65, 66, 68, 69, 70, 72 (coverage), 73, 74, 75, 76, 77, 79 + Obs-2 (duplicate "external") |
 | 🔍 Investigated, not a bug | 1 | Bug 14 — cross-dossier refs are `type=external` rows |
 | 🛑 Deferred / accepted | 5 | Bug 28 (POC auth slated for replacement), Bug 31 (RRN acceptable), Bug 45 (MinIO migration), Bug 63 (403 is correct HTTP), Bug 71 (test activities, deploy-time removal) |
-| 🧪 Test suite | **882/882** passing | engine 817 (unit 336 + integration 481), toelatingen 26, file_service 21, common/signing 18 |
+| 🧪 Test suite | **883/883** passing | engine 818 (unit 337 + integration 481), toelatingen 26, file_service 21, common/signing 18 |
 | 🏃 `test_requests.sh` | **25/25 OK, exit 0, zero deadlocks, zero worker crashes** | D1–D9 green |
 | ✂️ Duplication closed | **D1, D2, D4, D22, D25** | Graph-loader consolidation + audit-emit wrapper |
 | 🧰 Harnesses installed | **3** | Guidebook YAML lint + phase-docstring lint + CI shell-spec wrapper |
 | 🤖 CI wired | **GitHub Actions** | `.github/workflows/ci.yml` — 4 jobs: pytest, shell-spec, doc-harnesses, migrations-append-only |
 | 🎯 Must-fix walk | **Complete** | All 17 fixable must-fix bugs closed; the 5 open rows are deferred/investigated by product decision (Bugs 14, 31, 45, 63, 71) |
-| 📦 Pending | 22 should-fix + 16 lower-priority bugs + 31 observations + 21 dups + 5 meta (partial relief) | See below |
+| 📦 Pending | 21 should-fix + 16 lower-priority bugs + 31 observations + 21 dups + 5 meta (partial relief) | See below |
 
 Note: Bug 75 was discovered *by* harness 2 on its first run — a new bug surfaced and fixed in the same session as the harness that surfaced it.
 
@@ -62,7 +62,7 @@ Note: Bug 75 was discovered *by* harness 2 on its first run — a new bug surfac
 | ~~4~~ | 2 | ~~`Session` type annotation never imported.~~ | ✅ **Fixed in Round 31.** `Repository.__init__` at `db/models.py:238` had `session: Session` with `Session` never imported. The code ran fine at runtime because `from __future__ import annotations` stringifies all annotations, but anything calling `typing.get_type_hints(...)` — IDE tooling, FastAPI's `Depends` type resolution, Pydantic's model-building — hit `NameError`. Intended type was always `AsyncSession` (every Repository method uses async). Fix: one-character type change. One regression test (`TestRepositoryAnnotations::test_repository_init_annotations_resolve`) that calls `get_type_hints` and asserts `AsyncSession` — the exact operation that was failing pre-fix. |
 | ~~9~~ | 2 | ~~N+1 in dossier detail view.~~ | ✅ **Fixed in Round 29.** `routes/dossiers.py::get_dossier` was calling per-activity `_user_is_agent` + `get_used_entity_ids_for_activity` in the visibility-filter loop, turning N activities into O(N) SELECTs under `activity_view: "own"` or `"related"`. Swapped for `load_dossier_graph_rows` (Round 5's consolidation already used by `routes/prov.py`) with dict-lookup closures. Measured 11 activities: **16 → 10 SELECTs** post-fix, independent of N. 3 regression tests added (2 behaviour pins + 1 query-count ceiling at 12). Removed dead `_user_is_agent` helper + unused imports. `get_all_latest_entities` kept as-is — it returns latest-per-entity_id which `graph_rows.entities` does not, and deduplicating client-side would be more code for no perf win. |
 | ~~12~~ | 2 | ~~`_parse_scheduled_for` silently returns None on unparseable dates.~~ | ✅ **Already fixed & tested.** Discovered during M2 Stage 2 startup: `worker.py:_parse_scheduled_for` was already implementing log-and-defer via `datetime.max.replace(tzinfo=timezone.utc)` on malformed ISO, with a 12-case `TestParseScheduledFor` in `test_worker_helpers.py` including explicit regression guards. The review had been carrying a stale open-bug entry; verified end-to-end (parses valid forms, returns None for genuine-empty, returns aware `datetime.max` for malformed with logger.error). No code change this round — bookkeeping correction only. |
-| 13 | 2 | Deprecated `@app.on_event("startup")`. |  |
+| ~~13~~ | 2 | ~~Deprecated `@app.on_event("startup")`.~~ | ✅ **Fixed in Round 33.** Both `@app.on_event("startup")` (audit config + DB init + Alembic) and `@app.on_event("shutdown")` (close search client) converted to a single `@asynccontextmanager` lifespan function passed to `FastAPI(lifespan=...)`. Startup before `yield`, shutdown after. Same runtime timing as the old handlers; pure deprecation migration, no behavior change. Closed the previously-zero test coverage of `create_app` itself by adding one shape test (`test_app_factory_lifespan.py`) that asserts `on_startup == [] and on_shutdown == []` and that `lifespan_context` is not FastAPI's `_DefaultLifespan`. Test doesn't fire the lifespan (runtime correctness still covered by `test_alembic_startup` + `test_audit`); it's a shape pin. Paranoia-checked by removing `lifespan=` from `FastAPI(...)` + re-adding a stub `on_event` — test goes red with both the expected shape assertion *and* visible `DeprecationWarning`s pointing at the unfixed lines. |
 | — | 2 | Alembic subprocess has no timeout. |  |
 | — | 2 | `file_service.signing_key` default accepted at startup. |  |
 | — | 2 | No plugin-load cross-check that `handler:`/`validator:` names resolve. |  |
@@ -727,7 +727,7 @@ Concrete behaviour bugs that are each ~30-100 lines of code + tests. Each wants 
 
 - ~~**Bug 4**~~ — ~~`Session` type annotation never imported.~~ ✅ **Shipped in Round 31.**
 - ~~**Bug 9**~~ — ~~N+1 in dossier detail view.~~ ✅ **Shipped in Round 29.**
-- **Bug 13** — Deprecated `@app.on_event("startup")`. *Modernization, small fix.*
+- ~~**Bug 13**~~ — ~~Deprecated `@app.on_event("startup")`.~~ ✅ **Shipped in Round 33** (both startup and shutdown converted to lifespan).
 - ~~**Bug 20**~~ — ~~`_PendingEntity` missing several fields → `AttributeError`.~~ ✅ **Shipped in Round 30.**
 - ~~**Bug 27**~~ — ~~`DossierAccessEntry.activity_view: str` too narrow (should be Literal).~~ ✅ **Shipped in Round 31.** `"related"` mode also removed.
 - 🛑 ~~**Bug 28**~~ — ~~`POCAuthMiddleware` silently overwrites on duplicate usernames.~~ **Deferred — POC-only, slated for replacement with real auth.**
@@ -1486,3 +1486,52 @@ Cat 2 remaining priority items (same list as post-Round-31, minus Bug 39):
 8. **Bug 67** — [check entry].
 
 My order doesn't shift: **Bug 48 next** (security axis, worth landing), then **Bug 13**, then **Bug 34**, then recon for 43/50. Cat 3 (caching batch) remains the alternative for a change of pace.
+
+### Round 33 — Bug 13 shipped
+
+User called Bug 13 ahead of my Bug 48 recommendation. Fine — 13 is smaller and keeps momentum.
+
+**Bug 13 — Deprecated `@app.on_event("startup")` / `@app.on_event("shutdown")`.**
+
+FastAPI deprecated `on_event` in 0.93 (early 2023) in favor of the `lifespan` context-manager pattern. This codebase pins `fastapi>=0.110.0` — well past the deprecation cutoff. Two `on_event` handlers in `app.py::create_app`: startup (audit config + DB init + Alembic migrations) and shutdown (close search client). Neither was failing today but both emitted `DeprecationWarning` and were on the removal track for a future FastAPI major.
+
+**Verify-before-plan pass (notable bits):**
+- The `on_event` and `lifespan` patterns have the **same runtime timing** — lifespan runs when the ASGI server is ready, which matches when the old handlers fired. This is purely a deprecation migration, not a timing refactor.
+- `lifespan` must be passed to `FastAPI(lifespan=...)` at construction, so the refactor had to move the `FastAPI()` call to *after* the lifespan function is defined. Fine — both live inside `create_app`, just lexically reordered.
+- **`create_app` itself had zero test coverage before this round.** The HTTP integration tests all build their own minimal apps via `_build_test_app()` rather than going through `create_app`. Tests existed for functions `create_app` calls into (`test_alembic_startup`, `test_audit`) but not for the startup handler shape itself. Round 33 closes that gap — one shape test that asserts the lifespan is wired correctly.
+
+**Shipped:**
+- `app.py` — added `from contextlib import asynccontextmanager`. Defined `@asynccontextmanager async def lifespan(_app)` just before the `FastAPI()` construction, inside `create_app`, capturing `config` by closure the same way the old handlers did. Startup logic (audit config → DB init → Alembic) runs before `yield`; shutdown logic (close search client) runs after. Passed `lifespan=lifespan` to `FastAPI(...)`. Deleted both `@app.on_event(...)` handlers, replacing with a comment pointing at the lifespan function earlier in the file.
+- No config changes, no YAML changes, no behavior changes — lifespan preserves execution order exactly.
+
+**Test added (+1):**
+- `tests/unit/test_app_factory_lifespan.py::TestCreateAppLifespan::test_create_app_attaches_lifespan_not_on_event` — builds a temp config.yaml pointing at the toelatingen plugin, calls `create_app(tmp_config_path)`, asserts three things:
+  1. `app.router.on_startup == []` — no legacy startup handlers.
+  2. `app.router.on_shutdown == []` — no legacy shutdown handlers.
+  3. `not isinstance(app.router.lifespan_context, _DefaultLifespan)` — user lifespan is wired, not FastAPI's default no-op.
+- The test does NOT fire the lifespan (which would require a running DB and would run Alembic). It's a shape test. Runtime correctness of the startup path is still covered by the function-level tests in `test_alembic_startup` and `test_audit`.
+- Used `fastapi.routing._DefaultLifespan` which is private API — accepted here because the test's whole purpose is distinguishing "user wired a lifespan" from "FastAPI fell back to default." Documented the private-API dependency in the test comment.
+
+**Pre-fix diagnostic bonus.** Running the test against the unfixed code emitted two `DeprecationWarning`s pointing at exactly `app.py:373` and `app.py:431` — the two `on_event` call sites. The warnings served as direct confirmation that the bug was real and pointed at the exact lines needing the fix. Post-fix, no warnings fire. A secondary visual signal that the fix worked, not just the assertion.
+
+**Paranoia check ✓.** Partial revert (removed `lifespan=lifespan` from `FastAPI(...)` and re-added a stub `@app.on_event("startup")`). Test went red immediately with the expected shape — `app.router.on_startup` non-empty. The `DeprecationWarning` came back too, doubly confirming the shape. Restored; test green.
+
+**Verification:**
+- Engine unit: **336 → 337** (+1).
+- Engine integration: **481** (unchanged).
+- Toelatingen / common / file_service unchanged: **26 / 18 / 21**.
+- **Total: 883 / 883 passing** (was 882).
+
+**Totals after Round 33:** **39 bugs fixed** (+1, Bug 13). Should-fix table: **21 open** (-1). Test suite grew 882 → 883.
+
+### Where to go next
+
+Cat 2 remaining priority items (updated from post-Round-32):
+
+1. **Bug 48** — `.meta` filename not sanitized. Security-adjacent. (Was my post-Round-32 top pick; user's Round 33 choice of Bug 13 shifted the order but didn't change the list.)
+2. **Bug 34** — `authorize_activity` catches broad `Exception`. Hides real errors.
+3. **Bug 43** — `Aanvrager.model_post_init` raises `ValueError` without Pydantic shape. 422 error shape wrong. Needs recon.
+4. **Bug 50** — Migration fallback uses module-level `SYSTEM_ACTION_DEF` with bare name. Migration-tooling concern.
+5. **Bug 59**, **60**, **67** — longer tail.
+
+My order preference unchanged: **Bug 48 → Bug 34** → recon for 43/50. Cat 3 (caching batch) remains the change-of-pace alternative.

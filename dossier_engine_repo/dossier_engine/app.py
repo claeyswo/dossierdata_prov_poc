@@ -12,6 +12,7 @@ import importlib
 import logging
 import os
 import subprocess
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import yaml
@@ -295,10 +296,59 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
 
     set_namespaces(ns_registry)
 
+    # Bug 13 (Round 33): lifespan replaces the deprecated
+    # ``@app.on_event("startup")`` / ``@app.on_event("shutdown")``
+    # pattern. Single async-context-manager function — startup runs
+    # before ``yield``, shutdown after. The execution order is
+    # unchanged from the old pair of handlers (FastAPI calls lifespan
+    # once the ASGI server is ready); this is purely a deprecation
+    # migration, not a timing refactor. ``config`` is captured by
+    # closure, same as the old handlers did.
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        # --- Startup: audit logging → DB init → Alembic ---
+        # Audit logging wires up first — errors emitted during DB init
+        # or migrations may themselves need to go through audit.
+        # Safe no-op if the audit log path isn't writable (dev/test).
+        # Reads `audit.log_path` from config, falling back to the
+        # `DOSSIER_AUDIT_LOG_PATH` env var, then to the module default.
+        #
+        # `or {}` handles the case where the `audit:` key is present in
+        # config.yaml but has no non-commented children — YAML parses
+        # `audit:` with only commented lines under it as `None`, not as
+        # an empty dict, so `config.get("audit", {})` returns `None`
+        # and a subsequent `.get()` call would raise AttributeError.
+        from .audit import configure_audit_logging
+        audit_config = config.get("audit") or {}
+        configure_audit_logging(
+            path=audit_config.get("log_path"),
+            max_bytes=audit_config.get("max_bytes", 100 * 1024 * 1024),
+            backup_count=audit_config.get("backup_count", 10),
+        )
+
+        db_url = config.get("database", {}).get("url")
+        if not db_url:
+            raise RuntimeError(
+                "database.url is required in config (Postgres connection string)"
+            )
+        await init_db(db_url)
+
+        # Migrations. Runs to HEAD, or raises RuntimeError — no
+        # silent fallback. See ``_run_alembic_migrations`` for the
+        # fail-fast rationale.
+        _run_alembic_migrations(db_url)
+
+        yield
+
+        # --- Shutdown: close the search client ---
+        from .search import close_client
+        await close_client()
+
     app = FastAPI(
         title="Dossier API",
         description="PROV-gebaseerde dossierafhandeling",
         version="0.1.0",
+        lifespan=lifespan,
     )
 
     # Sentry before CORS — we want Sentry to see the full request
@@ -369,39 +419,12 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
             from fastapi import HTTPException
             raise HTTPException(503, detail=f"Database not ready: {e}")
 
-    # --- Startup: DB init + Alembic migrations ---
-    @app.on_event("startup")
-    async def startup():
-        # Audit logging wires up first — errors emitted during DB init
-        # or migrations may themselves need to go through audit.
-        # Safe no-op if the audit log path isn't writable (dev/test).
-        # Reads `audit.log_path` from config, falling back to the
-        # `DOSSIER_AUDIT_LOG_PATH` env var, then to the module default.
-        #
-        # `or {}` handles the case where the `audit:` key is present in
-        # config.yaml but has no non-commented children — YAML parses
-        # `audit:` with only commented lines under it as `None`, not as
-        # an empty dict, so `config.get("audit", {})` returns `None`
-        # and a subsequent `.get()` call would raise AttributeError.
-        from .audit import configure_audit_logging
-        audit_config = config.get("audit") or {}
-        configure_audit_logging(
-            path=audit_config.get("log_path"),
-            max_bytes=audit_config.get("max_bytes", 100 * 1024 * 1024),
-            backup_count=audit_config.get("backup_count", 10),
-        )
-
-        db_url = config.get("database", {}).get("url")
-        if not db_url:
-            raise RuntimeError(
-                "database.url is required in config (Postgres connection string)"
-            )
-        await init_db(db_url)
-
-        # Migrations. Runs to HEAD, or raises RuntimeError — no
-        # silent fallback. See ``_run_alembic_migrations`` for the
-        # fail-fast rationale.
-        _run_alembic_migrations(db_url)
+    # --- Startup + shutdown ---
+    # Wired via the ``lifespan`` context manager passed to
+    # ``FastAPI(lifespan=...)`` above. The two ``@app.on_event(...)``
+    # handlers that used to live here were deprecated by FastAPI 0.93
+    # and removed in Round 33 (Bug 13). See the ``lifespan`` function
+    # earlier in ``create_app`` for the startup and shutdown code.
 
     # Register routes
     global_access = config.get("global_access", [])
@@ -427,10 +450,5 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
     register_admin_search_routes(
         app, registry, auth_middleware, global_admin_access,
     )
-
-    @app.on_event("shutdown")
-    async def _close_search_client():
-        from .search import close_client
-        await close_client()
 
     return app
