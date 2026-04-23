@@ -1,106 +1,80 @@
 # Plugin Guidebook
 
-*A practical guide for building a new workflow plugin. Covers only the 10% you'll actually use. For the full engine internals, see [Pipeline Architecture](pipeline_architecture.md).*
+A workflow plugin tells the Dossier engine what a specific kind of dossier looks like and how it evolves. The engine handles persistence, PROV recording, the worker loop, authentication, and search infrastructure; your plugin provides the domain logic.
+
+This guidebook has three parts:
+
+- **Part 1 — Tutorial.** Build a plugin from nothing, adding features as you need them. Read this front-to-back the first time.
+- **Part 2 — Reference.** Every Plugin field, every ActivityContext method, every YAML key. Scan-oriented; use it after the tutorial makes sense.
+- **Part 3 — Template.** `dossiertype_template.md` — an annotated, copy-pastable skeleton showing every feature in its canonical YAML form. Paste into a new plugin and fill in.
+
+Related docs: `docs/pipeline_architecture.md` (engine internals — what happens between your handler returning and the 200 going out), `docs/prov_conformance.md` (PROV-O compliance story).
+
+---
+
+# Part 1 — Tutorial
 
 ## What a plugin is
 
-A plugin is a Python package that defines a workflow — the activities, entities, statuses, roles, and business rules for one type of dossier. The engine handles everything generic (PROV, persistence, authorization, task scheduling, archiving). Your plugin handles everything specific to your domain.
+A plugin is a Python package with two files: `workflow.yaml` and `plugin.py`. The YAML declares the shape of your workflow (entity types, activities, their ordering and permissions); the Python provides callables the engine invokes at well-defined points (handlers, validators, task functions). The engine loads your plugin at startup, validates its shape, and routes requests to it based on the URL's workflow-name prefix.
 
-The toelatingen plugin manages building permits for protected heritage. The inzageaanvragen plugin will manage public-records access requests. Both use the same engine, but their workflows are completely different.
+You don't need a database migration, a FastAPI app, or a worker process. The engine provides all of that. Your plugin ships domain logic; the engine ships infrastructure.
 
 ## Your first plugin in 15 minutes
 
-A minimal plugin has three files:
-
-```
-my_workflow_repo/
-├── my_workflow/
-│   ├── __init__.py      ← plugin registration
-│   ├── workflow.yaml     ← activities, entities, statuses
-│   └── entities.py       ← Pydantic models for entity content
-└── setup.py
-```
+We'll build a minimal permit-request workflow with one entity type (`oe:aanvraag`), one activity (`dienAanvraagIn`), and no handler — the default "store what the client sent" behaviour is enough to start.
 
 ### Step 1: Define your entities
 
-Entities are the data your dossier manages. Each entity type has a Pydantic model that validates its content.
+Create `my_plugin/entities.py`:
 
 ```python
-# entities.py
 from pydantic import BaseModel
-from typing import Optional
 
 class Aanvraag(BaseModel):
-    onderwerp: str
     aanvrager_naam: str
-    gemeente: str
-    beschrijving: Optional[str] = None
+    onderwerp: str
 ```
+
+This is a regular Pydantic model. The engine validates incoming request payloads against it, stores the validated dict, and returns typed instances from `context.get_typed("oe:aanvraag")` in handler code.
 
 ### Step 2: Define your workflow
 
-The workflow YAML is the heart of your plugin. It declares what can happen, in what order, and who's allowed to do it.
+Create `my_plugin/workflow.yaml`:
 
 ```yaml
-# workflow.yaml
-name: "mijn_workflow"
-description: "Mijn eerste workflow"
-version: "0.1"
-
-roles:
-  - name: "oe:aanvrager"
-    description: "Persoon die de aanvraag indient"
-  - name: "oe:behandelaar"
-    description: "Persoon die de aanvraag behandelt"
+name: "my_plugin"
 
 entity_types:
   - type: "oe:aanvraag"
-    cardinality: "single"     # one per dossier
-    model: "my_workflow.entities.Aanvraag"
+    model: "my_plugin.entities.Aanvraag"
+    cardinality: "single"
 
 activities:
-
   - name: "dienAanvraagIn"
     label: "Dien aanvraag in"
+    description: "Indienen van een nieuwe aanvraag"
     can_create_dossier: true
-    allowed_roles: ["oe:aanvrager"]
-    default_role: "oe:aanvrager"
-    authorization:
-      access: "authenticated"
     generates:
       - "oe:aanvraag"
-    status: "ingediend"
-
-  - name: "behandelAanvraag"
-    label: "Behandel aanvraag"
-    allowed_roles: ["oe:behandelaar"]
-    default_role: "oe:behandelaar"
-    authorization:
-      access: "roles"
-      roles:
-        - role: "behandelaar"
-    requirements:
-      statuses: ["ingediend"]
-    used:
-      - type: "oe:aanvraag"
-        auto_resolve: "latest"
-    generates:
-      - "oe:aanvraag"
-    status: "behandeld"
+    status: "in_behandeling"
 ```
 
-That's a working workflow. Two activities: one creates a dossier with an aanvraag, the other revises it. The engine handles PROV recording, versioning (`derivedFrom` chains), access control, and archiving automatically.
+`can_create_dossier: true` means this activity can create a new dossier out of thin air — it doesn't require a pre-existing one. `status` sets the dossier's status after the activity succeeds. `generates` lists the entity types this activity produces; with no `handler:` declared, the engine uses the default handler which stores the client-supplied content as-is.
 
 ### Step 3: Register the plugin
 
+Create `my_plugin/__init__.py`:
+
 ```python
-# __init__.py
-import os
+from pathlib import Path
 import yaml
+
 from dossier_engine.plugin import Plugin, build_entity_registries_from_workflow
 
+
 def create_plugin() -> Plugin:
-    workflow_path = os.path.join(os.path.dirname(__file__), "workflow.yaml")
+    workflow_path = Path(__file__).parent / "workflow.yaml"
     with open(workflow_path) as f:
         workflow = yaml.safe_load(f)
 
@@ -114,672 +88,218 @@ def create_plugin() -> Plugin:
     )
 ```
 
+`build_entity_registries_from_workflow` walks the YAML's `entity_types:` block, imports each declared `model:` dotted path, and assembles the two registries the `Plugin` dataclass expects. Entity models are the only registry the engine populates from dotted paths in YAML — all other plugin registries (handlers, validators, task functions, etc.) are built by your Python code and passed to the `Plugin` constructor. See Obs 95 in the review for the asymmetry.
+
 ### Step 4: Add to config and run
 
+In the engine's `config.yaml`:
+
 ```yaml
-# config.yaml
 plugins:
-  - my_workflow
+  - my_plugin
 ```
 
-Start the API. Your endpoints appear automatically:
+Start the server (`python -m uvicorn dossier_engine.app:create_app --factory`). Submit an aanvraag:
 
-```
-PUT /mijn_workflow/dossiers/{id}/activities/{id}/oe:dienAanvraagIn
-PUT /mijn_workflow/dossiers/{id}/activities/{id}/oe:behandelAanvraag
-GET /dossiers/{id}
-GET /dossiers/{id}/prov
+```bash
+curl -X POST http://localhost:8000/dossiers/my_plugin/activities/dienAanvraagIn \
+  -H "Content-Type: application/json" \
+  -u alice:pwd \
+  -d '{
+    "generated": [
+      {"entity": "oe:aanvraag/new@new",
+       "content": {"aanvrager_naam": "Jan", "onderwerp": "Dakwerken"}}
+    ]
+  }'
 ```
 
-Note the `oe:` prefix in the activity URL. Type-like path segments
-are always qualified — entity types (`/entities/oe:aanvraag/...`)
-and activity types (`/activities/{id}/oe:dienAanvraagIn`) follow
-the same convention. If you declare a bare name (`dienAanvraagIn`)
-in your workflow YAML, the engine automatically qualifies it to
-the default prefix. Your client can also use the generic endpoint
-`PUT /{workflow}/dossiers/{id}/activities/{id}` with a bare name
-in the body's `type` field — the engine qualifies on the server
-side.
+You get back the created dossier's UUID and the activity record. That's a working plugin.
 
 ## Adding complexity gradually
 
-The minimal plugin above works but doesn't use most of the engine's features. Here's how to add them one at a time, when you need them.
+The 15-minute plugin covers one entity, one activity, default handler. Real workflows need more — decision logic, validation, deadlines, search, access control. Each is a separate opt-in. Add them one at a time; none are required.
+
+The rest of Part 1 walks through the features roughly in the order a real plugin grows into them. Feel free to skip ahead to what you need.
 
 ### Handlers — custom logic on activities
 
-When an activity needs to do more than just store entities (compute derived values, set access rules, conditionally schedule tasks), you write a handler.
-
-```python
-# handlers.py
-from dossier_engine.engine.context import ActivityContext, HandlerResult
-
-async def handle_beslissing(ctx: ActivityContext, content: dict) -> HandlerResult:
-    """Decide the dossier status based on the beslissing content."""
-    beslissing = content.get("beslissing", "")
-    if beslissing == "goedgekeurd":
-        return HandlerResult(status="goedgekeurd")
-    elif beslissing == "afgekeurd":
-        return HandlerResult(status="afgekeurd")
-    else:
-        return HandlerResult(status="onvolledig")
-
-HANDLERS = {
-    "handle_beslissing": handle_beslissing,
-}
-```
-
-Wire it in the YAML:
+When the default "store what the client sent" isn't enough — you need to compute derived fields, validate cross-entity invariants, or choose the next status based on content — declare a handler:
 
 ```yaml
-- name: "neemBeslissing"
-  handler: "handle_beslissing"
-  generates: ["oe:beslissing"]
-  # status is set by the handler, not the YAML
+activities:
+  - name: "neemBeslissing"
+    handler: "handle_beslissing"
+    used:
+      - "oe:aanvraag"
+    generates:
+      - "oe:beslissing"
 ```
-
-And register on the plugin:
 
 ```python
-Plugin(..., handlers=HANDLERS)
+# my_plugin/handlers/__init__.py
+from dossier_engine.engine.context import HandlerResult
+from dossier_engine.engine.errors import ActivityError
+
+async def handle_beslissing(context, content):
+    aanvraag = context.get_typed("oe:aanvraag")
+    if not aanvraag:
+        raise ActivityError(422, "No aanvraag found in used entities")
+
+    # Derived field: compute a reference from the aanvraag
+    content["reference"] = f"BES-{aanvraag.aanvrager_naam[:3].upper()}"
+
+    # Status branch based on content
+    status = "goedgekeurd" if content["beslissing"] == "positief" else "afgewezen"
+
+    return HandlerResult(content=content, status=status)
+
+HANDLERS = {"handle_beslissing": handle_beslissing}
 ```
 
-### Split-style hooks — status_resolver and task_builders
+Register on the plugin: `Plugin(..., handlers=HANDLERS)`.
 
-A handler can return three things: content, status, tasks. For simple activities that's fine. For complex activities — especially those where status depends on multiple entities, or where several different tasks get scheduled conditionally — the handler becomes a Swiss army knife and the YAML tells you nothing about what side effects the activity has.
+**Handler signature:** `async def handler(context: ActivityContext, content: dict) -> HandlerResult`. The `content` dict is the client-supplied payload from the request's `generated` block (already validated against the Pydantic model). `context` is the activity context — the Part 2 reference has the full method list.
 
-You can optionally split those concerns across dedicated functions declared in the YAML:
+**When to write a handler:** when the activity does anything other than "accept the content, store it, set a static status." If you need to read other entities, compute anything, or branch on content, you need a handler.
+
+**When not to write a handler:** pure create-and-store activities. A `dienAanvraagIn` that just records the client's aanvraag doesn't need a handler — omit it and the engine handles the store.
+
+### Split-style hooks — `status_resolver` and `task_builders`
+
+Handlers can return `content + status + tasks` all at once, but as a handler grows, those three concerns don't always fit together cleanly. Split-style lets you split them off:
 
 ```yaml
-- name: "tekenBeslissing"
-  # No handler needed — this activity doesn't compute entity content
-  # beyond what the client submits.
-  status_resolver: "resolve_beslissing_status"
-  task_builders:
-    - "schedule_trekAanvraag_if_onvolledig"
-    - "send_ontvangstbevestiging"
+activities:
+  - name: "neemBeslissing"
+    handler: "handle_beslissing"
+    status_resolver: "resolve_beslissing_status"
+    task_builders:
+      - "build_trekAanvraag_task"
+      - "build_appeal_notification_task"
 ```
-
-Each function has a single responsibility:
 
 ```python
-async def resolve_beslissing_status(ctx: ActivityContext) -> str | None:
-    """Map the latest handtekening + beslissing to a status string."""
-    handtekening = ctx.get_typed("oe:handtekening")
-    beslissing = ctx.get_typed("oe:beslissing")
-    if not handtekening:
-        return "beslissing_te_tekenen"
-    if beslissing and beslissing.beslissing == "goedgekeurd":
-        return "toelating_verleend"
-    # ...
-    return None  # leave unchanged
+async def resolve_beslissing_status(context):
+    beslissing = context.get_typed("oe:beslissing")
+    return "goedgekeurd" if beslissing.beslissing == "positief" else "afgewezen"
 
-
-async def schedule_trekAanvraag_if_onvolledig(
-    ctx: ActivityContext,
-) -> list[dict]:
-    """Return a task dict when beslissing is onvolledig, else []."""
-    beslissing = ctx.get_typed("oe:beslissing")
-    if not beslissing or beslissing.beslissing != "onvolledig":
-        return []
-    return [{
-        "kind": "scheduled_activity",
-        "target_activity": "trekAanvraagIn",
-        "scheduled_for": f"+{ctx.constants.aanvraag_deadline_days}d",
-        "cancel_if_activities": ["vervolledigAanvraag"],
-        "anchor_type": "oe:aanvraag",
-    }]
-
-
-STATUS_RESOLVERS = {"resolve_beslissing_status": resolve_beslissing_status}
-TASK_BUILDERS = {
-    "schedule_trekAanvraag_if_onvolledig": schedule_trekAanvraag_if_onvolledig,
-}
+async def build_trekAanvraag_task(context):
+    # Returns a single task dict, or None to skip
+    return {
+        "kind": "recorded",
+        "function": "trek_aanvraag_in",
+        "scheduled_for": "+60d",
+    }
 ```
 
-Register alongside handlers:
+**Constraint:** if an activity declares a `status_resolver`, its `handler` must not return `status`. Same for `task_builders` and `tasks`. The engine raises at plugin load if both sources set the same field — "who decides X" is always unambiguous.
 
-```python
-Plugin(
-    ...,
-    handlers=HANDLERS,
-    status_resolvers=STATUS_RESOLVERS,
-    task_builders=TASK_BUILDERS,
-)
-```
-
-#### When to use which style
-
-The two styles coexist permanently — legacy handlers keep working and new activities can use either. The decision is about readability and testability, not correctness.
-
-**Stick with a handler when:**
-- The activity is simple (one short function, one concern)
-- Content / status / task decisions are tightly coupled — branching on the same condition to produce all three
-- You have one focused test that exercises the whole activity
-
-**Split when:**
-- The handler has grown past ~50 lines
-- Multiple different tasks are scheduled from one activity
-- A task_builder is reusable across activities (declare the builder once, reference from both YAML entries)
-- A domain reviewer would benefit from seeing "this activity schedules X and Y" in the YAML without opening Python
-
-#### The "exactly one source" rule
-
-An activity that declares `status_resolver` must NOT also have a handler returning `status`. Same for `task_builders` + handler `tasks`. The engine raises `ActivityError(500)` with a clear message at activity execution time if it finds both:
-
-```
-Activity 'tekenBeslissing' declares status_resolver 'resolve_beslissing_status'
-but its handler also returned status='toelating_verleend'. Remove one — the
-same activity cannot have status come from both sources.
-```
-
-This keeps "who decides X" unambiguous per activity. Mixing styles within one activity is always a bug (usually a half-finished migration); the engine catches it loudly instead of silently picking a winner.
+**When to split:** when the handler's content logic and status logic don't share state, or when the same status/task logic applies to multiple activities. Status resolvers are natural for "branch on entity content"; task builders are natural for "schedule these three tasks, each with their own conditions."
 
 ### Side effects and conditional execution
 
-Side effects are activities that fire automatically after a parent activity succeeds. They're composable (one side effect can declare its own `side_effects:`) and attributed to the system user, so they're recorded as their own activity rows in PROV.
+Side effects trigger *another* activity (in the same dossier) as a consequence of the current one succeeding. Example: when a beslissing is taken, automatically emit a `sendNotification` activity:
 
 ```yaml
-- name: "dienAanvraagIn"
-  side_effects:
-    - activity: "duidVerantwoordelijkeOrganisatieAan"
-    - activity: "setSystemFields"
+activities:
+  - name: "neemBeslissing"
+    side_effects:
+      - activity: "sendNotification"
+        condition:
+          entity_type: "oe:beslissing"
+          field: "content.beslissing"
+          value: "positief"
 ```
 
-Each entry may carry a conditional gate in one of two forms, mutually exclusive per entry:
+Side effects fire only if the condition matches. Two gate forms:
+
+**Dict form** (reads at a glance in YAML):
 
 ```yaml
-# Dict form: field equality against a dossier entity.
-side_effects:
-  - activity: "publishToPortal"
-    condition:
-      entity_type: "oe:beslissing"
-      field: "content.beslissing"
-      value: "goedgekeurd"
-
-# Function form: a named predicate in Python.
-side_effects:
-  - activity: "publishToPortal"
-    condition_fn: "should_publish"
+condition:
+  entity_type: "oe:beslissing"
+  field: "content.beslissing"
+  value: "positief"
 ```
 
-**Dict form — `condition: {entity_type, field, value}`.** The engine looks up the named entity (in the trigger's scope, falling back to dossier-wide singleton lookup), reads the field via dot-notation, and compares to `value`. All three keys are required. Shape is validated at plugin load — typos like `from_entity:` (borrowed from status-rule syntax) or `mapping:` fail with an explicit error pointing at the right shape.
+Resolves the entity of the given type (which must be in the current activity's `used` or `generated` block), reads the field path, compares for equality.
 
-**Function form — `condition_fn: "name"`.** References a predicate registered on `plugin.side_effect_conditions`. The function receives an `ActivityContext` scoped to the triggering activity (so it can read the trigger's used and generated entities via `ctx.get_typed(...)`) and returns `bool`. Use this for any gate that isn't simple equality — counts, date comparisons, boolean combinations, config lookups.
+**Function form** (anything the dict form can't express):
+
+```yaml
+condition_fn: "is_publication_not_frozen"
+```
 
 ```python
-async def should_publish(ctx: ActivityContext) -> bool:
-    beslissing = ctx.get_typed("oe:beslissing")
-    if not beslissing or beslissing.beslissing != "goedgekeurd":
-        return False
-    # Business rule: don't publish during freeze windows.
+async def is_publication_not_frozen(ctx):
     return not ctx.constants.publication_freeze_active
 
-SIDE_EFFECT_CONDITIONS = {"should_publish": should_publish}
-
-Plugin(..., side_effect_conditions=SIDE_EFFECT_CONDITIONS)
+SIDE_EFFECT_CONDITIONS = {
+    "is_publication_not_frozen": is_publication_not_frozen,
+}
 ```
 
-Both the YAML name and the registered function names are cross-checked at plugin load. An unknown `condition_fn` name fails fast with a list of registered names. Declaring both `condition:` and `condition_fn:` on the same entry also fails at load — pick one.
+Use for date comparisons, value-in-set checks, boolean combinations, anything that isn't `field == value`. Both forms receive the same `ActivityContext` your handlers see.
 
-**Choosing between the two forms.** Use the dict form when the gate is a single field equality — it's readable inline and one less indirection. Use `condition_fn:` as soon as the gate involves anything else. Don't grow the dict shape with `value_in`, `value_not`, boolean combinators — that's a DSL creep path. `condition_fn` is the escape hatch; use it.
-
-#### When to use `condition:` / `condition_fn:` vs an empty-result handler
-
-Since a handler can also just return `HandlerResult()` with nothing, there's a choice. They're **not equivalent** — they produce different PROV graphs:
-
-| Approach | Activity row written? | Visible in PROV | Meaning |
-|---|---|---|---|
-| `condition:` or `condition_fn:` blocks execution | No | No trace | "This activity doesn't apply here." |
-| Handler returns empty | Yes | Activity appears, produced nothing | "Activity ran, chose not to produce output." |
-
-Two concrete examples that cut opposite ways:
-
-**`setSystemFields` once per dossier.** You want this activity to run on `dienAanvraagIn` but not again on `bewerkAanvraag` edits. Gating with `condition: {entity_type: "oe:system_fields", field: ..., value: ...}` means PROV shows it ran once, cleanly. Using an empty handler on re-edits would show `setSystemFields` firing on every edit and producing nothing — noise in the audit trail.
-
-**`publishToPortal` with a legitimate "decline to publish".** The parent activity took a decision; publishing was considered, but policy says don't publish in this case. If you gate with a condition, the audit record silently lacks any mention that publication was considered. An empty-result handler preserves the trace: "publication was attempted, produced no output." That's the truthful record.
-
-Rule of thumb: use a condition gate when the side effect genuinely **doesn't apply** (re-runs, wrong kind of entity, out-of-scope state). Use an empty-result handler when the side effect **applies but decided not to produce anything** (a reviewed case that needs to be visible in audit).
-
-#### Why side effects have a condition mechanism at all
-
-For tasks, we rejected YAML conditions in favor of `task_builders: ["fn_name"]` — full Python power, no DSL. For side effects we kept a gating mechanism. The reasons are different:
-
-- **Tasks can be built programmatically.** A `task_builder` function decides whether to schedule and the return list can be empty. The task entity either exists or it doesn't — there's no "task activity ran and did nothing" residue in PROV.
-- **Side effects cannot.** A handler cannot decide "don't run this activity at all" — the activity row is created before the handler is invoked. Only a YAML-declared gate can actually prevent the activity from leaving a PROV trace.
-
-So the condition mechanism is the *only* way to express "this side effect shouldn't apply here" without leaving a PROV residue. The dict form handles the common case; `condition_fn:` covers everything else without inviting a DSL.
+**Condition and condition_fn are mutually exclusive** per side-effect entry. Load-time validator rejects entries that set both.
 
 ### Reference data — static lists for the frontend
 
-Dropdowns, type lists, municipality codes — anything the frontend needs to render forms. Declared in the YAML, served from memory, sub-millisecond.
+Many workflows have fixed lists the frontend needs (provinces, decision types, categories). Declare them inline rather than building a separate API:
 
 ```yaml
 reference_data:
-  gemeenten:
-    - key: "brugge"
-      label: "Brugge"
-      nis_code: "31005"
-    - key: "gent"
-      label: "Gent"
-      nis_code: "44021"
-  documenttypes:
-    - key: "beslissing"
-      label: "Beslissing"
-    - key: "advies"
-      label: "Advies"
+  beslissing_types:
+    - id: "positief"
+      label: "Positieve beslissing"
+    - id: "negatief"
+      label: "Negatieve beslissing"
+    - id: "voorwaardelijk"
+      label: "Voorwaardelijk positief"
 ```
 
-Available at:
-
-```
-GET /mijn_workflow/reference              → all lists
-GET /mijn_workflow/reference/gemeenten    → one list
-```
+The engine exposes these via `GET /workflows/{workflow_name}/reference_data/{key}`. No Python code needed — the data lives in YAML and the engine serves it.
 
 ### Field validators — instant feedback between activities
 
-When the frontend needs to validate a field value against server-side data (does this URI exist? is this combination valid?), register a field validator.
+Sometimes a form field needs server-side validation before the user submits: "does this external identifier resolve?", "is this date within the allowed range?". Register a field validator:
 
 ```python
-# field_validators.py
-async def validate_gemeente(body: dict) -> dict:
-    gemeente = body.get("gemeente", "")
-    if gemeente not in KNOWN_GEMEENTEN:
-        return {"valid": False, "error": f"Onbekende gemeente: {gemeente}"}
-    return {"valid": True, "label": KNOWN_GEMEENTEN[gemeente]}
+from dossier_engine.plugin import FieldValidator
+from pydantic import BaseModel
+
+class ErfgoedobjectRequest(BaseModel):
+    uri: str
+
+class ErfgoedobjectResponse(BaseModel):
+    ok: bool
+    label: str | None = None
+
+async def validate_erfgoedobject(payload: dict) -> dict:
+    uri = payload["uri"]
+    # ... call external service, resolve, etc.
+    return {"ok": True, "label": "Some label"}
 
 FIELD_VALIDATORS = {
-    "gemeente": validate_gemeente,
+    "erfgoedobject": FieldValidator(
+        fn=validate_erfgoedobject,
+        request_model=ErfgoedobjectRequest,
+        response_model=ErfgoedobjectResponse,
+        summary="Valideer erfgoedobject URI",
+        description="Controleer of de URI verwijst naar een gekend erfgoedobject.",
+    ),
 }
 ```
 
-Register on the plugin:
+The frontend calls `POST /{workflow}/validate/erfgoedobject` with a JSON body; the engine validates against `request_model`, invokes the function, validates the return against `response_model`, and serves the result with proper OpenAPI documentation.
 
-```python
-Plugin(..., field_validators=FIELD_VALIDATORS)
-```
+**Plain-callable form** (legacy): you can also register a bare async function without request/response models. Typed `FieldValidator` is strongly preferred — the OpenAPI schemas let the frontend code-gen typed clients.
 
-Available at:
+### Relations — linking entities to other entities or external URIs
 
-```
-POST /mijn_workflow/validate/gemeente
-{"gemeente": "brugge"}
-→ {"valid": true, "label": "Brugge"}
-```
+Process-control relations annotate a single activity (e.g. "this activity acknowledges a newer version of the used entity"). Domain relations are entity-to-entity (or entity-to-external-URI) edges that persist in the PROV graph.
 
-### Domain relations — linking entities to external objects
-
-When your entities relate to things outside the dossier (erfgoedobjecten, legal articles, other dossiers), declare domain relation types.
-
-```yaml
-# Workflow-level declaration
-relations:
-  - type: "oe:betreft"
-    kind: "domain"
-    from_types: ["entity"]
-    to_types: ["external_uri"]
-
-# On the activity that can create the link
-activities:
-  - name: "dienAanvraagIn"
-    relations:
-      - type: "oe:betreft"
-        kind: "domain"
-        operations: [add]
-```
-
-The API caller includes the relation in the activity request:
-
-```json
-{
-  "generated": [{"entity": "oe:aanvraag/e1@v1", "content": {...}}],
-  "relations": [
-    {
-      "type": "oe:betreft",
-      "from": "oe:aanvraag/e1@v1",
-      "to": "https://id.erfgoed.net/erfgoedobjecten/10001"
-    }
-  ]
-}
-```
-
-The shorthand refs (`oe:aanvraag/e1@v1`) are automatically expanded to full IRIs before storage. The relation appears in the dossier detail response under `domainRelations`.
-
-To allow removing relations, add a dedicated activity:
-
-```yaml
-- name: "bewerkRelaties"
-  label: "Bewerk relaties"
-  generates: []
-  status: null
-  relations:
-    - type: "oe:betreft"
-      kind: "domain"
-      operations: [add, remove]
-```
-
-### Tasks — scheduling future work
-
-When an activity should trigger future work (send a notification, check a deadline, escalate after N days), declare a task.
-
-```yaml
-- name: "dienAanvraagIn"
-  tasks:
-    # Fire immediately after the activity completes — no scheduled_for.
-    - kind: "recorded"
-      function: "send_ontvangstbevestiging"
-
-    # Fire 20 days later — relative offset.
-    - kind: "recorded"
-      anchor_type: "oe:aanvraag"
-      function: "check_behandeltermijn"
-      scheduled_for: "+20d"
-```
-
-The task handler is an async function:
-
-```python
-async def send_ontvangstbevestiging(ctx):
-    # In production: send email, generate PDF, etc.
-    pass
-
-TASK_HANDLERS = {
-    "send_ontvangstbevestiging": send_ontvangstbevestiging,
-}
-```
-
-Registered on the plugin:
-
-```python
-Plugin(..., task_handlers=TASK_HANDLERS)
-```
-
-#### Scheduling: when does a task run?
-
-The `scheduled_for` field accepts two forms:
-
-**Relative offset** — resolved against the activity's start time.
-
-```yaml
-scheduled_for: "+20d"    # 20 days from now
-scheduled_for: "+2h"     # 2 hours from now
-scheduled_for: "+45m"    # 45 minutes
-scheduled_for: "+3w"     # 3 weeks
-```
-
-Units: `m` (minutes), `h` (hours), `d` (days), `w` (weeks). The `+` prefix is required — it's what tells the parser "this is an offset, not a date". Negative offsets and unknown units are rejected at activity execution time.
-
-**Absolute ISO 8601** — for fixed wall-clock times.
-
-```yaml
-scheduled_for: "2026-12-31T23:59:59Z"
-scheduled_for: "2026-05-01T12:00:00+02:00"
-```
-
-Omit `scheduled_for` entirely for tasks that should run immediately after the activity completes.
-
-#### Dynamic deadlines (from entity content or config)
-
-YAML can't read entity fields — there's no `{{ aanvraag.deadline }}` template syntax, deliberately. For anything where the deadline depends on entity content or runtime config, compute the ISO string in a handler and return it in `HandlerResult.tasks`:
-
-```python
-from datetime import datetime, timezone, timedelta
-
-async def handle_beslissing(context, content):
-    # Deadline from plugin config — 30 days by default, overrideable
-    # via env var or workflow.yaml.
-    deadline_days = context.constants.aanvraag_deadline_days
-
-    deadline = (
-        datetime.now(timezone.utc) + timedelta(days=deadline_days)
-    ).isoformat()
-
-    task_dict = {
-        "kind": "scheduled_activity",
-        "target_activity": "trekAanvraagIn",
-        "scheduled_for": deadline,     # full ISO string
-        "cancel_if_activities": ["vervolledigAanvraag"],
-        "anchor_type": "oe:aanvraag",
-    }
-    return HandlerResult(tasks=[task_dict])
-```
-
-Handlers have full access to `context.get_typed("oe:aanvraag")` to read entity content, `context.constants` for configured values, and `context.dossier_id` for anything else needing lookup. The rule of thumb: **if the deadline depends on something that varies, compute in a handler. If it's always "N days after this activity", use the YAML offset.**
-
-### Search — Elasticsearch integration
-
-The platform ships with a two-tier index model: a **common index** (`dossiers-common`, engine-owned, one doc per dossier across all workflows) and an optional **workflow-specific index** (e.g. `dossiers-toelatingen`, plugin-owned, fields tuned to that workflow's entity shape). A plugin wires into search via three hooks.
-
-**1. `post_activity_hook` — incremental indexing.** Runs after every activity completes. Upserts both the plugin's own index and the engine's common index. Silent no-op when `DOSSIER_ES_URL` is empty.
-
-```python
-async def update_index(repo, dossier_id, activity_type, status, entities):
-    # Build a common-index doc (for /dossiers?workflow=...)
-    # and a workflow-specific doc, then push both to ES.
-    pass
-```
-
-**2. `search_route_factory` — the plugin's search endpoint.** Registers `GET /{workflow}/dossiers` with fuzzy/exact filters over the workflow-specific index. Always AND's in `build_acl_filter(user)` so users only see what they're allowed to see.
-
-```python
-def register_search(app, get_user):
-    @app.get("/mijn_workflow/dossiers")
-    async def search(...):
-        # Query the workflow-specific ES index, ACL-filtered.
-        pass
-```
-
-**3. `build_common_doc_for_dossier` — bulk reindex builder.** Optional, but **strongly recommended**. Called by the engine's `POST /admin/search/common/reindex` endpoint when it walks every dossier to rebuild the common index from Postgres. Without this, the engine falls back to a minimal doc (`onderwerp=""`, `__acl__` with only global-access roles) for your workflow's dossiers — which makes every non-global user invisible from search until the next per-activity upsert rewrites the doc. A bulk reindex shortly after a mapping change or a fresh cluster is exactly when you need this most, so plugins should implement it.
-
-```python
-async def build_common_doc_for_dossier(repo, dossier_id):
-    """Produce the common-index doc for one of this plugin's
-    dossiers. Called by engine-level reindex."""
-    from dossier_engine.search.common_index import build_common_doc
-
-    aanvraag = await repo.get_singleton_entity(dossier_id, "oe:aanvraag")
-    access = await repo.get_singleton_entity(dossier_id, "oe:dossier_access")
-    if aanvraag is None and access is None:
-        return None  # counts as "skipped"
-
-    onderwerp = (aanvraag.content or {}).get("onderwerp") if aanvraag else None
-    return build_common_doc(
-        dossier_id=dossier_id,
-        workflow="mijn_workflow",
-        onderwerp=onderwerp,
-        access_entity_content=access.content if access else None,
-    )
-
-Plugin(...,
-    post_activity_hook=update_index,
-    search_route_factory=register_search,
-    build_common_doc_for_dossier=build_common_doc_for_dossier,
-)
-```
-
-The engine provides `build_common_doc(...)` to assemble the standard shape — plugin code only supplies onderwerp and the access entity's content (so ACL is derived consistently across plugins).
-
-### Activity names — qualified vs bare
-
-Activity names in `workflow.yaml` can be written bare (`dienAanvraagIn`) or qualified with the plugin's prefix (`oe:dienAanvraagIn`). At plugin registration time, the engine walks the workflow dict and qualifies any bare name it finds — including cross-references:
-
-- `activities[*].name`
-- `activities[*].requirements.activities`
-- `activities[*].forbidden.activities`
-- `activities[*].side_effects[*].activity`
-- `activities[*].tasks[*].target_activity` and `cancel_if_activities`
-
-After registration, every activity name in the plugin object is qualified. **Downstream code should compare by qualified name only.** This is why the DB stores qualified activity types, URLs route on qualified names (`/toelatingen/dossiers/{id}/activities/{aid}/oe:dienAanvraagIn`), and the frontend keys lookups on qualified types.
-
-**What this means for plugin authors:** write whichever form feels natural — the engine normalizes. But be aware that if you add a new YAML shape that cross-references an activity name (e.g. `my_new_feature.activities`), you need to extend `_normalize_plugin_activity_names` to qualify entries in that shape too. Otherwise bare names silently pass through and downstream filters (like `system_activity_types` in the columns PROV graph) will miss.
-
-### Using external ontologies
-
-Your workflow doesn't have to invent its own vocabulary for everything. You can adopt types from standard ontologies like FOAF (people), Dublin Core (documents), Schema.org (general-purpose), or PROV (provenance itself). This makes your PROV graph interoperable — other systems that understand these vocabularies can consume your data directly.
-
-Declare external prefixes in your `workflow.yaml`:
-
-```yaml
-namespaces:
-  foaf: "http://xmlns.com/foaf/0.1/"
-  dcterms: "http://purl.org/dc/terms/"
-  schema: "http://schema.org/"
-```
-
-Then use them anywhere a qualified type goes — entity types, relations, activity generates/used:
-
-```yaml
-entity_types:
-  - type: "oe:aanvraag"          # your own ontology
-    cardinality: multiple
-    model: "my_workflow.entities.Aanvraag"
-
-  - type: "foaf:Person"           # adopted from FOAF
-    cardinality: multiple
-    model: "my_workflow.entities.Person"
-
-  - type: "dcterms:BibliographicResource"   # adopted from Dublin Core
-    cardinality: multiple
-    model: "my_workflow.entities.Document"
-
-relations:
-  - type: "oe:betreft"
-    kind: domain
-  - type: "dcterms:isPartOf"      # Dublin Core relation
-    kind: domain
-    from_types: [entity]
-    to_types: [entity]
-```
-
-**What the engine does with this:**
-
-1. At plugin load, validates that every qualified type references a declared prefix. Typo `foa:Person` instead of `foaf:Person`? You get a clear error at startup, not a runtime surprise.
-2. PROV-JSON exports include a full `prefixes` block with all your declarations, so downstream consumers can expand `foaf:Person` → `http://xmlns.com/foaf/0.1/Person`.
-3. Reference refs like `foaf:Person/e1@v1` parse correctly. Entity IRIs look like `https://{platform}/dossiers/{did}/entities/foaf:Person/{eid}/{vid}` — self-describing.
-
-**Important distinction:** using `foaf:Person` as an entity type means your engine *stores* `foaf:Person` instances (you own the data, you manage the versioning, the engine persists them). It doesn't mean you link to FOAF instances that live elsewhere — those are external URIs (`{"entity": "http://example.org/agents/bob"}`).
-
-Built-in prefixes (`prov`, `xsd`, `rdf`, `rdfs`) are always available; you don't need to declare them. Your plugin's own prefix (`oe` by default) is registered from `config.yaml`'s `iri_base.ontology`.
-
-### Workflow constants and environment variables
-
-Your plugin will have constants — deadline durations, decision thresholds, feature flags, external service URLs, API keys. Hardcoding them in handler code is fine for a prototype, but they need a proper home: some change per deployment (dev vs prod URLs), some are secrets (never commit), some are domain-level tuning you want operators to adjust without code changes.
-
-The engine gives you a typed `constants` slot on every plugin. Declare a Pydantic `BaseSettings` class:
-
-```python
-# my_workflow/constants.py
-from pydantic_settings import BaseSettings, SettingsConfigDict
-
-class MyWorkflowConstants(BaseSettings):
-    model_config = SettingsConfigDict(
-        env_prefix="DOSSIER_MY_WORKFLOW_",
-        case_sensitive=False,
-        frozen=True,
-    )
-
-    # Domain constants
-    aanvraag_deadline_days: int = 30
-    max_attachments: int = 20
-
-    # Environment-specific
-    external_api_url: str = "http://localhost:9200"
-    external_api_key: str | None = None
-
-    # Feature flags
-    auto_approve_enabled: bool = False
-```
-
-Wire it into `create_plugin()`:
-
-```python
-def create_plugin() -> Plugin:
-    workflow = yaml.safe_load(open("workflow.yaml"))
-    yaml_constants = (workflow.get("constants") or {}).get("values", {}) or {}
-    constants = MyWorkflowConstants(**yaml_constants)
-    return Plugin(..., constants=constants)
-```
-
-Access it anywhere in your plugin code:
-
-```python
-# In a handler
-async def handle_beslissing(context, content):
-    deadline_days = context.constants.aanvraag_deadline_days
-    ...
-
-# In a hook or route factory
-async def update_search_index(repo, dossier_id, ...):
-    url = plugin.constants.external_api_url
-    ...
-```
-
-**Precedence (highest wins):**
-
-1. **Environment variables** — `DOSSIER_MY_WORKFLOW_AANVRAAG_DEADLINE_DAYS=60` — operator's escape hatch for per-deployment tuning and the only acceptable place for secrets.
-2. **`workflow.yaml`** — `constants.values` block — committable domain-level tuning.
-3. **Class defaults** — the values in your Pydantic class.
-
-```yaml
-# workflow.yaml
-constants:
-  values:
-    aanvraag_deadline_days: 45   # overrides class default of 30
-    # external_api_key: never put secrets here — use env vars
-```
-
-**What goes where:**
-
-- **Code defaults**: sensible values that let a bare install work
-- **`workflow.yaml`**: domain decisions the plugin author makes (deadlines, thresholds, feature flag defaults)
-- **Environment variables**: deployment-specific values (URLs, timeouts, feature flag overrides) and ALL secrets
-
-Because the class is `frozen=True`, nothing can mutate the constants after plugin load — they're immutable for the lifetime of the process.
-
-## What you don't need to think about
-
-The engine handles these automatically — you declare them in YAML or not at all:
-
-- **PROV provenance** — every activity, entity version, and derivation chain is recorded
-- **Versioning** — `derivedFrom` chains are computed from `used` + `generated` declarations
-- **Idempotency** — client-generated UUIDs make PUTs safe to retry
-- **Access control** — the `oe:dossier_access` entity (managed by a handler) controls who sees what. Audit-level views (`/prov`, `/prov/graph/columns`, `/archive`) require a separate `global_audit_access` role list in `config.yaml` or an `audit_access` list on the dossier — these endpoints expose the full unfiltered record (system activities, tasks, all entities) and should be restricted to auditors and compliance roles.
-- **Archiving** — `GET /dossiers/{id}/archive` produces a PDF/A-3b with full provenance and embedded files (audit-level access required)
-- **Tombstone redaction** — the built-in `tombstone` activity NULLs entity content for GDPR without breaking the PROV graph
-- **Activity visibility** — access entries control which activities each user sees in the timeline
-- **IRI generation** — entity IRIs follow the W3C PROV structure and match the API routes
-- **Audit logging** — reads, writes, denials, and exports are logged to NDJSON for SIEM integration
-
-## The complete plugin interface
-
-Everything a plugin can register:
-
-| Field | Type | Purpose |
-|---|---|---|
-| `name` | `str` | Workflow name (used in URLs) |
-| `workflow` | `dict` | Parsed workflow.yaml |
-| `entity_models` | `dict[str, BaseModel]` | Entity type → Pydantic model |
-| `entity_schemas` | `dict[tuple, BaseModel]` | (type, version) → Pydantic model (optional) |
-| `handlers` | `dict[str, Callable]` | Handler name → async function |
-| `status_resolvers` | `dict[str, Callable]` | Status resolver name → async function (split-style) |
-| `task_builders` | `dict[str, Callable]` | Task builder name → async function (split-style) |
-| `validators` | `dict[str, Callable]` | Validator name → async function |
-| `relation_validators` | `dict[str, Callable]` | Validator name → async function. Dict **keys are validator names**, NOT relation type names — the engine rejects collisions at plugin load time. See "Declaring relations" and "Relation-validator keying" below. |
-| `field_validators` | `dict[str, Callable]` | Validator name → async function |
-| `task_handlers` | `dict[str, Callable]` | Task function name → async function |
-| `pre_commit_hooks` | `list[Callable]` | Strict hooks (can veto activity) |
-| `post_activity_hook` | `Callable` | Advisory hook (errors swallowed) |
-| `search_route_factory` | `Callable` | Registers search endpoints |
-| `build_common_doc_for_dossier` | `Callable` | Builds per-dossier doc for engine-level common-index reindex |
-| `constants` | `BaseSettings` | Typed workflow constants (env vars + YAML) |
-
-Most plugins use only `entity_models`, `handlers`, and perhaps `task_handlers`. Everything else is opt-in for when you need it.
-
-### Declaring relations
-
-Relation types are declared **once at workflow level** with mandatory `kind`. Activities reference them by type name and may add an `operations:` list and a validator. The engine rejects misaligned declarations at plugin load — see "Load-time validation" below.
-
-**Workflow level** (the single source of truth):
+Declare every relation type **once at workflow level** with a mandatory `kind`:
 
 ```yaml
 relations:
@@ -794,9 +314,7 @@ relations:
     description: "Link an entity to the external object it concerns."
 ```
 
-Required fields: `type`, `kind` (must be `"domain"` or `"process_control"`). Optional: `from_types`, `to_types` (domain only — omit both to accept any ref type), `description`.
-
-**Activity level** (reference by name; no redeclaration):
+Activities reference types by name. Activity-level declarations cannot override `kind`, `from_types`, `to_types`, or `description` — those live at workflow level only:
 
 ```yaml
 activities:
@@ -812,54 +330,973 @@ activities:
         validator: "validate_neemt_akte_van"
 ```
 
-Allowed fields: `type` (required, must match a workflow-level declaration), `operations` (optional), and one of `validator:` (single-string) or `validators:` (dict with BOTH `add` and `remove`) — never both. The fields `kind`, `from_types`, `to_types`, `description` are **forbidden at activity level** — they live at workflow level only.
+This is the post-Bug-78 contract (Round 26). Load-time validation rejects misaligned YAML with a clear error. See Part 2 → *Relations reference* for the full rules.
 
-**Kind semantics:**
-- `process_control` relations are activity→entity annotations (`{entity: "ref"}`). Stateless; no remove operation. `validators:` dict form and `operations: [remove]` are forbidden on process_control activity declarations.
-- `domain` relations are entity→entity edges (`{from: "ref", to: "ref"}`). Support both add and remove. `from_types`/`to_types` at workflow level constrain the ref shape of each side.
+### Tasks — scheduling future work
 
-**Dispatch is kind-driven.** The engine resolves `kind` from the workflow-level declaration and dispatches the request accordingly. If the request's shape doesn't match the declared kind (e.g. client sends `{entity: ...}` on a `kind: domain` relation), the engine returns **422** with an error identifying the declared kind and the expected fields. The `kind:` field is load-bearing, not documentation — don't get it wrong and expect the engine to guess from the payload.
+Tasks are work that happens alongside or after an activity — notifications, deadline reminders, auto-withdraw timers, cross-dossier coordination. There are four kinds, distinguished by *when* they execute and *how much* the engine records.
 
-### Relation-validator keying
+1. **`fire_and_forget`** — runs inline during the activity pipeline. Fast, ephemeral, no record. Errors are swallowed. Good for "send a notification, but don't fail the activity if the notifier is down."
+2. **`recorded`** — picked up by the worker after the activity commits. A `system:task` entity is created; the function runs, success/failure is recorded. Good for notifications and deadline reminders that need audit trails.
+3. **`scheduled_activity`** — picked up by the worker. When it fires, the engine emits *this specific activity* in the dossier automatically, as though a user triggered it. No plugin function involved. Good for deadline-driven state transitions ("if no decision in 60 days, auto-withdraw").
+4. **`cross_dossier_activity`** — picked up by the worker. The plugin's task function returns a `TaskResult(target_dossier_id=..., content=...)` and the worker executes the target activity there, with PROV linking the two dossiers.
 
-`plugin.relation_validators` is a `dict[str, Callable]` mapping **validator name → async function**. The dict keys are validator *names* — they must not match any declared relation type name (the engine's load-time `validate_relation_validator_registrations` rejects collisions explicitly).
+Kinds 2-4 all produce `system:task` entities and survive server restarts. Kind 1 does not.
 
-Activity-level YAML references validators by name in one of two forms:
-
-**Style 1 — per-operation validators (domain relations only):**
-
-```yaml
-relations:
-  - type: "oe:betreft"
-    operations: ["add", "remove"]
-    validators:
-      add: "validate_betreft_target"
-      remove: "validate_betreft_removable"
-```
-
-`validators:` is a dict with both `add` and `remove` keys required — partial dicts are rejected at load time. Use when add and remove need different logic (add checks the target exists; remove checks no downstream dependency). This form is forbidden on `kind: process_control` relations (they have no remove semantic).
-
-**Style 2 — single validator string:**
+#### Fire-and-forget tasks
 
 ```yaml
-relations:
-  - type: "oe:neemtAkteVan"
-    validator: "validate_neemt_akte_van"
+activities:
+  - name: "dienAanvraagIn"
+    tasks:
+      - kind: "fire_and_forget"
+        function: "send_ontvangstbevestiging_email"
 ```
 
-Single `validator:` key fires for all operations. Works for both kinds. Use when one function handles both add/remove (rare for domain) or when the relation is process_control (where `validator:` is the only legal form).
+```python
+async def send_ontvangstbevestiging_email(ctx):
+    # Send email; if SMTP is down, log and return.
+    # The activity has already succeeded by the time this runs;
+    # failure here doesn't roll anything back.
+    ...
 
-**Resolution order** (from `engine/pipeline/relations.py::_resolve_validator`):
-1. Activity-level `validators.{add,remove}` → plugin named-validator lookup.
-2. Activity-level `validator:` string → plugin named-validator lookup.
-3. None (validation skipped for this relation).
+TASK_HANDLERS = {
+    "send_ontvangstbevestiging_email": send_ontvangstbevestiging_email,
+}
+```
 
-**What's gone:** the previous "Style 3" — plugin-level fallback that looked up `plugin.relation_validators[<relation_type>]` when no activity-level validator was declared — was removed. It silently ran for activities that didn't opt in, made the dispatch order non-obvious, and (with the dict key matching the type name) invited accidental cross-activity coupling. If an activity wants a validator, it declares one explicitly.
+Task function signature: `async def fn(ctx: ActivityContext) -> None`. Exceptions are caught and logged; they don't affect the activity's transaction. No worker involvement — the function runs synchronously during the pipeline's task-processing phase, right after persistence.
 
-### Load-time validation
+**When to use:** side effects where best-effort is good enough and a record is overhead you don't need. If the work needs an audit trail or retry on failure, use `recorded` instead.
 
-At plugin load, the engine runs two validators in sequence:
-- `validate_relation_declarations(workflow)` — shape-checks every workflow-level and activity-level relation declaration. Fails fast with ValueError on missing kind, invalid kind, domain-only fields used on process_control, activity-level kind/from_types/to_types/description, unknown keys, partial `validators:` dicts, and `validators:` dict or `operations: [remove]` on process_control.
-- `validate_relation_validator_registrations(plugin)` — cross-checks `plugin.relation_validators` dict keys against declared relation type names; rejects collisions.
+#### Recorded tasks
 
-A plugin that violates the contract fails to load at startup rather than producing silent misdispatches at runtime. If your plugin currently works but produces a ValueError after upgrading past Bug 78, the error message names the rule broken and the offending declaration — fix the YAML and reload.
+```yaml
+activities:
+  - name: "dienAanvraagIn"
+    tasks:
+      - kind: "recorded"
+        function: "send_ontvangstbevestiging"
+      - kind: "recorded"
+        function: "check_behandeltermijn"
+        scheduled_for: "+20d"
+```
+
+```python
+async def send_ontvangstbevestiging(ctx):
+    # ctx is an ActivityContext. Send email, generate PDF, etc.
+    pass
+
+TASK_HANDLERS = {
+    "send_ontvangstbevestiging": send_ontvangstbevestiging,
+    "check_behandeltermijn": check_behandeltermijn,
+}
+```
+
+Task function signature: `async def fn(ctx: ActivityContext) -> None`. Return value is ignored — the worker only cares whether the function raised. Success or failure is recorded as a new version of the task entity, so "did this task run and did it succeed" is queryable after the fact.
+
+**When to use:** any background work that needs a record. Deadline reminders, batch emails that should retry on failure, emit-to-external-system. If errors should trigger retries or alerts, this is the kind you want.
+
+#### Scheduled_activity tasks
+
+```yaml
+activities:
+  - name: "dienAanvraagIn"
+    tasks:
+      - kind: "scheduled_activity"
+        target_activity: "trekAanvraagIn"
+        scheduled_for: "+60d"
+        anchor_type: "oe:aanvraag"
+        cancel_if_activities: ["vervolledigAanvraag", "neemBeslissing"]
+```
+
+Fields:
+
+- `target_activity` — the activity the engine will emit when the task fires.
+- `scheduled_for` — when.
+- `anchor_type` — the entity type whose current version will be used as the `used` entity when the engine runs the target activity. Without this, the target activity runs unanchored (no entities used).
+- `cancel_if_activities` — list of activity types that, if any of them runs before the scheduled time, cancel this task. Prevents the "aanvraag was completed, but the 60-day auto-withdraw still fired" footgun.
+
+No Python function needed — the engine handles everything. The target activity must exist in the same workflow.
+
+**Building scheduled_activity tasks from a handler** — when the schedule depends on computed data (entity content, runtime config), return the task from your handler instead of declaring in YAML:
+
+```python
+from datetime import datetime, timezone, timedelta
+from dossier_engine.engine.context import HandlerResult
+
+async def handle_dienAanvraagIn(context, content):
+    deadline_days = context.constants.aanvraag_deadline_days
+    deadline = (
+        datetime.now(timezone.utc) + timedelta(days=deadline_days)
+    ).isoformat()
+
+    return HandlerResult(
+        content=content,
+        tasks=[{
+            "kind": "scheduled_activity",
+            "target_activity": "trekAanvraagIn",
+            "scheduled_for": deadline,
+            "anchor_type": "oe:aanvraag",
+            "cancel_if_activities": ["vervolledigAanvraag"],
+        }],
+    )
+```
+
+Handler-built tasks have the same shape as YAML-declared tasks. The difference is who chooses the parameters.
+
+#### Cross_dossier_activity tasks
+
+```yaml
+activities:
+  - name: "publiceerBeslissing"
+    tasks:
+      - kind: "cross_dossier_activity"
+        function: "create_subsidy_notice"
+        target_activity: "ontvangBesluit"
+        scheduled_for: "+0"
+```
+
+```python
+from dossier_engine.engine.context import TaskResult
+
+async def create_subsidy_notice(ctx) -> TaskResult:
+    beslissing = await ctx.get_singleton_typed("oe:beslissing")
+    return TaskResult(
+        target_dossier_id=str(beslissing.linked_subsidy_dossier_id),
+        content={"reference": beslissing.reference, "decision": beslissing.beslissing},
+    )
+```
+
+The worker:
+1. Calls your function to get the `TaskResult` (which dossier + what content).
+2. Looks up the target dossier's plugin (may be a different workflow).
+3. Executes the target activity in that dossier, with the source dossier's URI recorded in `used` (as `urn:dossier:{source_id}`) and `informed_by` pointing at the source activity.
+4. Marks the source-side task completed with a PROV link to the target activity.
+
+**When to use cross_dossier_activity:** when action in one dossier should trigger action in another (subsidy-decision → notice-creation in a separate subsidy-register dossier). Keeps each dossier's PROV graph clean while preserving the inter-dossier link.
+
+#### Scheduling formats
+
+`scheduled_for` accepts:
+
+- **Relative offset** — `+Nd` / `+Nh` / `+Nm` / `+Nw` (days, hours, minutes, weeks). The `+` is required; it's what tells the parser this is an offset rather than a malformed date.
+- **Absolute ISO 8601** — `"2026-12-31T23:59:59Z"`, `"2026-05-01T12:00:00+02:00"`.
+- **Omit** — the task runs immediately after the activity completes.
+
+#### Supersession — what happens when you schedule the same task twice
+
+By default, scheduling a new task with the same `target_activity` (or `function`) and same anchored entity supersedes any existing scheduled task. The prior task's content is rewritten to `status: superseded` so the worker skips it. This makes the "update the deadline" pattern work naturally — just call the scheduling activity again and the new deadline wins.
+
+Set `allow_multiple: true` on the task declaration to opt out — then multiple scheduled tasks with the same shape coexist. Most plugins don't need this; the default is usually what you want.
+
+Supersession and cancellation both require an anchor. If a task doesn't have an `anchor_type` (and no handler-supplied `anchor_entity_id`), it can't be superseded or cancelled — it will fire exactly as scheduled.
+
+### Workflow rules — `requirements` and `forbidden`
+
+Every activity can declare what must have happened (or must *not* have happened) in the dossier before it's allowed to run. Example: you can't `neemBeslissing` before `dienAanvraagIn`, and you can't `trekAanvraagIn` after `neemBeslissing`:
+
+```yaml
+activities:
+  - name: "neemBeslissing"
+    requirements:
+      activities: ["dienAanvraagIn"]
+      statuses: ["in_behandeling"]
+      entities: ["oe:aanvraag"]
+    forbidden:
+      activities: ["trekAanvraagIn"]
+      statuses: ["ingetrokken", "afgewezen"]
+```
+
+Each sub-key is optional; any combination works.
+
+- `activities:` — these activities must (for requirements) / must not (for forbidden) have a completed instance in the dossier.
+- `statuses:` — the dossier's current cached status must match one of these (for requirements) / must match none of these (for forbidden).
+- `entities:` — (requirements only) at least one entity of each listed type must exist. `forbidden` has no `entities:` key — the engine only checks forbidden `activities` and `statuses`. Model "this type must not exist" with a status check instead, or raise in a handler.
+
+The engine checks `requirements` before running the activity and raises 422 on failure. `forbidden` is the inverse — the activity is rejected if any listed item *does* apply. The failing requirement is named in the error so the client knows what they're missing.
+
+**When to use:** any time the activity has a precondition that isn't purely about input validation. If the activity's validity depends on the dossier's history, use `requirements`. If it depends on the dossier's history *not* containing certain events, use `forbidden`.
+
+### Access control — roles and authorization
+
+Who can run which activity? Two complementary mechanisms:
+
+**`allowed_roles`** — flat list of roles that can run the activity:
+
+```yaml
+activities:
+  - name: "neemBeslissing"
+    allowed_roles: ["behandelaar", "beheerder"]
+    default_role: "behandelaar"
+```
+
+Simplest form. If the request-making user has any role in the list, the activity is allowed.
+
+**`authorization`** — full authorization block with access level + role-matching shapes:
+
+```yaml
+activities:
+  - name: "publiekeZoekopdracht"
+    authorization:
+      access: "everyone"     # no authentication required
+
+  - name: "bekijkEigenDossier"
+    authorization:
+      access: "authenticated"   # default — any logged-in user
+
+  - name: "behandelAanvraag"
+    authorization:
+      access: "roles"
+      roles:
+        # Shape 1: direct match — the user has this exact role.
+        - role: "beheerder"
+
+        # Shape 2: scoped match — the role string is composed at runtime
+        # from a base role + a value resolved from an entity field.
+        # User must have "gemeente-toevoeger:1234" if the aanvraag's
+        # gemeente field is "1234".
+        - role: "gemeente-toevoeger"
+          scope:
+            from_entity: "oe:aanvraag"
+            field: "content.gemeente"
+
+        # Shape 3: entity-derived — the entity field value IS the role.
+        # User must have a role matching the aanvrager's RRN.
+        - from_entity: "oe:aanvraag"
+          field: "content.aanvrager.rrn"
+```
+
+`access` picks the gate level:
+- `"everyone"` — public endpoint, no auth at all.
+- `"authenticated"` (default if omitted) — any logged-in user.
+- `"roles"` — check against the `roles:` list below, using the three shapes.
+
+The three role shapes under `access: roles` let you express "this role has global scope," "this role is scoped to an attribute value," and "this user is this specific aanvrager." The engine tries each role entry in turn; the user must satisfy at least one for the activity to proceed. Denial reasons name every entry that didn't match, so debugging is straightforward.
+
+**`can_create_dossier`** — allows the activity to run without a pre-existing dossier. Set to `true` on your entry activity (the one that creates the dossier). All other activities require the dossier's existence.
+
+**`default_role`** — used when the same user has multiple roles that could authorize the activity. The engine records the default role on the resulting activity's association row, so audit-time "who did this with what role" is deterministic.
+
+### Tombstoning — GDPR-style redaction
+
+The engine provides a built-in `oe:tombstone` activity that redacts entity content while preserving the PROV graph structure. Workflows opt in by declaring which roles are allowed to trigger it:
+
+```yaml
+tombstone:
+  allowed_roles: ["beheerder"]
+```
+
+The engine auto-registers a `tombstone` activity in your workflow when the block is declared. No Python code needed; no YAML activity entry needed beyond the top-level `tombstone:` block. Tombstoning sets every entity's `content` to null, records a tombstone activity in the PROV graph, and marks the dossier tombstoned (a flag the frontend uses to render differently).
+
+Leave the `tombstone:` block out and the activity isn't registered — users can't tombstone dossiers of this workflow at all. The role list is workflow-specific; there's no engine-wide default.
+
+### Schema versioning — entity content that changes shape over time
+
+When an entity's Pydantic model grows a new field or changes a field's type, you can't just edit the existing model — old rows in the database still have the old shape. Schema versioning lets multiple versions of a model coexist:
+
+```python
+class AanvraagV1(BaseModel):
+    aanvrager_naam: str
+    onderwerp: str
+
+class AanvraagV2(BaseModel):
+    aanvrager_naam: str
+    onderwerp: str
+    gemeente: str  # new required field
+```
+
+```yaml
+entity_types:
+  - type: "oe:aanvraag"
+    model: "my_plugin.entities.AanvraagV1"  # legacy/default
+    schemas:
+      v1: "my_plugin.entities.AanvraagV1"
+      v2: "my_plugin.entities.AanvraagV2"
+```
+
+Activities declare which versions they accept and which they produce:
+
+```yaml
+activities:
+  - name: "dienAanvraagIn"
+    entities:
+      oe:aanvraag:
+        new_version: "v2"
+
+  - name: "bewerkAanvraag"
+    entities:
+      oe:aanvraag:
+        allowed_versions: ["v1", "v2"]
+        new_version: "v2"
+```
+
+- `new_version:` — the schema version the activity writes. Activities that generate this entity produce rows stamped `schema_version = "v2"`.
+- `allowed_versions:` — the schema versions this activity accepts as input. If the used entity has a different version, the engine rejects 422 before your handler runs.
+
+Reading is version-aware too. `context.get_typed("oe:aanvraag")` consults each row's stored `schema_version` and returns an instance of the matching model class — `AanvraagV1` for legacy rows, `AanvraagV2` for new ones. Your handler can branch on `isinstance(aanvraag, AanvraagV2)` to handle both shapes during migration.
+
+**Load-time validation**: every `new_version:` / `allowed_versions:` reference is checked against the declared `schemas:` block. Typos fail the plugin at startup, not silently at runtime.
+
+**Legacy compatibility**: rows with `schema_version = NULL` fall back to the top-level `model:` field. Plugins that don't version anything can leave `schemas:` empty entirely.
+
+### Workflow constants and environment variables
+
+Workflow constants are typed config: deadline durations, feature flags, external service URLs, API keys. Three precedence layers, highest wins:
+
+1. **Environment variables** (operator escape hatch, secrets).
+2. **`constants.values` block in workflow.yaml** (plugin author's domain-level tuning).
+3. **Pydantic class defaults**.
+
+```python
+# my_plugin/constants.py
+from pydantic_settings import BaseSettings
+
+class ToelatingenConstants(BaseSettings):
+    aanvraag_deadline_days: int = 30
+    publication_freeze_active: bool = False
+    external_erfgoedobjecten_url: str = "https://id.erfgoed.net"
+
+    model_config = {"env_prefix": "TOELATINGEN_"}
+```
+
+```yaml
+constants:
+  values:
+    aanvraag_deadline_days: 60    # overrides the class default
+    publication_freeze_active: false
+```
+
+```python
+# my_plugin/__init__.py
+from .constants import ToelatingenConstants
+
+def create_plugin() -> Plugin:
+    # ...load workflow as before...
+    yaml_constants = (workflow.get("constants") or {}).get("values", {}) or {}
+    constants = ToelatingenConstants(**yaml_constants)
+    return Plugin(..., constants=constants)
+```
+
+```bash
+# Operator overrides domain-level value
+TOELATINGEN_AANVRAAG_DEADLINE_DAYS=90 ./run_server.sh
+```
+
+Access in handlers via `context.constants.aanvraag_deadline_days`. Access in hooks and factories (which don't have a context) via `plugin.constants.aanvraag_deadline_days`. Returns `None` if the plugin didn't declare a constants class; accessing attributes on `None` raises `AttributeError`, so the clearer pattern is "declare an empty class rather than leave undeclared."
+
+### Search — Elasticsearch integration
+
+The platform has a two-tier index model: an engine-owned `dossiers-common` index (one doc per dossier across all workflows) and an optional workflow-specific index (`dossiers-{workflow}`) that you own.
+
+Three plugin hooks wire into it:
+
+**1. `post_activity_hook` — incremental indexing.** Runs after every activity completes. Upserts both indexes. No-op when `DOSSIER_ES_URL` is empty (so dev doesn't require Elasticsearch).
+
+```python
+async def update_index(repo, dossier_id, activity_type, status, entities):
+    # Build the per-dossier doc, upsert to your workflow index, upsert to common.
+    ...
+
+Plugin(..., post_activity_hook=update_index)
+```
+
+**2. `search_route_factory` — custom search endpoints.** Registers routes like `/dossiers/{workflow}/search`:
+
+```python
+def register_search_routes(app, get_user):
+    @app.get("/dossiers/my_plugin/search")
+    async def search(q: str, user = Depends(get_user)):
+        # ACL-aware query against your workflow index
+        ...
+
+Plugin(..., search_route_factory=register_search_routes)
+```
+
+**3. `build_common_doc_for_dossier` — bulk reindex builder.** Called by the engine's admin reindex endpoint when it walks every dossier to rebuild the common index from Postgres. **Strongly recommended** — without it, the engine falls back to a bare doc (empty onderwerp, global-access-roles-only ACL), which makes every non-global user invisible from search until the next per-activity upsert.
+
+```python
+from dossier_engine.search.common_index import build_common_doc
+
+async def build_common_doc_for_dossier(repo, dossier_id):
+    access = await repo.get_singleton_entity(dossier_id, "oe:dossier_access")
+    aanvraag = await repo.get_singleton_entity(dossier_id, "oe:aanvraag")
+    return build_common_doc(
+        dossier_id=dossier_id,
+        workflow_name="my_plugin",
+        onderwerp=aanvraag.content.get("onderwerp") if aanvraag else "",
+        access_content=access.content if access else None,
+    )
+
+Plugin(..., build_common_doc_for_dossier=build_common_doc_for_dossier)
+```
+
+The engine provides `build_common_doc(...)` to assemble the standard doc shape — plugin code only supplies onderwerp and the access entity's content, so ACL derivation stays consistent across plugins.
+
+### Pre-commit hooks — strict validation that can roll back
+
+Most of the time, `post_activity_hook` is the right shape: fire-and-forget side effects whose failure shouldn't roll back the activity. But sometimes you need the inverse — validation or side-effect work that *must* succeed or the activity should fail.
+
+```python
+async def verify_pki_signature(*, repo, dossier_id, plugin, activity_def,
+                               generated_items, used_rows, user):
+    for item in generated_items:
+        if item.get("type") == "oe:beslissing":
+            signature = item["content"].get("signature")
+            if not verify_signature(signature, user.certificate):
+                raise ActivityError(422, "PKI signature invalid")
+
+Plugin(..., pre_commit_hooks=[verify_pki_signature])
+```
+
+Pre-commit hooks run after persistence but *before* transaction commit. Unlike `post_activity_hook`, exceptions are NOT swallowed — they propagate and roll back the whole activity. Use for synchronous validation or side effects that must succeed or the activity should be rejected:
+
+- PKI signature checks
+- External ID reservations (reserve a number sequence, fail the activity if the external system rejects)
+- Mandatory file service operations (move uploads to permanent storage; if it fails, don't commit the activity that referenced them)
+
+Hooks run in registered order. First raise wins — subsequent hooks don't run. Raise `ActivityError` for structured HTTP responses; any other exception becomes a 500.
+
+### Activity names — qualified vs bare
+
+Activity names in YAML can be bare (`dienAanvraagIn`) or qualified (`oe:dienAanvraagIn`). The engine normalizes everything to qualified form at plugin load — the workflow's default prefix (from the `namespaces:` block, or `oe` if unset) prepends the bare name.
+
+```yaml
+namespaces:
+  default: "https://id.erfgoed.net/oe#"
+  prefixes:
+    oe: "https://id.erfgoed.net/oe#"
+```
+
+Internally the engine always sees `oe:dienAanvraagIn`. API requests can use either form; the URL router normalizes.
+
+**When it matters:** if two plugins use the same bare activity name, they need distinct prefixes to keep them separated in the PROV graph. For a single-plugin deployment, the default `oe:` is fine and you can write bare names everywhere in YAML.
+
+### Using external ontologies
+
+PROV entities and relations use IRIs — full `https://` URLs identify types across systems. The `namespaces:` block lets you register prefix shortcuts:
+
+```yaml
+namespaces:
+  default: "https://id.erfgoed.net/oe#"
+  prefixes:
+    oe: "https://id.erfgoed.net/oe#"
+    prov: "http://www.w3.org/ns/prov#"
+    dcterms: "http://purl.org/dc/terms/"
+```
+
+Then in your YAML and code, write `dcterms:created` instead of the full URL. The engine expands prefixes on input, preserves them on display.
+
+## What you don't need to think about
+
+The engine handles, without any plugin code:
+
+- **HTTP layer** — routing, JSON deserialization, Pydantic validation of request bodies against your entity models, error handling, OpenAPI generation.
+- **Persistence** — the PROV graph (activity / entity / used / generated / association rows), dossier status, schema versioning, transaction boundaries.
+- **Worker loop** — task polling, claiming, execution, retry, cross-dossier coordination. Your task functions are just async callables.
+- **Authentication** — POC auth via HTTP Basic (dev/test), real auth via whatever the deployment wires in. Your plugin receives `User` objects; you don't parse headers.
+- **Authorization mechanics** — the three role-matching shapes, the scope resolution, the caching. Your plugin declares rules in YAML; the engine evaluates them.
+- **Search infrastructure** — the common index, admin endpoints, ACL derivation. You write the workflow-specific per-dossier doc builder; the engine handles the rest.
+- **Audit logging** — SIEM-worthy events for access denials, failed authorizations, tombstone activities. Your plugin just does its thing.
+- **Pipeline phases** — the ordered sequence of validation, handler invocation, relations processing, persistence, projection. You plug into specific points; you don't orchestrate.
+
+If you find yourself needing to know about any of the above in detail, it's probably for debugging — `docs/pipeline_architecture.md` has the engine internals.
+
+---
+
+# Part 2 — Reference
+
+Part 2 is scan-oriented: exhaustive tables with minimal narrative, cross-linked back to the tutorial sections that teach each feature. Skim for what you need; read the tutorial for the "why" and "when."
+
+## The Plugin dataclass
+
+The `Plugin` dataclass is the runtime registration object. Your `create_plugin()` constructs one and returns it; the engine stores it in the `PluginRegistry` under the workflow's name.
+
+Source: `dossier_engine/plugin.py`.
+
+### Required fields
+
+| Field | Type | Description |
+|---|---|---|
+| `name` | `str` | Workflow name, matches the YAML's top-level `name:`. Used as URL prefix in API routes (`/dossiers/{name}/...`). |
+| `workflow` | `dict` | Parsed workflow.yaml. The engine inspects this at load (validators) and runtime (dispatch, permission checks). |
+| `entity_models` | `dict[str, type[BaseModel]]` | Entity type name → Pydantic model. Populated by `build_entity_registries_from_workflow` from YAML `entity_types[*].model:` dotted paths. |
+
+### Optional fields — registries of named callables
+
+Each is a `dict[name, callable]`. YAML references them by name; the engine resolves via dict lookup. Keys are names your YAML chooses; values are async functions.
+
+| Field | Type | What YAML declares |
+|---|---|---|
+| `handlers` | `dict[str, Callable]` | `activity.handler: "name"` |
+| `validators` | `dict[str, Callable]` | `activity.validators: ["name", ...]` — standalone cross-entity validators |
+| `task_handlers` | `dict[str, Callable]` | `task.function: "name"` for `recorded` and `cross_dossier_activity` kinds |
+| `status_resolvers` | `dict[str, Callable]` | `activity.status_resolver: "name"` |
+| `task_builders` | `dict[str, Callable]` | `activity.task_builders: ["name", ...]` |
+| `side_effect_conditions` | `dict[str, Callable]` | `side_effect.condition_fn: "name"` |
+| `relation_validators` | `dict[str, Callable]` | `activity.relations[*].validator: "name"` or `validators: {add: "name", remove: "name"}`. **Keys must not collide with declared relation type names** — Bug 78 load-time validator rejects at startup. |
+| `field_validators` | `dict[str, Callable \| FieldValidator]` | Exposed at `POST /{workflow}/validate/{name}`. `FieldValidator` wrapper adds request/response Pydantic models for OpenAPI. |
+
+### Optional fields — single callables and lists
+
+| Field | Type | Description |
+|---|---|---|
+| `post_activity_hook` | `Callable \| None` | Advisory post-commit hook. Exceptions swallowed. Signature: `async def hook(repo, dossier_id, activity_type, status, entities) -> None` |
+| `pre_commit_hooks` | `list[Callable]` | Strict pre-commit hooks. Exceptions propagate and roll back. Run in registered order; first raise wins. Signature: `async def hook(*, repo, dossier_id, plugin, activity_def, generated_items, used_rows, user) -> None` |
+| `search_route_factory` | `Callable \| None` | Called during route registration. Signature: `def factory(app, get_user) -> None` |
+| `build_common_doc_for_dossier` | `Callable \| None` | Per-dossier common-index doc builder. Signature: `async def build(repo, dossier_id) -> dict \| None`. Returning `None` skips this dossier in reindex. |
+
+### Optional fields — other
+
+| Field | Type | Description |
+|---|---|---|
+| `entity_schemas` | `dict[tuple[str, str], type[BaseModel]]` | `(type, version) → model` for schema-versioned entities. Populated by `build_entity_registries_from_workflow` from YAML `entity_types[*].schemas:`. |
+| `constants` | `BaseSettings \| None` | Typed workflow constants. Populated at plugin load by `create_plugin()` using the class named in `constants.class:` in YAML. `None` if the plugin doesn't declare a constants class. |
+
+### Plugin methods
+
+| Method | Signature | Description |
+|---|---|---|
+| `cardinality_of(entity_type)` | `str` | `"single"` or `"multiple"`. Workflow declarations win; falls back to engine defaults (`system:task`, `system:note`, `external` → `"multiple"`; `oe:dossier_access` → `"single"`). |
+| `is_singleton(entity_type)` | `bool` | Shorthand for `cardinality_of(entity_type) == "single"`. |
+| `resolve_schema(entity_type, schema_version)` | `type[BaseModel] \| None` | Route (type, version) → model class. Consults `entity_schemas` first; falls back to `entity_models` when `schema_version` is None. |
+| `find_activity_def(activity_type)` | `dict \| None` | Look up an activity's YAML block by qualified or bare name. |
+
+## ActivityContext
+
+Passed as the first argument to handlers, task functions, status resolvers, task builders, and side-effect condition functions. Provides typed access to used entities plus a few helpers that hide the cardinality distinction.
+
+Source: `dossier_engine/engine/context.py`.
+
+### Attributes
+
+| Attribute | Type | Description |
+|---|---|---|
+| `repo` | `Repository` | Database repository for ad-hoc queries. Use when the helpers below don't cover your case. |
+| `dossier_id` | `UUID` | The current dossier. |
+| `user` | `User \| None` | **Executor identity** — who is running this code right now. For direct request handlers, the request-maker. For side effects and worker tasks, the system user. Use for "who is doing this?" |
+| `triggering_user` | `User \| None` | **Attribution identity** — who is attributed with the activity that caused this context. For direct handlers, same as `user`. For side effects, the original request-maker. For worker tasks, the user attributed with the triggering activity. Use for audit events and denial reasons. |
+| `triggering_activity_id` | `UUID \| None` | ID of the activity that triggered this context. Set for task handlers (the activity that scheduled the task). `None` for direct handlers (the context *is* the triggering activity). |
+| `constants` | `BaseSettings \| None` | Shortcut to `plugin.constants`. |
+
+The `user` / `triggering_user` split is documented in the Round 18 review notes and the `ActivityContext` class docstring. Executor and attribution matter most in side effects and worker tasks where they diverge.
+
+### Methods — used-entity lookup
+
+These consult the entities declared in the current activity's `used:` block (resolved into `ActivityContext._used_entities` before the handler runs).
+
+| Method | Signature | Description |
+|---|---|---|
+| `get_used_entity(entity_type)` | `EntityRow \| None` | The `EntityRow` for a used entity, or `None`. Low-level — gives you access to version_id, generated_by, schema_version, content, tombstone flags. |
+| `get_used_row(entity_type)` | `EntityRow \| None` | Alias for `get_used_entity`. Prefer this name when you need the version id (e.g. for seeding a lineage walk). |
+| `get_typed(entity_type)` | `BaseModel \| None` | Used entity's content as a validated Pydantic instance. Routes via `plugin.resolve_schema` — returns the right version's model class automatically. `None` if the entity doesn't exist or is tombstoned. |
+
+### Methods — dossier-level lookup (async)
+
+These query the whole dossier, not just the current activity's `used` block.
+
+| Method | Signature | Description |
+|---|---|---|
+| `get_singleton_entity(entity_type)` | `async → EntityRow \| None` | The singleton entity row of this type in the dossier. Raises `CardinalityError` if the type isn't declared singleton. |
+| `get_singleton_typed(entity_type)` | `async → BaseModel \| None` | Same as `get_singleton_entity` but returns the content as a typed Pydantic instance (version-aware via `resolve_schema`). Raises `CardinalityError` on non-singleton types. |
+| `get_entities_latest(entity_type)` | `async → list[EntityRow]` | Latest version of each logical entity of this type. Works for both singleton and multi-cardinality — singletons yield a 0- or 1-element list. |
+| `has_activity(activity_type)` | `async → bool` | Has this activity type been completed in this dossier? Useful for conditional logic that doesn't fit workflow-rules (`requirements`/`forbidden`). |
+
+### When to use which
+
+- **Need the content of an entity the activity explicitly used?** `get_typed(type)` — the most common case.
+- **Need version IDs, schema version, timestamps?** `get_used_row(type)` — returns the EntityRow.
+- **Need a singleton that's not in `used`?** `get_singleton_typed(type)` — async, queries the dossier directly.
+- **Iterating multi-cardinality entities?** `get_entities_latest(type)` — yields the latest version of each logical entity.
+- **Branching on workflow history?** `has_activity(type)` — but prefer declaring it in `requirements`/`forbidden` if the rule is static.
+- **Doing something the helpers don't cover?** `self.repo` gives you the full Repository API.
+
+## HandlerResult
+
+Return value from a plugin handler. Source: `dossier_engine/engine/context.py`.
+
+```python
+HandlerResult(
+    content=None,          # dict | None — single-entity convenience shape
+    generated=None,        # list[dict] | None — explicit list of entities to generate
+    status=None,           # str | None — override the activity's YAML status
+    tasks=None,            # list[dict] | None — task definitions to schedule
+)
+```
+
+### Fields
+
+| Field | Type | Description |
+|---|---|---|
+| `content` | `dict \| None` | Convenience: when the activity's YAML declares a single type in `generates:` and the handler just returns one dict of content, the engine infers the type. Equivalent to `generated=[{"type": None, "content": content}]`. |
+| `generated` | `list[dict \| tuple] \| None` | Explicit list of entities to generate. Each item is either a `(type, content)` tuple (legacy) or a dict with `type`, `content`, optional `entity_id`, optional `derived_from`. **Multi-cardinality types must use the dict form** to specify which logical entity is being revised. |
+| `status` | `str \| None` | Override the activity's YAML-declared status. If set and the activity also declares `status_resolver:`, the engine raises at load — "who decides the status" must be unambiguous. |
+| `tasks` | `list[dict] \| None` | Task definitions to schedule. Same shape as activity-level `tasks:` YAML entries. Runtime equivalent of declaring tasks in YAML; use when scheduling depends on computed content. If the activity declares `task_builders:`, handler-returned `tasks` must be empty — same unambiguity rule. |
+
+### Which shape to return when
+
+- **Single generated entity, type inferred from YAML `generates[0]`:** return `HandlerResult(content={...})`.
+- **Single generated entity, explicit type:** return `HandlerResult(generated=[{"type": "oe:x", "content": {...}}])`.
+- **Multi-cardinality revision** (revising an existing logical entity, not creating a new one): `HandlerResult(generated=[{"type": "...", "entity_id": existing_id, "content": {...}}])`.
+- **Multiple entities in one activity:** `HandlerResult(generated=[entity1, entity2])`.
+- **No generated entities, just status or tasks:** `HandlerResult(status="...")` or `HandlerResult(tasks=[...])`.
+
+## TaskResult
+
+Return value from a `cross_dossier_activity` task function. Source: `dossier_engine/engine/context.py`.
+
+```python
+TaskResult(
+    target_dossier_id="<uuid str>",   # required
+    content=None,                     # dict | None — content for the target activity
+)
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `target_dossier_id` | `str` | UUID of the dossier where the target activity will run. Your function computes this from whatever logic the workflow needs. |
+| `content` | `dict \| None` | Content for the target activity's first `generates[0]` entity. The worker wraps this in the request shape the target activity's pipeline expects. |
+
+Cross-dossier tasks are the only kind that return a value — recorded and scheduled_activity tasks return `None` (the worker just checks for non-exceptional completion).
+
+## Task kinds reference
+
+Four kinds, distinguished by *where* they execute and *whether* they leave a record.
+
+| Kind | Runs in | Entity created? | Errors | Where dispatched |
+|---|---|---|---|---|
+| `fire_and_forget` | Activity pipeline (inline) | No | Swallowed | `engine/pipeline/tasks.py::_fire_and_forget` |
+| `recorded` | Worker (background) | Yes (`system:task`) | Marked failed, retried | `worker.py::_process_recorded` |
+| `scheduled_activity` | Worker (background) | Yes (`system:task`) | Marked failed, retried | `worker.py::_process_scheduled_activity` |
+| `cross_dossier_activity` | Worker (background) | Yes (`system:task`) | Marked failed, retried | `worker.py::_process_cross_dossier` |
+
+Kinds 2-4 produce `system:task` entities and survive server restarts. Kind 1 doesn't — it runs once during the activity's pipeline and leaves nothing behind.
+
+### `fire_and_forget`
+
+**Shape:**
+
+```yaml
+- kind: "fire_and_forget"
+  function: "name_in_task_handlers"
+```
+
+No `scheduled_for`, `anchor_type`, or `cancel_if_activities` — fire_and_forget runs once, inline, synchronously during the activity's task-processing phase.
+
+**Function signature:** `async def fn(ctx: ActivityContext) -> None`.
+
+**Semantics:** the engine calls the function immediately after persistence (but before `post_activity_hook`). Exceptions are caught and logged; they don't affect the transaction or propagate to the client. If the function is unregistered or the task dict has no `function:`, the task is silently skipped.
+
+**Use for:** best-effort side work that should never block or fail the activity. Sending non-critical notifications, emitting metrics, triggering cache-warm requests on external services.
+
+### `recorded`
+
+**Shape:**
+
+```yaml
+- kind: "recorded"
+  function: "name_in_task_handlers"
+  scheduled_for: "+20d"           # optional
+  anchor_type: "oe:aanvraag"      # optional — used to anchor deduplication
+```
+
+**Function signature:** `async def fn(ctx: ActivityContext) -> None`.
+
+**Semantics:** the worker invokes the function at the scheduled time. Function returns normally → task marked completed. Function raises → task marked failed, retries applied per worker policy. `cancel_if_activities` is supported but unusual for recorded tasks; most recorded tasks just fire.
+
+**Use for:** notifications, deadline reminders, integration calls — anything that needs an audit trail or retry semantics. Compare with `fire_and_forget` above for inline best-effort work.
+
+### `scheduled_activity`
+
+**Shape:**
+
+```yaml
+- kind: "scheduled_activity"
+  target_activity: "trekAanvraagIn"
+  scheduled_for: "+60d"
+  anchor_type: "oe:aanvraag"                      # optional — seeds target's `used`
+  cancel_if_activities: ["vervolledigAanvraag"]   # optional — cancelling activities
+```
+
+**No function needed.** The engine runs the named activity automatically.
+
+**Semantics:** at the scheduled time, if no activity in `cancel_if_activities` has run in the dossier since the task was created, the engine invokes `target_activity` as the system user with `anchor_type`'s latest version as the used entity. PROV records the scheduling activity as `wasInformedBy` of the resulting activity.
+
+**Use for:** time-driven state transitions. The "auto-withdraw after 60 days of inactivity" pattern.
+
+### `cross_dossier_activity`
+
+**Shape:**
+
+```yaml
+- kind: "cross_dossier_activity"
+  function: "name_in_task_handlers"
+  target_activity: "ontvangBesluit"
+  scheduled_for: "+0"             # can be any scheduling shape
+```
+
+**Function signature:** `async def fn(ctx: ActivityContext) -> TaskResult`.
+
+**Semantics:**
+
+1. Worker calls the function to get a `TaskResult` (target dossier + content).
+2. Looks up the target dossier's plugin (may be a different workflow).
+3. Invokes `target_activity` in the target dossier as the system user, with `used=[{entity: "urn:dossier:<source_id>"}]` and `informed_by` pointing at the source task's triggering activity.
+4. Marks the source-side task completed with a PROV link to the target activity.
+
+**Use for:** inter-dossier effects — action in A triggers action in B. Keeps both PROV graphs clean while preserving the cross-dossier link.
+
+### Cross-cutting fields (apply to `recorded`, `scheduled_activity`, `cross_dossier_activity`)
+
+All three worker-backed kinds share a set of optional fields. `fire_and_forget` doesn't support any of them — it runs once, synchronously.
+
+| Field | Type | Purpose |
+|---|---|---|
+| `scheduled_for` | `str` | When to fire. Relative `"+Nd"/"+Nh"/"+Nm"/"+Nw"` or absolute ISO 8601. Omit for immediate. |
+| `anchor_type` | `str` | Entity type whose latest version scopes this task. Auto-resolves against the triggering activity's used+generated; can be overridden with `anchor_entity_id`. Scoped tasks participate in supersession and cancellation checks against the anchored entity. |
+| `anchor_entity_id` | `str` (UUID) | Explicit anchor override. Used by handler-built tasks that need a specific entity rather than auto-resolution. |
+| `cancel_if_activities` | `list[str]` | Activity types that cancel this task if they run on the anchored entity before the scheduled time. Requires an anchor. |
+| `allow_multiple` | `bool` | Default `false`. When `false`, scheduling a new task with the same `target_activity` (or `function`) and same `anchor_entity_id` supersedes any existing scheduled task — the prior's content is rewritten with `status: superseded`. When `true`, multiple scheduled tasks with the same shape coexist. |
+
+**Supersession.** With `allow_multiple: false` (the default), the common "update the deadline" pattern works naturally — call the scheduling activity twice and the second call's task replaces the first.
+
+**Cancellation.** Requires two conditions: the canceling activity must be in `cancel_if_activities`, AND it must actually advance the anchored entity (generate a new version of it). Merely consulting the anchor via `used` is not enough. Prevents the "aanvraag was completed but the 60-day auto-withdraw still fired" footgun.
+
+### Scheduling-format grammar
+
+| Form | Example | Resolved against |
+|---|---|---|
+| Relative offset | `"+20d"`, `"+2h"`, `"+45m"`, `"+3w"` | Activity start time |
+| Absolute ISO 8601 | `"2026-12-31T23:59:59Z"`, `"2026-05-01T12:00:00+02:00"` | — (literal) |
+| Omitted | (no `scheduled_for` key) | Immediate — runs right after the activity |
+
+Units: `m` minutes, `h` hours, `d` days, `w` weeks. The `+` prefix is required — it's what tells the parser "this is an offset, not a date." Unknown units and negative offsets raise at activity execution time.
+
+## Workflow YAML schema
+
+Every key the engine reads, organised by scope. Keys not listed here are ignored silently — if you typo a key name, the engine won't catch it. Match case exactly.
+
+### Top-level keys
+
+| Key | Required | Description |
+|---|---|---|
+| `name` | ✓ | Workflow name. Must match what `config.yaml` registered and what the `Plugin` constructor receives. |
+| `activities` | ✓ | List of activity definitions. See *Activity-level keys* below. |
+| `entity_types` | ✓ | List of entity type declarations. See *Entity type keys* below. |
+| `relations` | — | List of workflow-level relation declarations. See *Relations reference* below. |
+| `namespaces` | — | Namespace prefixes. Keys: `default` (default prefix for bare activity names), `prefixes` (dict of prefix → IRI). |
+| `reference_data` | — | Dict of `{key: list-of-items}` — static data served via `GET /workflows/{name}/reference_data/{key}`. |
+| `constants` | — | Typed workflow constants. Sub-key: `values` (dict of overrides, merged into the constants-class instantiation). No `class:` key here — the plugin's `create_plugin()` imports the BaseSettings class directly and passes `values` via `**kwargs`. |
+| `tombstone` | — | Opts the workflow into the engine-provided tombstone activity. Sub-keys: `allowed_roles` (list of roles permitted to tombstone). |
+| `poc_users` | — | List of user dicts for the POC auth middleware. Only used in dev/test; production auth ignores this block. |
+
+### Entity type keys
+
+Under `entity_types[*]`:
+
+| Key | Required | Description |
+|---|---|---|
+| `type` | ✓ | Qualified type string, e.g. `"oe:aanvraag"`. |
+| `model` | ✓ | Dotted Python path to the Pydantic model class. Engine imports at plugin load. Used as legacy/default when `schema_version` is NULL on a stored row. |
+| `cardinality` | — | `"single"` or `"multiple"`. Default `"multiple"`. Singletons have at most one logical entity per dossier; multi-cardinality can have many. |
+| `schemas` | — | Dict of `version → dotted path`. Each listed version's model class is registered in `entity_schemas` and consulted at read time via `resolve_schema`. |
+
+### Activity-level keys
+
+Under `activities[*]`:
+
+| Key | Required | Description |
+|---|---|---|
+| `name` | ✓ | Activity name, qualified or bare. Engine normalizes to qualified at load. |
+| `label` | — | Human-readable label for UIs. |
+| `description` | — | Human-readable description. |
+| `handler` | — | Name in `plugin.handlers`. Omit for default "store what's sent" behaviour. |
+| `status_resolver` | — | Name in `plugin.status_resolvers`. Exclusive with handler-returned `status`. |
+| `task_builders` | — | List of names in `plugin.task_builders`. Exclusive with handler-returned `tasks`. |
+| `validators` | — | List of names in `plugin.validators`. Each runs after the handler; any raise rejects the activity. |
+| `used` | — | List of entity types the activity consumes. Resolved from the request's `used:` block; made available in context. |
+| `generates` | — | List of entity types the activity produces. The first type is the default for `HandlerResult(content=...)` inference. |
+| `entities` | — | Per-type entity config. Dict of `type → {new_version, allowed_versions}` for schema-versioned entities. |
+| `relations` | — | List of relation declarations (by name reference to workflow-level types). See *Relations reference*. |
+| `status` | — | Literal string — the dossier status after this activity succeeds. |
+| `tasks` | — | List of task declarations. See *Task kinds reference* above. |
+| `side_effects` | — | List of activities to trigger automatically on success. Sub-keys per entry: `activity` (target), `condition` or `condition_fn` (mutually exclusive gate). |
+| `requirements` | — | Preconditions. Sub-keys: `activities`, `entities`, `statuses` — all lists. See *Workflow rules* below. |
+| `forbidden` | — | Negative preconditions. Same sub-keys as `requirements`. |
+| `authorization` | — | Full authorization block with role-matching shapes. See *Access control reference* below. |
+| `allowed_roles` | — | Simplified authorization — flat list of roles that can run the activity. Shorthand for `authorization.roles: [{role: X}, ...]`. |
+| `default_role` | — | Default role to record on the activity's association row when the user has multiple eligible roles. |
+| `can_create_dossier` | — | Boolean; default `false`. When `true`, the activity can run without a pre-existing dossier (creates one). Entry activities only. |
+| `time` | — | Reserved — timestamp override for testing. Don't use in production YAML. |
+
+### Relations reference
+
+Post-Bug-78 contract (Round 26). Source: `dossier_engine/plugin.py::validate_relation_declarations`.
+
+**Workflow-level** (under top-level `relations:`):
+
+| Key | Required | Kind | Description |
+|---|---|---|---|
+| `type` | ✓ | Any | Qualified type string. |
+| `kind` | ✓ | Any | `"domain"` or `"process_control"`. Drives runtime dispatch; dictates what request shape is expected. |
+| `from_types` | — | Domain only | List of allowed source ref shapes: `"entity"`, `"external_uri"`, `"dossier"`. Omitting accepts any. Rejected on `process_control` at load. |
+| `to_types` | — | Domain only | List of allowed target ref shapes. Same values as `from_types`. Omitting accepts any. Rejected on `process_control` at load. |
+| `description` | — | Any | Free text. |
+
+**Activity-level** (under `activities[*].relations:`):
+
+| Key | Required | Description |
+|---|---|---|
+| `type` | ✓ | Must resolve to a workflow-level declaration. |
+| `operations` | — | List: `["add"]`, `["remove"]`, or `["add", "remove"]`. `["remove"]` rejected on `process_control` types. |
+| `validator` | — | Single name in `plugin.relation_validators`. Fires for all operations. Exclusive with `validators`. |
+| `validators` | — | Dict `{add: "name", remove: "name"}` — both keys required. Rejected on `process_control` types. Exclusive with `validator`. |
+
+**Forbidden at activity level:** `kind`, `from_types`, `to_types`, `description`. Declared workflow-level only.
+
+**Forbidden combinations** (load-time rejection):
+
+| Combination | Why |
+|---|---|
+| `kind: process_control` + `from_types:` at workflow level | from_types is domain-only (entity→entity shape) |
+| `kind: process_control` + `to_types:` at workflow level | Same |
+| `kind: process_control` + `validators:` dict at activity level | process_control has no remove operation |
+| `kind: process_control` + `operations: [remove]` at activity level | Same |
+| `validator:` + `validators:` at activity level | Mutually exclusive |
+| `validators:` dict with keys other than `{add, remove}` at activity level | Partial dicts rejected; use `validator:` single-string instead |
+| `relation_validators` dict key matching a declared type name | Would re-create Style-3 by-naming-convention. Rename the validator function. |
+
+### Access control reference
+
+**Simplified form** — `allowed_roles`:
+
+```yaml
+activities:
+  - name: "X"
+    allowed_roles: ["behandelaar", "beheerder"]
+    default_role: "behandelaar"
+```
+
+The engine desugars to the equivalent `authorization.roles: [{role: "behandelaar"}, {role: "beheerder"}]`. Use when role strings are literal and scope-free.
+
+**Full form** — `authorization.roles`. Each entry is one of three shapes:
+
+| Shape | Example | Semantics |
+|---|---|---|
+| Direct | `{role: "beheerder"}` | User has this exact role in their roles list. |
+| Scoped | `{role: "gemeente-toevoeger", scope: {from_entity: "oe:aanvraag", field: "content.gemeente"}}` | Engine resolves the entity's field value at request time; composes `{base}:{value}`; user must have that composed role. |
+| Entity-derived | `{from_entity: "oe:aanvraag", field: "content.aanvrager.rrn"}` | Engine resolves the entity's field; the field value *is* the role the user must have. |
+
+The engine tries entries in order. Any match → authorized. All fail → 403 with a denial reason listing each entry that didn't match.
+
+**Scope resolution notes:**
+- `from_entity` must be a singleton type in the dossier. Non-singleton types raise `CardinalityError` at evaluation.
+- `field` is a dotted path (`content.gemeente`, `content.aanvrager.rrn`). `None` values at any step fail the match with a clear error.
+- Scoped matching requires a dossier (both shapes read from the dossier's entities). `can_create_dossier` activities can only use direct-match.
+
+### Workflow rules — `requirements` and `forbidden`
+
+Evaluated before authorization. Source: `dossier_engine/engine/pipeline/authorization.py::validate_workflow_rules`.
+
+**Sub-keys** (same for both blocks):
+
+| Sub-key | Type | `requirements` semantic | `forbidden` semantic |
+|---|---|---|---|
+| `activities` | `list[str]` | Each must have completed at least once | None may have completed |
+| `entities` | `list[str]` | At least one of each type must exist | None may exist |
+| `statuses` | `list[str]` | Dossier's current status must be in the list | Dossier's current status must not be in the list |
+
+Errors name the first failing check — "required activity 'X' not found," "forbidden status 'X' is current," etc. Fails with 422.
+
+### Tombstone
+
+```yaml
+tombstone:
+  allowed_roles: ["beheerder"]
+```
+
+Auto-registers `oe:tombstone` activity in the workflow's activity list at plugin load. Tombstone execution nulls every entity's content, stamps them tombstoned, and records a tombstone activity in the PROV graph.
+
+Omit the block entirely to disable tombstoning for the workflow.
+
+### Namespaces
+
+```yaml
+namespaces:
+  default: "https://id.erfgoed.net/oe#"
+  prefixes:
+    oe: "https://id.erfgoed.net/oe#"
+    prov: "http://www.w3.org/ns/prov#"
+    dcterms: "http://purl.org/dc/terms/"
+```
+
+`default` is the prefix to qualify bare names against. `prefixes` declares the prefix → IRI map used for IRI expansion.
+
+### Constants
+
+```yaml
+constants:
+  values:
+    deadline_days: 60
+    feature_flag_x: true
+```
+
+```python
+# my_plugin/__init__.py
+from .constants import MyConstants
+
+def create_plugin():
+    yaml_constants = (workflow.get("constants") or {}).get("values", {}) or {}
+    constants = MyConstants(**yaml_constants)
+    return Plugin(..., constants=constants)
+```
+
+`values` is the only sub-key in YAML. The plugin's `create_plugin()` imports the `BaseSettings` class directly — there's no `class:` field naming a dotted path. Environment variables override `values` (per pydantic-settings standard resolution); `values` overrides class defaults.
+
+### POC users
+
+```yaml
+poc_users:
+  - id: "alice"
+    username: "alice"
+    password: "pwd"
+    roles: ["behandelaar"]
+    type: "person"
+    name: "Alice Behandelaar"
+    properties: {}
+```
+
+Dev/test only. Real deployments use their own auth middleware; this block is ignored.
+
+## Engine-provided entity types
+
+These types are registered automatically — don't declare them in `entity_types:`.
+
+| Type | Cardinality | Purpose |
+|---|---|---|
+| `system:task` | multiple | Task entities produced by scheduling. One per logical task; versions track state transitions. |
+| `system:note` | multiple | Free-form notes attached to a dossier. |
+| `oe:dossier_access` | single | The per-dossier ACL entity; content drives search filtering and row-level authorization. |
+| `external` | multiple | External URI references (bracketed dossiers, entities the workflow references but doesn't own). |
+
+Your workflow can reference these types in `used:` blocks, in `entities:` configuration, in search builders, etc. Declaring them in `entity_types:` is redundant but not rejected.
+
+## Engine-provided activities
+
+Registered automatically when certain conditions hold. Don't declare these in `activities:`.
+
+| Activity | When registered | Purpose |
+|---|---|---|
+| `systemAction` | Always | Initial bootstrap activity every dossier has. Used by the engine to anchor cross-dossier references and to seed the PROV graph. |
+| `oe:tombstone` | When workflow declares `tombstone:` block | GDPR-style redaction. |
+
+## Glossary of error shapes
+
+When you hit these, they're shouting from specific code paths:
+
+| Exception | Where from | Meaning |
+|---|---|---|
+| `ValueError` at plugin load | `plugin.py` validators | YAML shape violation. Message names the exact rule. |
+| `ActivityError(status, msg)` | Various pipeline phases | Structured HTTP error. `status` is 4xx or 5xx; `msg` goes to the client. |
+| `CardinalityError` | `plugin.is_singleton` consumers | Called a singleton helper on a multi-cardinality type (or vice versa). |
+| `LineageAmbiguous` | `lineage.find_related_entity` | PROV walk found multiple distinct candidates — structural data anomaly, needs triage. Round 25. |

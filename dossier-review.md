@@ -963,3 +963,55 @@ Three rounds in a row (24 / 25 / 26) the paranoia check has caught or shaped the
 Cat 3 (caching & perf batch) is my recommendation for Round 27 — Bug 38 + Obs 75/76/77/78, all sharing the "cache what's expensively re-computed" pattern. One coherent batch round.
 
 Cat 7 (test/deployment polish) now has a new candidate in Obs 96 — wiring up the three unwired load-time validators. Small enough to fold into a broader Cat 7 round but worth the checkpoint I mentioned.
+
+### Round 27 — Plugin guidebook comprehensive rewrite
+
+User-initiated. Reviewing Round 26's Bug-78 guidebook update made it clear the guidebook had drifted far from the current code — "No mention of scheduled activities, only recorded. Would it be possible to analyze the entire plugin system and write down all the possibilities?"
+
+**Scope locked down before writing.** Three design decisions:
+- Single document, restructured. Keep `plugin_guidebook.md` as source-of-truth; split into clear Tutorial / Reference parts; add missing coverage.
+- Audit pass first, then write. Produce a coverage-gap table, user approves, then write. This round stuck to the plan.
+- `dossiertype_template.md` folded in as a third documentation type — annotated copy-pastable YAML skeleton, distinct from tutorial and reference but drift-linked to both.
+
+**Audit findings, by coverage gap type (`/mnt/user-data/outputs/plugin_guidebook_audit.md`, 225 lines):**
+- **Plugin dataclass:** 1 field completely missing from narrative (`pre_commit_hooks`), 3 light-coverage, 1 template-stale.
+- **Workflow-level YAML:** 2 keys missing from guidebook (`tombstone`, `poc_users`).
+- **Activity-level YAML:** 5 keys missing (`requirements`, `forbidden`, `authorization`, `allowed_roles`, `can_create_dossier`/`default_role`, `entities`).
+- **Task kinds:** audit initially said "2 of 3 missing" — turned out to be **2 of 4 missing** once I found `fire_and_forget` during the template review (see lesson below).
+- **ActivityContext API:** 5+ methods entirely undocumented.
+- **Engine-provided features:** tombstone, workflow rules, schema versioning — all missing or light.
+- **Template staleness:** workflow-level relations still pre-Bug-78 (bare strings instead of dicts-with-kind).
+
+**Guidebook rewrite shipped.** From 865 lines → ~1295 lines. Two clean parts with the Part-3 template as a separate file:
+
+- **Part 1 (Tutorial, ~780 lines):** "What a plugin is" → "Your first plugin in 15 minutes" (unchanged shape; kept the well-loved framing) → "Adding complexity gradually" (also kept — my question about replacing it was unnecessary, the existing framing works). Then 13 feature sections including the previously-missing ones: all 4 task kinds (fire_and_forget, recorded, scheduled_activity, cross_dossier_activity) as distinct subsections; workflow rules (requirements/forbidden); access control with all 3 authorization shapes; tombstoning; schema versioning; pre-commit hooks; supersession/cancellation semantics.
+- **Part 2 (Reference, ~480 lines):** exhaustive tables. Plugin dataclass (18 fields), ActivityContext (13 methods/properties), HandlerResult, TaskResult, Task kinds (all 4 + cross-cutting-fields + scheduling-format grammar), workflow YAML schema (top-level + activity-level + entity-types + per-subsystem tables), Relations reference with forbidden-combinations table, Access control reference (3 shapes + access values), Side effects, Workflow rules, Tombstone, Schema versioning, Constants, Load-time validation, Engine-provided features, Glossary of error shapes.
+- **Part 3 (`dossiertype_template.md`):** 9 YAML blocks kept, updated for Bug 78. Workflow-level relations rewritten with mandatory `kind`, optional `from_types`/`to_types`, full Bug-78 contract. Activity-level relations expanded with all legal shapes (single-string validator, per-op validators dict) and forbidden-keys callout. Four async calls corrected (missing `await`).
+
+**Process lessons captured in this round:**
+
+1. **The "4-task-kinds" miss.** My audit identified 2 of 3 task kinds missing from the guidebook — but the real count was 2 of 4. I'd missed `fire_and_forget` entirely because I grep-searched the worker, which only handles 3 kinds. `fire_and_forget` is handled in `engine/pipeline/tasks.py` (runs inline during the activity pipeline, not in the worker). Caught it during the template review, which already documented all 4 kinds correctly. **Lesson:** when auditing a surface, audit at the conceptual boundary ("what kinds of task does the plugin interface declare") not at the implementation boundary ("what kinds does the worker dispatch"). The template — written by someone with full visibility — was more accurate than my first-pass audit. Doing the template in-scope was what saved me; if I'd only done the guidebook, I'd have shipped a rewrite that kept the wrong number.
+
+2. **Duplicate-Part-2 incident.** Mid-rewrite I found the guidebook had two complete Part-2 sections, presumably from an earlier tool-call that survived the `rm`-then-`create_file` dance. First Part 2 was my less-polished initial write; second Part 2 was more thorough and better organised. Noticed only because I grep-ed `^## ` heading structure near the end of the round. Spliced out the worse copy (lines 803-1262), kept the better one, then re-applied the fire_and_forget + constants fixes to the kept copy. **Lesson:** for any long doc rewrite, verify structure (`grep '^## '`) before spot-editing content. Checking structure first would have saved the duplicate-fix work.
+
+3. **Two correctness bugs in my tutorial, caught on spot-check.** The `constants:` block I'd written said `class:` was a YAML key with a dotted path — but the real plugin imports the class directly in Python and the YAML only carries `values:`. And I'd written that `recorded` tasks are fire-and-forget, which was the guidebook's pre-existing lie (recorded tasks have an audit trail; only `fire_and_forget` is literal fire-and-forget). Both fixed before landing. **Lesson:** spot-check the tutorial against production code before declaring it done — I caught these only because I was verifying before writing Part 2. Without the verify-before-plan discipline (Round 18 legacy), these would have shipped.
+
+**Process lesson reinforced (across rounds 24/25/26/27):**
+The pre-round scope discussion continues to pay off. Round 27's plan had ~4 decisions settled before writing started (doc structure, audit-first, template-in-scope, what "complete" means). Zero mid-round scope drift once writing began. The issues that arose were execution problems (duplicate Part 2, missed fire_and_forget), not scope problems.
+
+**Verification — Round 27:**
+- Engine: **756 + 7 Sentry-skipped** (unchanged — docs only).
+- Toelatingen / common / file_service unchanged at 26 / 18 / 21. **828 total.**
+- Shell spec not re-run (docs-only change, nothing to affect).
+- Guidebook: 37 YAML blocks parse cleanly. Template: 10 YAML blocks parse cleanly.
+
+**Totals after Round 27:** 32 bugs fixed (unchanged — no bug work this round). Should-fix / Observations unchanged. Plugin guidebook grew 865 → 1295 lines; template 923 → ~1000 lines with Bug-78 corrections + missing-feature additions.
+
+### Where to go next
+
+Original Round 27 plan was Cat 3 (caching & perf). That's still the next candidate for Round 28:
+- **Cat 3 — Caching & perf batch.** Bug 38 + Obs 75/76/77/78. Shared "cache what's expensively re-computed" pattern. My recommendation.
+- **Cat 7 — Test/deployment polish** now has Obs 96 (wire up the three unwired load-time validators) as a specific candidate. The wire-up is one-turn trivial in mechanics but deserves a checkpoint — production YAML may have latent shape violations that surface when the validators actually run.
+- **Cat 2 cherry-picks** — user-visible behaviour bugs (Bugs 9, 20, 27, 28 at the top).
+
+Obs 96 is the natural "small win" round if you want something shorter than Cat 3's batch. Cat 3 is the bigger next step.

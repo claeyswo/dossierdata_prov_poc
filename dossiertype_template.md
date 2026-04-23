@@ -10,7 +10,7 @@ version: "1.0"                    # version of this workflow definition
 
 ---
 
-## Workflow-level Relations (permission gate)
+## Workflow-level Relations (permission gate + kind declaration)
 
 ```yaml
 # Declares the relation types that exist in this workflow. Activities
@@ -19,13 +19,42 @@ version: "1.0"                    # version of this workflow definition
 # any activity is legal-but-unused; a type that appears on an activity
 # but not here is a configuration error.
 #
-# Each entry is a type string. No validators here — validators are
-# specified per activity, because the same relation type might have
-# different constraints depending on the activity context.
+# Every relation type MUST declare `kind`:
+#   * `domain` — entity→entity edge (request uses `{from, to}`). Supports
+#     add and remove operations. Optional `from_types`/`to_types`
+#     constrain the ref kinds on each side — omit to accept any.
+#   * `process_control` — activity→entity annotation (request uses
+#     `{entity}`). Stateless; no remove operation; `from_types`/`to_types`
+#     not legal.
+#
+# The `kind` field drives runtime dispatch. A request with the wrong
+# shape (e.g. `{entity}` on a `kind: domain` relation) is rejected with
+# 422. Load-time validation (Bug 78, Round 26) enforces the rules
+# below; a plugin that violates them fails to start.
+#
+# Validators are declared at activity level, not here. This file just
+# names the types and their kinds.
 #
 # relations:
-#   - "oe:neemtAkteVan"
-#   - "oe:verbondenAan"
+#   - type: "oe:neemtAkteVan"
+#     kind: "process_control"
+#     description: >
+#       Acknowledges that the activity is aware of a newer version of
+#       a used entity and chose to proceed with the older version.
+#
+#   - type: "oe:betreft"
+#     kind: "domain"
+#     from_types: ["entity"]
+#     to_types: ["external_uri"]
+#     description: >
+#       Links an entity to the external object it concerns.
+#
+#   - type: "oe:gerelateerd_aan"
+#     kind: "domain"
+#     from_types: ["dossier"]
+#     to_types: ["dossier"]
+#     description: >
+#       Cross-dossier relation — links this dossier to another.
 ```
 
 ---
@@ -435,21 +464,40 @@ activities:
     #     allowed_versions: ["v1"]
 
     # --- Activity-level relations opt-in ---
-    # The workflow-level `relations:` block (if present) acts as the
-    # permission gate: it declares which relation types exist in the
-    # workflow at all. Activities then opt in here to the relation
-    # types they accept in their request body.
+    # The workflow-level `relations:` block declares every type that
+    # exists in this workflow, with its `kind` (domain | process_control),
+    # its optional `from_types`/`to_types` constraints, and a description.
+    # Activities then opt in here by type NAME — and can add:
+    #   * `operations`: subset of [add, remove] (remove forbidden on
+    #     process_control types)
+    #   * `validator`: single-string validator name (legal for both kinds)
+    #   * `validators`: {add, remove} dict with BOTH keys required (legal
+    #     on domain only — process_control has no remove)
     #
-    # Each entry names a relation type and (optionally) a plugin-
-    # registered validator function. The validator receives the
-    # relation's resolved entity row plus the activity state and
-    # enforces the semantics — for `oe:neemtAkteVan`, this means
-    # checking that the acknowledged version covers every intervening
-    # version between the stale `used` version and the current latest.
+    # FORBIDDEN at activity level: `kind`, `from_types`, `to_types`,
+    # `description`. Those live at workflow level ONLY. The load-time
+    # validator (Bug 78, Round 26) rejects plugins that violate this.
+    #
+    # A type that appears here but not in the workflow-level block is
+    # a load-time error. A validator name that doesn't resolve in
+    # `plugin.relation_validators` is a load-time error.
     #
     # relations:
+    #   # Process-control — single-string validator is the only legal form.
     #   - type: "oe:neemtAkteVan"
     #     validator: "validate_neemt_akte_van"
+    #
+    #   # Domain — single-string validator applies to both add and remove.
+    #   - type: "oe:betreft"
+    #     operations: ["add"]
+    #     validator: "validate_betreft_target"
+    #
+    #   # Domain — separate validators per operation.
+    #   - type: "oe:gerelateerd_aan"
+    #     operations: ["add", "remove"]
+    #     validators:
+    #       add: "validate_gerelateerd_add"
+    #       remove: "validate_gerelateerd_remove"
 
     # --- Status ---
     # What status this activity sets on the dossier.
@@ -562,7 +610,7 @@ Task functions are defined in the plugin's `tasks/` module and registered in `TA
 ```python
 # Type 1 and 2: receives ActivityContext
 async def send_notification_email(context: ActivityContext):
-    aanvraag = context.get_singleton_typed("oe:aanvraag")
+    aanvraag = await context.get_singleton_typed("oe:aanvraag")
     # ... send email ...
 
 async def log_audit_event(context: ActivityContext):
@@ -573,7 +621,7 @@ async def log_audit_event(context: ActivityContext):
 from dossier_engine.engine import TaskResult
 
 async def find_related_dossier(context: ActivityContext):
-    aanvraag = context.get_singleton_typed("oe:aanvraag")
+    aanvraag = await context.get_singleton_typed("oe:aanvraag")
     # ... determine target dossier ...
     return TaskResult(
         target_dossier_id="d5000000-...",
@@ -600,8 +648,8 @@ the decision depends on entity content at runtime — handlers can append tasks 
 
 ```python
 async def neem_beslissing(context: ActivityContext, content: dict | None) -> HandlerResult:
-    beslissing = context.get_singleton_typed("oe:beslissing")
-    handtekening = context.get_singleton_typed("oe:handtekening")
+    beslissing = await context.get_singleton_typed("oe:beslissing")
+    handtekening = await context.get_singleton_typed("oe:handtekening")
 
     if not handtekening or not handtekening.getekend:
         return HandlerResult(status="klaar_voor_behandeling")
