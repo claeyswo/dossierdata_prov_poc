@@ -57,11 +57,14 @@ Activity visibility (``activity_view``)
 
 from __future__ import annotations
 
+import logging
 from uuid import UUID
 from fastapi import HTTPException
 from ..audit import emit_dossier_audit
 from ..db.models import Repository
 from ..auth import User
+
+_log = logging.getLogger("dossier.engine.access")
 
 
 async def check_dossier_access(
@@ -147,10 +150,13 @@ def get_visibility_from_entry(
         (visible_types, activity_view_mode)
 
         visible_types:
-          ``None`` when entry is ``None`` or ``view`` is ``"all"``
-          — no type filtering.
+          ``None`` when entry is ``None`` or ``view`` is the explicit
+          ``"all"`` sentinel — no type filtering, user sees all types.
           A ``set[str]`` of type prefixes for list values (including
           empty set = nothing visible).
+          Empty ``set()`` when ``view:`` is missing or has an
+          unrecognised value (Bug 79, Round 27.5) — default-deny.
+          See the module docstring's design principle.
 
         activity_view_mode:
           ``"all"`` / ``"own"`` / ``"related"`` — sentinel values
@@ -159,27 +165,66 @@ def get_visibility_from_entry(
           are shown in the timeline.
           A ``dict`` with ``mode`` (a sentinel) and ``include``
           (a list of type names always shown regardless of mode).
+
+    Default-deny (Bug 79, Round 27.5): a matched entry with no
+    ``view:`` key, or a ``view:`` value the code doesn't recognise,
+    now returns ``set()`` (empty = deny) rather than ``None`` (no
+    restriction). Previous behaviour was fail-open; flipped to
+    fail-closed to match the module's stated default-deny design
+    principle. Callers who want broad access declare ``view: "all"``
+    explicitly.
     """
     if entry is None:
         return None, "all"
     # --- Entity visibility ---
     view = entry.get("view")
     if view is None:
-        # Key absent → no entity-type restriction. The caller has
-        # access (they matched an entry) but the entry doesn't
-        # constrain which entity types are visible.
-        visible_types = None
+        # Bug 79 (Round 27.5): the module-level `default-deny` design
+        # principle (and the module docstring at the top of this file)
+        # says access must be explicitly granted. An access entry that
+        # matched the user but omitted `view:` was previously treated
+        # as "no restriction" — fail-open. Flipped to default-deny:
+        # a missing `view:` key now returns the empty set (nothing
+        # visible), matching what the module docstring always claimed.
+        # Callers who want broad access declare `view: "all"` explicitly.
+        #
+        # Logged (not audit-emitted) because this is a config-health
+        # finding, not a dossier-user action: neither `user` nor
+        # `dossier_id` is in scope here, and the event is "your access
+        # config is broken," not "user X was denied access to dossier Y."
+        # Operators searching the logs for this message find the
+        # offending entry in `offending_entry=...`.
+        _log.warning(
+            "Access entry matched but lacks a `view:` key; "
+            "default-deny applied. Fix by adding `view: \"all\"` "
+            "or `view: [...]` to the entry. Offending entry: %r",
+            entry,
+        )
+        visible_types = set()
     elif view == "all":
-        visible_types = None  # explicit "all" sentinel, same effect
+        visible_types = None  # explicit "all" sentinel — unrestricted
     elif isinstance(view, list):
         # Explicit list of allowed entity-type prefixes. An empty
         # list means "see no entity content" (but still see activities
         # depending on activity_view).
         visible_types = set(view)
     else:
-        # Unrecognised value → treat as no restriction rather than
-        # hard-deny, so a typo doesn't lock people out.
-        visible_types = None
+        # Bug 79 (Round 27.5): an unrecognised value (neither `"all"`,
+        # a list, nor absent) was previously treated as "no restriction"
+        # with the rationale "so a typo doesn't lock people out."
+        # That rationale is backwards for security-adjacent code —
+        # a typo SHOULD lock people out, because that's when the author
+        # notices and fixes. Fail-open on unrecognised value silently
+        # grants more access than intended. Flipped to default-deny.
+        # Logged (not audit-emitted) as a config-health finding; see
+        # the corresponding note on the missing-view branch above.
+        _log.warning(
+            "Access entry has invalid `view:` value %r "
+            "(expected \"all\" or list of type strings); "
+            "default-deny applied. Offending entry: %r",
+            view, entry,
+        )
+        visible_types = set()
 
     # --- Activity visibility ---
     # Can be a string sentinel ("all", "own", "related") or a list

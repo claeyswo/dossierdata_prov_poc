@@ -10,16 +10,16 @@
 
 | Status | Count | Items |
 |---|---|---|
-| ✅ Fixed & verified | 32 | Bugs 1, 2, 5, 6, 7, 12, 15, 16, 17, 30, 32, 44, 47, 53, 54, 55, 56, 57, 58, 62, 64, 65, 66, 68, 69, 70, 72 (coverage), 73, 74, 75, 76, 77 + Obs-2 (duplicate "external") |
+| ✅ Fixed & verified | 33 | Bugs 1, 2, 5, 6, 7, 12, 15, 16, 17, 30, 32, 44, 47, 53, 54, 55, 56, 57, 58, 62, 64, 65, 66, 68, 69, 70, 72 (coverage), 73, 74, 75, 76, 77, 79 + Obs-2 (duplicate "external") |
 | 🔍 Investigated, not a bug | 1 | Bug 14 — cross-dossier refs are `type=external` rows |
 | 🛑 Deferred / accepted | 4 | Bug 31 (RRN acceptable), Bug 45 (MinIO migration), Bug 63 (403 is correct HTTP), Bug 71 (test activities, deploy-time removal) |
-| 🧪 Test suite | **828/828** passing | engine 763, toelatingen 26, file_service 21, common/signing 18 |
+| 🧪 Test suite | **829/829** passing | engine 764, toelatingen 26, file_service 21, common/signing 18 |
 | 🏃 `test_requests.sh` | **25/25 OK, exit 0, zero deadlocks, zero worker crashes** | D1–D9 green |
 | ✂️ Duplication closed | **D1, D2, D4, D22, D25** | Graph-loader consolidation + audit-emit wrapper |
 | 🧰 Harnesses installed | **3** | Guidebook YAML lint + phase-docstring lint + CI shell-spec wrapper |
 | 🤖 CI wired | **GitHub Actions** | `.github/workflows/ci.yml` — 4 jobs: pytest, shell-spec, doc-harnesses, migrations-append-only |
 | 🎯 Must-fix walk | **Complete** | All 17 fixable must-fix bugs closed; the 5 open rows are deferred/investigated by product decision (Bugs 14, 31, 45, 63, 71) |
-| 📦 Pending | 26 should-fix + 16 lower-priority bugs + 31 observations + 21 dups + 5 meta (partial relief) | See below |
+| 📦 Pending | 27 should-fix + 16 lower-priority bugs + 32 observations + 21 dups + 5 meta (partial relief) | See below |
 
 Note: Bug 75 was discovered *by* harness 2 on its first run — a new bug surfaced and fixed in the same session as the harness that surfaced it.
 
@@ -53,6 +53,7 @@ Note: Bug 75 was discovered *by* harness 2 on its first run — a new bug surfac
 | ~~68~~ | 7 | ~~Initial-schema Alembic migration mutated retroactively.~~ | ✅ |
 | 🛑 71 | 8 | **Accepted** — deploy-time checklist removes test activities from `workflow.yaml`. |  |
 | ~~72~~ | 8 | ~~`bewerkRelaties` zero test coverage.~~ | ✅ |
+| ~~79~~ | 6 | ~~`get_visibility_from_entry` fail-open on missing or invalid `view:` key.~~ | ✅ **Fixed in Round 27.5 (drive-by during handoff prep).** The access-gate function that translates an access-entry's `view:` key into a visibility filter was returning `None` (no restriction) for two cases: `view:` absent, and `view:` an unrecognised value. The second branch carried an explicit comment "treat as no restriction rather than hard-deny, so a typo doesn't lock people out" — backwards for security-adjacent code. The module docstring at lines 44-46 already described the correct behaviour ("Key absent — empty set (see nothing)"); the code had drifted. Fix flips both branches to default-deny (empty set), emits a WARNING log carrying the offending entry so operators can find + fix the broken access config. 1 existing bug-pinning test rewritten (`test_entry_with_no_view_key_no_restrictions` → `test_entry_with_no_view_key_defaults_deny`); 1 new test for the invalid-value case (`test_entry_with_unrecognised_view_value_defaults_deny`). Paranoia-checked: reverted both branches to `None`, 2 of 7 `TestGetVisibilityFromEntry` tests went red (the two Bug-79 pins), 5 stayed green (positive-behaviour tests for None entry, explicit "all", list, empty list, activity-view variations). Drive-by from Round 27's debrief — user spotted the "default should be deny" mismatch while reviewing access code before starting fresh. Kept as "Round 27.5" in the writeups because it's a mini-round, not a full one. |
 
 ### Should-fix — robustness
 
@@ -80,6 +81,7 @@ Note: Bug 75 was discovered *by* harness 2 on its first run — a new bug surfac
 | 39 | 4 | `TaskEntity.status: str` should be `Literal[...]`. |  |
 | 42 | 4 | Field validators take raw dict, no User context. |  |
 | 43 | 4 | `Aanvrager.model_post_init` raises `ValueError` without Pydantic shape. |  |
+| 80 | 4 | `DossierAccess` Pydantic model doesn't reflect the content shape the engine actually reads. Model declares only `access: list[DossierAccessEntry]`, but `routes/access.py::check_audit_access` reads `content.get("audit_access", [])` — a top-level list the model is silent about. Production `setDossierAccess` handler in toelatingen never writes `audit_access`, so today per-dossier audit access falls through to denial and only `global_audit_access` (config.yaml) grants audit views — but the omission from the model means (a) readers can't tell from the model alone what shape the content can take, (b) plugin authors who want per-dossier audit can't discover the feature from the type, (c) any future hardening that sets `model_config = ConfigDict(extra='forbid')` would reject legitimate `audit_access` content. No per-dossier `admin_access` exists — admin is deliberately config-only (`global_admin_access`); worth documenting this in the model's docstring so the omission is intentional rather than accidental drift. Fix: add `audit_access: list[str] = []` field + docstring covering the full shape the engine reads and why `admin_access` is absent. Filed Round 27.5 from user review of access code. |  |
 | 46 | 5 | `POST /files/upload/request` accepts unbounded `request_body: dict`. |  |
 | 48 | 5 | `.meta` filename not sanitized. |  |
 | 50 | 5 | Migration fallback uses module-level `SYSTEM_ACTION_DEF` with bare name. |  |
@@ -205,8 +207,44 @@ The structural sweep catalogued observations clustering into five themes. **Coun
 - **Obs 94 — Migration consistency checks.** Filed in Round 19 CI postmortem (was provisionally numbered "Obs-58" at the time, renumbered here to avoid collision with the new Obs 58). Round 8's append-only guard catches **mutation** of existing migration files (Bug 68's original shape) but not **stale leftover files** from consolidation work — stale versions pass the append-only check yet fail at `alembic upgrade head`. Candidate follow-ups: CI migration preflight job (runs `alembic upgrade head` against a fresh Postgres; fails the build on rc≠0), or static consistency check scanning for redundant DDL across migration files. **Open.**
 - **Obs 95 — Plugin surface: dotted-path resolution for all Callable registries.** Eight `dict[str, Callable]` fields on `Plugin` (`handlers`, `validators`, `task_handlers`, `status_resolvers`, `task_builders`, `side_effect_conditions`, `relation_validators`, `field_validators`) are built inside each plugin's `create_plugin()` function and keyed by short names the YAML references. Meanwhile `entity_models` and `entity_schemas` already do the cleaner thing: the YAML carries a dotted Python path (`model: dossier_toelatingen.entities.Aanvraag`) and `_import_dotted` resolves it at plugin load. The short-name-dict pattern has three footguns: (1) typos in YAML fail at runtime-of-first-lookup, not load time; (2) key-space collisions (Bug 66's "relation_validators uses both names and types as keys" issue); (3) no compile-time signal for what code runs when you read a YAML file — you have to find `create_plugin()` and trace the dict construction. Proposed migration: convert all eight registries to dotted-path resolution, mirroring the `entity_models` pattern. Blast radius is every plugin's `workflow.yaml` + every `create_plugin()`; natural fit for Cat 5 (plugin-surface tightening, already flagged as "needs design first" in Round 23 triage). Deferred from Round 26's Bug 78 work — that round will keep `relation_validators` as-is while killing the Style-3 lookup-by-type-name fallback; the broader migration awaits Cat 5's design discussion. **Open.**
 - **Obs 96 — Existing load-time validators never invoked in production.** Three validators defined in `plugin.py` — `validate_workflow_version_references`, `validate_side_effect_conditions`, `validate_side_effect_condition_fn_registrations` — are unit-tested thoroughly (see `test_refs_and_plugin.py`) but never called by `app.py::load_config_and_registry` at startup. Only `_validate_plugin_prefixes` runs in production. Found while wiring up Bug 78's new `validate_relation_declarations` / `validate_relation_validator_registrations` in Round 26 — the Bug 78 validators are now called from `load_config_and_registry`, but the pre-existing three are silently unused. Fix is one-turn trivial: add three `for plugin in registry.all_plugins(): validate_*(plugin.workflow, ...)` calls next to the Bug 78 block. Unclear whether the omission was deliberate (perhaps the validators were considered too strict for early plugin development?) or accidental drift — worth a checkpoint before wiring them, because the production toelatingen YAML might have latent shape violations that only surface when the validators actually run. **Open.**
+- **Obs 97 — Codebase legibility: file sizes + module organization.** Two related symptoms in the engine package:
 
-**Observation totals:** 47 catalogued, Obs 50-96. **14 closed** (Obs 61, 63, 66, 67, 68, 69, 70, 71, 72, 73, 74, 83, 90, 93), **1 partially addressed** (Obs 52), **1 deferred by product decision** (Obs 84), **31 open**. Two of the open observations are explicitly redundant with bugs (Obs 80 ↔ Bug 25; Obs 81 ↔ Bug 38) — the bug tables are authoritative for those; obs entries are cross-references. Round 24 closed six observations in the Cat 1 doc-fix batch, three of which were redundant with Bugs 56/66/69; Round 25 closed Obs 66 alongside Bugs 53/54; Round 26 opened Obs 95 (plugin-surface dotted-path migration, deferred to Cat 5) and Obs 96 (unwired load-time validators). Most of the non-redundant open ones are not acute — the pattern is "code works today but will decay without attention."
+  **(a) A handful of files have outgrown their original purpose.** Top 5 by line count as of Round 27.5:
+  - `worker.py` — **1438 lines**. Task polling loop + four task-kind dispatchers (recorded, scheduled_activity, cross_dossier_activity + their helpers) + refetch + retry + completion logic + association resolution + trigger-user resolution. Too many responsibilities for one file; each task kind's dispatcher is itself substantial. Natural split: `worker/loop.py` (main polling) + `worker/recorded.py` + `worker/scheduled_activity.py` + `worker/cross_dossier.py` + `worker/completion.py` shared helpers.
+  - `plugin.py` — **889 lines**. `Plugin` dataclass + 5 load-time validators + registry + entity-model builder + namespace-prefix helper. The validators were added incrementally (three old, two new in Bug 78); they're independent functions that the main dataclass file doesn't need to carry. Natural split: `plugin/dataclass.py` + `plugin/registry.py` + `plugin/validators.py` + `plugin/entity_models.py`.
+  - `db/models.py` — **750 lines**. All SQLAlchemy ORM models + the Repository class in one file. Natural split by table-group boundaries, then Repository separately.
+  - `archive.py` — **641 lines**. PDF + timeline SVG + column-layout graph + orchestration. Probably decomposes by output format.
+  - `routes/activities.py` — **594 lines**. The `_run_activity` shared core + three route handlers (generic single, generic batch, typed-per-workflow) that all funnel through it. Arguably OK as-is because the three routes share state; worth evaluating whether the typed-per-workflow handler's code-generation side is big enough to extract.
+
+  **(b) Directory structure is confusing at the level "where does X live?"** Three top-level package subdivisions visible in the engine:
+  - `dossier_engine/` package root — 16 files, mixed bag (app, worker, plugin, archive, lineage, audit, sentry, fonts, migrations, prov_iris, prov_json, entities, file_refs, activity_names, namespaces, __init__). Lots of things directly under root.
+  - `dossier_engine/routes/` — 15 files, all HTTP surfaces. Reasonably coherent.
+  - `dossier_engine/engine/` — 26 files split across `engine/` (7) and `engine/pipeline/` (19). This is the biggest source of confusion. The word "engine" inside a package also named `dossier_engine` creates a "which one does 'engine' mean?" problem every time. And `engine/pipeline/` has 19 files representing the 13 pipeline phases plus helpers — fine as a concept, but you have to know the pipeline order to navigate.
+
+  Candidate renames worth considering:
+  - `dossier_engine/engine/` → `dossier_engine/core/` or `dossier_engine/activity_pipeline/`. Kills the "engine-in-engine" collision.
+  - `dossier_engine/engine/pipeline/` → either flatten into the parent (if renamed) or keep but document the phase order clearly.
+  - `docs/pipeline_architecture.md` already exists; may need an accompanying `docs/module_map.md` — a one-pager "where does X live" reference.
+
+  **Scope:** this is pure refactor + rename work; zero behaviour change. Risk is low (mechanical) but wide (imports everywhere). Good fit for a dedicated round with its own careful test-suite pass. Shouldn't happen mid-bug-fix round. Recommend filing as **Category 12 — Codebase legibility** in the Round 23 triage, with priority below Cat 3 (perf) and Cat 2 (cherry-picks) but above Cat 5 (plugin surface) since legibility work unblocks contributors faster than surface tightening. User prompt: *"Files getting too long, like worker.py is something we should tackle. But the number of files per module is growing to a point where it is not clear at all. engine root, engine routes, engine pipeline. Even I don't know where to look anymore"* — the confusion is real and worth addressing before the next significant feature. **Open.**
+- **Obs 98 — Exception grants as first-class entities (forward-looking design).** Workflow rules (`requirements:` and `forbidden:`) are deny-by-default with no override mechanism today. For a heritage-permits system — where exceptions are legally significant one-off acts — there's a gap: no clean way to say "normally activity B is forbidden because A already happened, but we're granting a reviewed exception." Encoding exceptions as extra statuses blows up combinatorially (N activities × exception-or-not → 2^N variants, plus every other activity's `forbidden:` clause has to list them).
+
+  **Design sketch (from brainstorming, not yet implemented):**
+  - New engine-provided (or plugin-defined by convention) entity type `oe:exception` with content shape roughly: `{activity: str (qualified name), entity_id: UUID | None, granted_until: datetime | None, reason: str}`. PROV attribution covers "who granted, when" for free.
+  - New built-in activity `oe:grantException` with `allowed_roles: ["beheerder"]` (or per-workflow equivalent). Generates an `oe:exception` entity. Every grant is thus a normal PROV-recorded activity — legally-defensible audit trail at no extra cost.
+  - New pipeline phase inserted **between authorization and workflow-rules**: check whether an unexpired, non-consumed `oe:exception` matches the current activity. If yes, skip the workflow-rule phase. If no, workflow rules proceed normally.
+  - **Critical constraint**: exceptions bypass workflow rules ONLY. Authorization still runs unconditionally. Rationale: authorization answers "may this user run activities of this type?" — a permission question that shouldn't be weakenable through dossier state, because otherwise "grant exception" becomes a universal privilege-escalation primitive. Workflow rules answer "given this dossier's history, is this activity legal here?" — and *that's* what exceptions are for.
+
+  **Open design questions that need a concrete first case to decide:**
+  - *Single-use vs window-based.* Default single-use probably right for heritage permits (exceptions are deliberate one-offs, not standing policy). Consumption marked on a new version of the entity when the covered activity fires. Window-based can be added later with a `mode:` field if a case demands it.
+  - *Activity-wide vs entity-scoped match.* For singletons, irrelevant. For multi-cardinality, `entity_id: UUID | None` lets you except a specific instance instead of all instances of that activity in the dossier. Start without it; add when needed.
+  - *Expiry semantics.* `granted_until: None = no expiry` is the obvious default, but "granted exceptions should rarely be open-ended" is a reasonable policy — worth discussing whether None should be rejected at grant time, or allowed with a warning, or fine as-is.
+
+  **Risk worth flagging.** The cleanness of this design assumes exceptions are rare. If they become routine (hypothetical: 30% of dossiers have active exceptions), the workflow rules become aspirational rather than enforced, and the exception mechanism is a band-aid for rules that are wrong in the first place. Worth periodically checking exception rate and asking "should this be the new default instead?" if any specific exception gets granted repeatedly.
+
+  **Scope:** Cat 5-adjacent (plugin surface tightening) but narrower than the full dotted-path migration. Additive feature, no breaking changes. Recommend deferring detailed implementation design until a **concrete first-case exception** is on the table — the parameters (single-use semantics, entity-scoped vs activity-wide match, expiry policy) snap into focus only with a real case in hand. **Open.**
+
+**Observation totals:** 49 catalogued, Obs 50-98. **14 closed** (Obs 61, 63, 66, 67, 68, 69, 70, 71, 72, 73, 74, 83, 90, 93), **1 partially addressed** (Obs 52), **1 deferred by product decision** (Obs 84), **33 open**. Two of the open observations are explicitly redundant with bugs (Obs 80 ↔ Bug 25; Obs 81 ↔ Bug 38) — the bug tables are authoritative for those; obs entries are cross-references. Round 24 closed six observations in the Cat 1 doc-fix batch, three of which were redundant with Bugs 56/66/69; Round 25 closed Obs 66 alongside Bugs 53/54; Round 26 opened Obs 95 (plugin-surface dotted-path migration, deferred to Cat 5) and Obs 96 (unwired load-time validators); Round 27.5 opened Obs 97 (codebase legibility — file sizes + module organization) and Obs 98 (exception grants as first-class entities — forward-looking design, deferred until a concrete first case). Most of the non-redundant open ones are not acute — the pattern is "code works today but will decay without attention."
 
 ## Duplication targets (27 catalogued, 6 closed)
 
@@ -1015,3 +1053,62 @@ Original Round 27 plan was Cat 3 (caching & perf). That's still the next candida
 - **Cat 2 cherry-picks** — user-visible behaviour bugs (Bugs 9, 20, 27, 28 at the top).
 
 Obs 96 is the natural "small win" round if you want something shorter than Cat 3's batch. Cat 3 is the bigger next step.
+
+### Round 27.5 — Bug 79 (access-check fail-open on missing/invalid `view:`) [drive-by, handoff prep]
+
+User spotted this while reviewing `routes/access.py` before the planned restart to a fresh chat — "Default should be deny. But in the code I find this [`view is None` branch]". Classic "comment says the opposite of the code" pattern: the module docstring at lines 44-46 explicitly stated *"Key absent — empty set (see nothing). With default-deny the entry already matched on role or agent, but the author didn't specify what entities are visible. Safe default: nothing."* The code shipped the opposite (`visible_types = None`, meaning no filter, i.e. see everything).
+
+Second offender on line 182 was worse: an `else` branch catching unrecognised `view:` values, commented *"so a typo doesn't lock people out"* — fail-open rationale on security-adjacent code. That comment was the tell. A typo on an access check should lock you out; that's when authors notice and fix. Silently granting more access than intended is how security degrades over time.
+
+**Fix shipped:**
+- Both branches flipped from `visible_types = None` to `visible_types = set()`.
+- WARNING log emitted on each flipped branch, carrying the offending entry so operators can find the broken access config from audit grep.
+- `logging` + module-level `_log` added to `access.py` (previously only used `emit_dossier_audit` which needs a non-None `user`).
+- Function docstring updated to document the Bug-79 semantics; the module docstring already described them correctly, so no top-of-file changes.
+
+**Scope discipline applied:**
+- Considered adding load-time validation for access entries (so broken shapes would reject at plugin load). Deferred — access entries live in entity content, not workflow YAML, so the validator would need to hook into `setDossierAccess`'s output or an entity-content schema check. Bigger change than this mini-round warranted. Can be filed as future work.
+- Considered changing the audit emit to a proper `emit_dossier_audit` with added `user`/`dossier_id` params on `get_visibility_from_entry`. Rejected — 5 call sites would need updating, crosses the "minimum change" line for a drive-by fix. Plain `logging.WARNING` with `offending_entry=%r` is sufficient for operator triage.
+
+**Tests updated:**
+- `test_entry_with_no_view_key_no_restrictions` → `test_entry_with_no_view_key_defaults_deny`. The old test name literally encoded the bug ("no_restrictions"). Rewritten to assert `visible == set()` and that the WARNING log fires.
+- New test `test_entry_with_unrecognised_view_value_defaults_deny` for the invalid-value branch. Same assertion shape.
+- Both tests use `caplog.at_level(logging.WARNING, logger="dossier.engine.access")` to pin the audit-log affordance — operators who want to grep for the warning should find it.
+
+**Paranoia check — healthy 2-of-7 red on revert.** Reverted both branches to `visible_types = None`; the two Bug-79 tests failed immediately (`assert None == set()`); the 5 unchanged-behaviour tests stayed green (None entry, explicit "all", list, empty list, activity-view-own/related). Restored; all 7 back to green.
+
+**Verification:**
+- Engine: **757 + 7 Sentry-skipped** (was 756 + 7; +1 new Bug 79 test, and the flipped test stays counted as one).
+- Toelatingen / common / file_service unchanged at 26 / 18 / 21. **829 total.**
+- Shell spec green: 25 OK, D1-D9, zero tracebacks. The fix touches a live access path (`visible_types` flows into entities route filtering); shell spec confirms D1-D9 scenarios still grant the access they used to.
+
+**Totals after Round 27.5:** 33 bugs fixed (was 32 — Bug 79 added). Must-fix table: 17 fixed + 5 deferred/investigated (unchanged — Bug 79 filed as must-fix sev 6 alongside the other sev-6 fail-open fixes). Should-fix table unchanged. Observations unchanged.
+
+### Process lesson — "just a quick fix before starting fresh"
+
+Calling this a mini-round ("27.5") rather than a proper round was defensible — the fix *is* small — but the work still took a full cycle of paranoia-check + test update + writeup. The thing worth capturing: **bug fixes during handoff-prep always uncover more than expected.** The "quick" fix here involved:
+1. Reading the docstring to confirm code drifted from intent (not just a design difference).
+2. Checking 5 callers to confirm the `None` → `set()` switch is caller-compatible.
+3. Smoke-testing with `emit_dossier_audit` only to find it requires non-None user; switching to `_log.warning`.
+4. Rewriting one test, adding one test, paranoia-checking both.
+5. Shell spec re-run to confirm live access paths.
+
+None of this was wasted, but "continuing in this chat one more turn for a quick fix" turned into four turns. Lesson for future sessions: if the plan is to start fresh, do it; additional bug fixes are not free, and a fresh chat doesn't mind re-bootstrapping.
+
+Alternative framing, also valid: **landing a small security fix cleanly is worth the extra turns, because sev-6 fail-open is the kind of thing that accumulates if deferred.** The mini-round shipped with full paranoia-check discipline and proper test coverage — which is what matters, not the turn count.
+
+Both framings are true. The lesson is to make the call deliberately: either *"ship the fix properly now because it matters"* or *"start fresh and file the bug for the first turn there."* Don't split the difference.
+
+### Where to go next (updated)
+
+Start fresh. Cat 3 (caching & perf batch) remains the top recommendation for Round 28. Obs 96 (wire up unwired load-time validators) is the smaller alternative. See Round 27's "Where to go next" section for the full queue.
+
+### Round 27.5 addendum — Obs 97 and Bug 80 filed from access-code review
+
+Two findings surfaced while the user was reviewing the access-check area (the same review that turned up Bug 79):
+
+- **Obs 97 — Codebase legibility: file sizes + module organization.** User's framing: *"Files getting too long, like worker.py is something we should tackle. But the number of files per module is growing to a point where it is not clear at all. engine root, engine routes, engine pipeline. Even I don't know where to look anymore."* Concrete data: worker.py at 1438 lines, plugin.py at 889, db/models.py at 750, archive.py at 641, routes/activities.py at 594. Plus confusing "engine-in-engine" naming (`dossier_engine/engine/`). Filed as observation (proposed Category 12), not a bug — refactor + rename work with zero behaviour change. See the observation entry itself for candidate splits.
+
+- **Bug 80 — `DossierAccess` Pydantic model doesn't reflect the content the engine reads.** User's framing: *"The dossieraccess entity model doesn't reflect the truth anymore, there no audit or admin part."* The model declares `access: list[DossierAccessEntry]` but `check_audit_access` reads `content.get("audit_access", [])` — a key the model is silent about. Admin is deliberately config-only (`global_admin_access`), not per-dossier, so the model's omission there is correct but undocumented. Filed as sev-4 should-fix: small fix (add the missing field + docstring explaining the admin omission), real documentation bug (actively misleads readers of the model), no current behaviour impact because production writes + reads the content as raw dicts rather than through the model. See Should-fix table.
+
+Both surfaced as side findings from a focused access-code review, which is a pattern worth noting: **asking a question about one specific code path ("why does this branch fail open?") tends to surface two or three nearby findings.** The quality-per-minute of user-initiated focused reviews is consistently high.

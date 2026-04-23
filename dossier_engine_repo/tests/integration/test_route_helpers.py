@@ -518,15 +518,58 @@ class TestGetVisibilityFromEntry:
         assert visible is None
         assert mode == "all"
 
-    def test_entry_with_no_view_key_no_restrictions(self):
-        """Matched entry but it doesn't carry a `view` key →
-        None for visible types (sees all) but honors the entry's
-        activity_view if set."""
-        visible, mode = get_visibility_from_entry(
-            {"role": "oe:admin", "activity_view": "own"},
+    def test_entry_with_no_view_key_defaults_deny(self, caplog):
+        """Bug 79 (Round 27.5): matched entry but no `view:` key →
+        default-deny. The module docstring always said this should
+        be empty set ("Key absent — empty set (see nothing)"); the
+        previous code shipped `None` (fail-open) instead. Flipped
+        to match the docstring.
+
+        The entry's `activity_view` is still honoured — the entry
+        matched the user, so activity-timeline access is granted
+        per the matched entry. Only entity-content visibility is
+        affected by the missing view key.
+
+        Paranoia check: with this test in place, revert the
+        ``view is None`` branch in ``get_visibility_from_entry``
+        to return ``None``; this test should go red. Did before
+        shipping."""
+        import logging
+        with caplog.at_level(logging.WARNING, logger="dossier.engine.access"):
+            visible, mode = get_visibility_from_entry(
+                {"role": "oe:admin", "activity_view": "own"},
+            )
+        assert visible == set()  # default-deny, not None
+        assert mode == "own"  # activity_view still honoured
+        # Warning logged so operators can find the broken access config.
+        assert any(
+            "lacks a `view:` key" in rec.getMessage()
+            for rec in caplog.records
         )
-        assert visible is None
-        assert mode == "own"
+
+    def test_entry_with_unrecognised_view_value_defaults_deny(self, caplog):
+        """Bug 79 (Round 27.5): an unrecognised `view:` value
+        (e.g. a typo like ``"al"``) was previously treated as
+        "no restriction" with the rationale ``so a typo doesn't
+        lock people out``. That's backwards for security-
+        adjacent code — a typo should lock you out so the
+        author notices. Fail-open silently granted more access
+        than intended. Flipped to default-deny.
+
+        Paranoia check: with this test in place, revert the
+        ``else`` branch to return ``None``; this test should go
+        red."""
+        import logging
+        with caplog.at_level(logging.WARNING, logger="dossier.engine.access"):
+            visible, mode = get_visibility_from_entry(
+                {"role": "oe:admin", "view": "al", "activity_view": "all"},
+            )
+        assert visible == set()  # default-deny, not None
+        assert mode == "all"
+        assert any(
+            "invalid `view:` value" in rec.getMessage()
+            for rec in caplog.records
+        )
 
     def test_entry_with_empty_view_sees_nothing(self):
         """Entry has `view: []` — an explicit 'see nothing'
