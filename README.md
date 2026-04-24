@@ -199,7 +199,7 @@ compatible ranges `>=0.1.0,<0.2.0`, the app pins strict `==0.1.0`):
 │  ✓ Batch endpoint (atomic multi-activity)                    │
 │  ✓ Workflow-scoped + workflow-agnostic URL families           │
 │  ✓ Authorization (direct, scoped, entity-derived)            │
-│  ✓ Workflow validation (requirements, forbidden, statuses)   │
+│  ✓ Workflow validation (requirements, forbidden, deadlines)   │
 │  ✓ Process-control + domain relations (unified API)          │
 │  ✓ Per-operation relation validators (add/remove split)      │
 │  ✓ IRI expansion for domain relation refs                    │

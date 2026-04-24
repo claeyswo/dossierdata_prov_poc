@@ -168,6 +168,7 @@ async def check_workflow_rules(state: ActivityState) -> None:
 
     valid, error = await validate_workflow_rules(
         state.activity_def, state.repo, state.dossier_id,
+        plugin=state.plugin, now=state.now,
     )
     if not valid:
         raise ActivityError(409, error)

@@ -1,5 +1,5 @@
 """
-Load-time validators — five functions that check the workflow
+Load-time validators — six functions that check the workflow
 contract at plugin load, before the engine accepts any request.
 
 1. ``validate_workflow_version_references`` — cross-check every
@@ -17,14 +17,17 @@ contract at plugin load, before the engine accepts any request.
 5. ``validate_relation_validator_registrations`` — check that every
    workflow- and activity-level relation validator name resolves
    in the plugin's relation_validators registry.
+6. ``validate_deadline_rules`` — shape-check every
+   ``requirements.not_before`` / ``forbidden.not_after`` declaration,
+   enforcing singletons-only for entity field references.
 
 Plus the constants they depend on: ``_VALID_RELATION_KINDS``,
 ``_WORKFLOW_RELATION_KEYS``, ``_ACTIVITY_RELATION_KEYS``,
 ``_ACTIVITY_RELATION_FORBIDDEN_KEYS``.
 
 The file is deliberately left as one module (per Round 34 plan) rather
-than split into a sub-package — the five validators are independent
-concerns but cohesive enough at ~450 lines to stay together.
+than split into a sub-package — the six validators are independent
+concerns but cohesive enough at ~600 lines to stay together.
 """
 from __future__ import annotations
 
@@ -473,4 +476,139 @@ def validate_relation_validator_registrations(
             f"validator function(s) (convention: `validate_*`) and "
             f"reference them by name from activity-level YAML via "
             f"`validator:` or `validators: {{add, remove}}`."
+        )
+
+
+def validate_deadline_rules(workflow: dict) -> None:
+    """Validate every ``requirements.not_before`` and
+    ``forbidden.not_after`` deadline-rule declaration.
+
+    Two shape-level checks:
+
+    1. **Form** — the value must be either a string (absolute ISO 8601,
+       no relative offsets) or a dict with at least ``from_entity`` and
+       ``field``, optionally ``offset``. Unknown keys in the dict and
+       the wrong overall type are rejected.
+
+    2. **Singleton-only for dict form** — a deadline rule that
+       references an entity by type can only meaningfully resolve
+       when the type is a singleton. For multi-cardinality types,
+       "which instance's deadline applies" is undefined. We check the
+       workflow's ``entity_types`` block and reject anything declared
+       as ``cardinality: multiple``. Types not declared in
+       ``entity_types`` default to single (engine convention) and are
+       accepted — the runtime resolver's singleton lookup will still
+       return None if the type turns out to be something the engine
+       itself treats as multi.
+
+    Fails fast with ValueError. Runs on the raw workflow dict at
+    plugin load, before any request is served. The corresponding
+    runtime check in ``engine.scheduling.resolve_deadline`` is a
+    defense-in-depth against test harnesses that bypass the validator
+    (direct Plugin construction etc.); every production plugin goes
+    through here.
+    """
+    # Map entity_type → cardinality from the workflow's declarations.
+    # Same logic as Plugin.cardinality_of but on the raw dict. Missing
+    # types default to 'single'.
+    cardinalities: dict[str, str] = {}
+    for et in workflow.get("entity_types") or []:
+        if not isinstance(et, dict):
+            continue
+        t = et.get("type")
+        if isinstance(t, str):
+            c = et.get("cardinality", "single")
+            cardinalities[t] = c if c in ("single", "multiple") else "single"
+
+    for act in workflow.get("activities") or []:
+        if not isinstance(act, dict):
+            continue
+        act_name = act.get("name", "<unnamed>")
+
+        for rule_container, rule_key in (
+            (act.get("requirements") or {}, "not_before"),
+            (act.get("forbidden") or {}, "not_after"),
+        ):
+            value = rule_container.get(rule_key)
+            if value is None:
+                continue
+            _validate_deadline_value(value, act_name, rule_key, cardinalities)
+
+
+def _validate_deadline_value(
+    value: "Any",
+    act_name: str,
+    rule_key: str,
+    cardinalities: dict[str, str],
+) -> None:
+    """Shape-check a single deadline declaration.
+
+    Separated from ``validate_deadline_rules`` so the nested loop
+    above stays readable. Error messages name both the activity and
+    the specific rule key so plugin authors with many activities can
+    jump straight to the offender.
+    """
+    # String form — absolute ISO only. Relative offsets are rejected
+    # at runtime too; we surface the same message earlier.
+    if isinstance(value, str):
+        if value.strip().startswith(("+", "-")) and len(value) >= 3:
+            # Looks like a relative offset (+20d / -7d). Reject.
+            raise ValueError(
+                f"Activity {act_name!r}: {rule_key} value {value!r} "
+                f"looks like a relative offset, which isn't supported "
+                f"for deadlines. Use an absolute ISO 8601 datetime or "
+                f"a {{from_entity, field, offset?}} dict."
+            )
+        return
+
+    if not isinstance(value, dict):
+        raise ValueError(
+            f"Activity {act_name!r}: {rule_key} must be an ISO 8601 "
+            f"string or a dict, got {type(value).__name__}: {value!r}"
+        )
+
+    if "from_entity" not in value or "field" not in value:
+        raise ValueError(
+            f"Activity {act_name!r}: {rule_key} dict form requires "
+            f"'from_entity' and 'field' keys; got {value!r}"
+        )
+
+    # Unknown keys — warn the author loudly. A typo like ``offet:``
+    # would be silently ignored otherwise.
+    allowed = {"from_entity", "field", "offset"}
+    extra = set(value.keys()) - allowed
+    if extra:
+        raise ValueError(
+            f"Activity {act_name!r}: {rule_key} has unknown key(s) "
+            f"{sorted(extra)}; allowed: {sorted(allowed)}"
+        )
+
+    entity_type = value["from_entity"]
+    if not isinstance(entity_type, str):
+        raise ValueError(
+            f"Activity {act_name!r}: {rule_key}.from_entity must be "
+            f"a string, got {type(entity_type).__name__}: {entity_type!r}"
+        )
+
+    # The big semantic check: entity must be a singleton. Defaults
+    # to 'single' when the type isn't in entity_types — which is how
+    # engine/system types behave — so this only rejects explicit
+    # multi-cardinality declarations.
+    if cardinalities.get(entity_type, "single") == "multiple":
+        raise ValueError(
+            f"Activity {act_name!r}: {rule_key} references "
+            f"{entity_type!r}, which is declared with "
+            f"``cardinality: multiple``. Only singleton entity types "
+            f"can be used in deadline rules — for multi-cardinality "
+            f"types, 'which instance's deadline applies' has no "
+            f"answer. If you need per-instance deadlines, compute "
+            f"the deadline in a handler instead."
+        )
+
+    offset = value.get("offset")
+    if offset is not None and not isinstance(offset, str):
+        raise ValueError(
+            f"Activity {act_name!r}: {rule_key}.offset must be a "
+            f"string like '+30d' or '-7d', got "
+            f"{type(offset).__name__}: {offset!r}"
         )

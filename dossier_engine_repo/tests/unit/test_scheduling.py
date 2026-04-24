@@ -281,7 +281,7 @@ class TestEntityFieldReferenceErrors:
         """Activity didn't declare the referenced entity in its
         ``used`` or ``generated`` block."""
         entities = _entities()  # empty
-        with pytest.raises(ValueError, match="doesn't use or generate"):
+        with pytest.raises(ValueError, match="couldn't be resolved"):
             resolve_scheduled_for(
                 {"from_entity": "oe:aanvraag", "field": "registered_at"},
                 NOW, entities,
@@ -408,3 +408,313 @@ class TestStringFormMalformed:
             resolve_scheduled_for(["+20d"], NOW)
         with pytest.raises(ValueError, match="must be a string or a dict"):
             resolve_scheduled_for(42, NOW)
+
+
+# --------------------------------------------------------------------
+# resolve_deadline (for workflow rules: not_after / not_before)
+# --------------------------------------------------------------------
+#
+# These tests exercise the deadline resolver in isolation — no DB,
+# no plugin-load machinery, just a stubbed singleton lookup. The
+# grammar is intentionally narrower than scheduled_for: no relative-
+# offset-from-now, and the entity form must point at a declared
+# singleton. Integration tests in test_workflow_rules.py exercise
+# the full stack (real repo, real validate_workflow_rules).
+# --------------------------------------------------------------------
+
+from dossier_engine.engine.scheduling import resolve_deadline
+
+
+class _FakePlugin:
+    """Minimal plugin stub. `resolve_deadline` calls `is_singleton`
+    once on the referenced type. If is_singleton returns True the
+    code path proceeds to `lookup_singleton`, which calls
+    `is_singleton` again (yes, twice) and then `repo.get_singleton_entity`."""
+
+    def __init__(self, singletons: set[str]):
+        self._singletons = singletons
+
+    def is_singleton(self, entity_type: str) -> bool:
+        return entity_type in self._singletons
+
+    def cardinality_of(self, entity_type: str) -> str:
+        """Only hit from `lookup_singleton`'s error path when
+        is_singleton returns False. Not exercised by passing tests,
+        but needed for completeness so the tests that expect
+        singleton-rejection produce the right error shape."""
+        return "single" if entity_type in self._singletons else "multiple"
+
+
+class _FakeRepo:
+    """Minimal repo stub. `resolve_deadline` only hits
+    `get_singleton_entity(dossier_id, entity_type)` via
+    `lookup_singleton`. The test sets up one mapping; missing
+    entities yield None (which is how the real repo behaves for a
+    type that isn't in the dossier)."""
+
+    def __init__(self, entities: dict[str, Any] | None = None):
+        self._entities = entities or {}
+
+    async def get_singleton_entity(self, dossier_id: Any, entity_type: str):
+        return self._entities.get(entity_type)
+
+
+_DOSSIER_ID = "d0000000-0000-0000-0000-000000000001"
+
+
+class TestResolveDeadlineIsoForm:
+    """String form: absolute ISO 8601, no relative offsets."""
+
+    async def test_iso_with_z_suffix_returns_aware_datetime(self):
+        plugin = _FakePlugin(singletons=set())
+        repo = _FakeRepo()
+        result = await resolve_deadline(
+            "2026-12-31T23:59:59Z",
+            plugin, repo, _DOSSIER_ID,
+            rule_name="not_after",
+        )
+        # Returns a datetime, not a string — callers compare with
+        # `now` and don't want to re-parse.
+        assert isinstance(result, datetime)
+        assert result == datetime(2026, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
+
+    async def test_iso_with_offset_suffix(self):
+        plugin = _FakePlugin(singletons=set())
+        repo = _FakeRepo()
+        result = await resolve_deadline(
+            "2026-05-01T12:00:00+02:00",
+            plugin, repo, _DOSSIER_ID,
+            rule_name="not_before",
+        )
+        # Parsed as CET → 10:00 UTC.
+        assert result == datetime(2026, 5, 1, 10, 0, tzinfo=timezone.utc)
+
+    async def test_none_returns_none(self):
+        plugin = _FakePlugin(singletons=set())
+        repo = _FakeRepo()
+        assert await resolve_deadline(
+            None, plugin, repo, _DOSSIER_ID, rule_name="not_after",
+        ) is None
+
+    async def test_empty_string_returns_none(self):
+        plugin = _FakePlugin(singletons=set())
+        repo = _FakeRepo()
+        assert await resolve_deadline(
+            "", plugin, repo, _DOSSIER_ID, rule_name="not_after",
+        ) is None
+
+    async def test_relative_offset_string_rejected(self):
+        """The grammar intentionally excludes `+20d` from deadlines.
+        'Relative to now' has no fixed meaning at check time — the
+        deadline would slide each time the check ran. Error message
+        explains the reasoning."""
+        plugin = _FakePlugin(singletons=set())
+        repo = _FakeRepo()
+        with pytest.raises(ValueError, match="relative offsets are not supported"):
+            await resolve_deadline(
+                "+20d", plugin, repo, _DOSSIER_ID, rule_name="not_after",
+            )
+        with pytest.raises(ValueError, match="relative offsets are not supported"):
+            await resolve_deadline(
+                "-7d", plugin, repo, _DOSSIER_ID, rule_name="not_before",
+            )
+
+    async def test_garbage_string_rejected(self):
+        plugin = _FakePlugin(singletons=set())
+        repo = _FakeRepo()
+        with pytest.raises(ValueError, match="Invalid not_after"):
+            await resolve_deadline(
+                "last tuesday", plugin, repo, _DOSSIER_ID,
+                rule_name="not_after",
+            )
+
+    async def test_rule_name_flows_into_error_message(self):
+        """The `rule_name` parameter determines the prefix in error
+        messages — callers pass 'not_after' or 'not_before' so the
+        user sees which rule failed."""
+        plugin = _FakePlugin(singletons=set())
+        repo = _FakeRepo()
+        with pytest.raises(ValueError) as exc:
+            await resolve_deadline(
+                "garbage", plugin, repo, _DOSSIER_ID,
+                rule_name="not_before",
+            )
+        assert "not_before" in str(exc.value)
+
+
+class TestResolveDeadlineDictForm:
+    """Entity field reference: the value comes from a singleton
+    in the dossier."""
+
+    async def test_plain_field_reference(self):
+        plugin = _FakePlugin(singletons={"oe:permit"})
+        repo = _FakeRepo({
+            "oe:permit": _FakeEntity(
+                content={"expires_at": "2026-12-31T23:59:59Z"},
+            ),
+        })
+        result = await resolve_deadline(
+            {"from_entity": "oe:permit", "field": "expires_at"},
+            plugin, repo, _DOSSIER_ID,
+            rule_name="not_after",
+        )
+        assert result == datetime(2026, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
+
+    async def test_nested_field_path(self):
+        plugin = _FakePlugin(singletons={"oe:permit"})
+        repo = _FakeRepo({
+            "oe:permit": _FakeEntity(
+                content={"meta": {"deadline": "2026-12-31T00:00:00Z"}},
+            ),
+        })
+        result = await resolve_deadline(
+            {"from_entity": "oe:permit", "field": "meta.deadline"},
+            plugin, repo, _DOSSIER_ID,
+            rule_name="not_after",
+        )
+        assert result == datetime(2026, 12, 31, tzinfo=timezone.utc)
+
+    async def test_field_plus_positive_offset(self):
+        plugin = _FakePlugin(singletons={"oe:aanvraag"})
+        repo = _FakeRepo({
+            "oe:aanvraag": _FakeEntity(
+                content={"registered_at": "2026-04-01T00:00:00Z"},
+            ),
+        })
+        result = await resolve_deadline(
+            {
+                "from_entity": "oe:aanvraag",
+                "field": "registered_at",
+                "offset": "+30d",
+            },
+            plugin, repo, _DOSSIER_ID,
+            rule_name="not_before",
+        )
+        assert result == datetime(2026, 5, 1, tzinfo=timezone.utc)
+
+    async def test_field_plus_negative_offset(self):
+        """The reminder pattern: 7 days before permit expiry."""
+        plugin = _FakePlugin(singletons={"oe:permit"})
+        repo = _FakeRepo({
+            "oe:permit": _FakeEntity(
+                content={"expires_at": "2026-12-31T00:00:00Z"},
+            ),
+        })
+        result = await resolve_deadline(
+            {
+                "from_entity": "oe:permit",
+                "field": "expires_at",
+                "offset": "-7d",
+            },
+            plugin, repo, _DOSSIER_ID,
+            rule_name="not_after",
+        )
+        assert result == datetime(2026, 12, 24, tzinfo=timezone.utc)
+
+    async def test_singleton_missing_returns_none(self):
+        """Singleton isn't in the dossier yet → resolver returns
+        None, validator treats the rule as inactive. Documented
+        behaviour — lets plugins compose the deadline with
+        requirements.entities to gate on anchor existence."""
+        plugin = _FakePlugin(singletons={"oe:permit"})
+        repo = _FakeRepo({})  # empty — oe:permit not in dossier
+        result = await resolve_deadline(
+            {"from_entity": "oe:permit", "field": "expires_at"},
+            plugin, repo, _DOSSIER_ID,
+            rule_name="not_after",
+        )
+        assert result is None
+
+
+class TestResolveDeadlineErrors:
+    """Malformed / semantically-invalid declarations."""
+
+    async def test_non_singleton_rejected(self):
+        """The workflow validator should catch this at load, but the
+        resolver defends against test harnesses that bypass the
+        validator (direct Plugin construction etc.)."""
+        plugin = _FakePlugin(singletons=set())  # oe:permit NOT singleton
+        repo = _FakeRepo()
+        with pytest.raises(ValueError, match="not a singleton"):
+            await resolve_deadline(
+                {"from_entity": "oe:permit", "field": "expires_at"},
+                plugin, repo, _DOSSIER_ID,
+                rule_name="not_after",
+            )
+
+    async def test_missing_from_entity_key(self):
+        plugin = _FakePlugin(singletons={"oe:permit"})
+        repo = _FakeRepo()
+        with pytest.raises(ValueError, match="'from_entity' and 'field'"):
+            await resolve_deadline(
+                {"field": "expires_at"},
+                plugin, repo, _DOSSIER_ID,
+                rule_name="not_after",
+            )
+
+    async def test_missing_field_key(self):
+        plugin = _FakePlugin(singletons={"oe:permit"})
+        repo = _FakeRepo()
+        with pytest.raises(ValueError, match="'from_entity' and 'field'"):
+            await resolve_deadline(
+                {"from_entity": "oe:permit"},
+                plugin, repo, _DOSSIER_ID,
+                rule_name="not_after",
+            )
+
+    async def test_wrong_type_rejected(self):
+        """Neither string nor dict — typical accidental integer/list."""
+        plugin = _FakePlugin(singletons=set())
+        repo = _FakeRepo()
+        with pytest.raises(ValueError, match="must be a string or a dict"):
+            await resolve_deadline(
+                42, plugin, repo, _DOSSIER_ID, rule_name="not_after",
+            )
+
+    async def test_field_null_raises(self):
+        """Singleton exists but the declared field is null → the
+        author has a bug. Fail loud with the rule_name in the message."""
+        plugin = _FakePlugin(singletons={"oe:permit"})
+        repo = _FakeRepo({
+            "oe:permit": _FakeEntity(content={"expires_at": None}),
+        })
+        with pytest.raises(ValueError) as exc:
+            await resolve_deadline(
+                {"from_entity": "oe:permit", "field": "expires_at"},
+                plugin, repo, _DOSSIER_ID,
+                rule_name="not_after",
+            )
+        assert "not_after" in str(exc.value)
+        assert "null or missing" in str(exc.value)
+
+    async def test_field_unparseable_raises(self):
+        plugin = _FakePlugin(singletons={"oe:permit"})
+        repo = _FakeRepo({
+            "oe:permit": _FakeEntity(
+                content={"expires_at": "not a real date"},
+            ),
+        })
+        with pytest.raises(ValueError, match="expected an ISO 8601"):
+            await resolve_deadline(
+                {"from_entity": "oe:permit", "field": "expires_at"},
+                plugin, repo, _DOSSIER_ID,
+                rule_name="not_after",
+            )
+
+    async def test_bad_offset_rejected(self):
+        plugin = _FakePlugin(singletons={"oe:permit"})
+        repo = _FakeRepo({
+            "oe:permit": _FakeEntity(
+                content={"expires_at": "2026-12-31T00:00:00Z"},
+            ),
+        })
+        with pytest.raises(ValueError, match="Invalid offset"):
+            await resolve_deadline(
+                {
+                    "from_entity": "oe:permit",
+                    "field": "expires_at",
+                    "offset": "7d",  # missing sign
+                },
+                plugin, repo, _DOSSIER_ID,
+                rule_name="not_after",
+            )

@@ -35,6 +35,7 @@ from .validators import (
     validate_side_effect_conditions,
     validate_relation_declarations,
     validate_relation_validator_registrations,
+    validate_deadline_rules,
 )
 from .normalize import _normalize_plugin_activity_names
 
@@ -52,6 +53,7 @@ __all__ = [
     "validate_side_effect_conditions",
     "validate_relation_declarations",
     "validate_relation_validator_registrations",
+    "validate_deadline_rules",
     # private helpers that tests/other modules import directly
     "_import_dotted",
     "_import_dotted_callable",

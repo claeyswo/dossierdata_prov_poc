@@ -696,7 +696,13 @@ response (activity identity + dossier state + allowed activities);
 `used` and `generated` come back empty because replay doesn't re-execute
 them. Called from `pipeline/preconditions.py::check_idempotency`.
 
-### `engine/scheduling.py` (271 lines)
+### `engine/scheduling.py` (404 lines)
+
+Two resolvers live here — `scheduled_for` for tasks, and
+`not_before`/`not_after` for workflow rules. They share most of
+the grammar (signed relative offsets, ISO 8601, entity-field dict)
+and most of the parsing helpers (`_parse_offset`, `_parse_iso`,
+`_read_datetime_from_entity`).
 
 `resolve_scheduled_for(value, now, resolved_entities)` — parses a
 task's `scheduled_for` declaration. Four accepted forms:
@@ -724,10 +730,27 @@ in `resolved_entities` (activity didn't declare it in its
 used/generated block), when the field is missing or null, or when
 the value isn't a parseable datetime. `_schedule_recorded_task`
 wraps these as 500 `ActivityError` at activity execution so YAML
-authors get a clear error location. Complex scheduling logic that
-doesn't fit the DSL — multiple entities, business-day math —
-belongs in a handler; the handler returns a pre-formatted ISO
-string via `HandlerResult.tasks[...].scheduled_for`.
+authors get a clear error location.
+
+`resolve_deadline(value, plugin, repo, dossier_id, *, rule_name)` —
+parses `requirements.not_before` / `forbidden.not_after`. Three
+accepted forms: absolute ISO, `{from_entity, field}`, and
+`{from_entity, field, offset}`. The `"+Nd"`-from-now string form
+is explicitly rejected — "relative to now" has no fixed meaning at
+rule-evaluation time, and the error surfaces it rather than
+silently sliding the deadline.
+
+Unlike `resolve_scheduled_for`, this resolver does a DB lookup: it
+hits `lookup_singleton(plugin, repo, dossier_id, type)` to fetch
+the referenced entity, enforcing the singletons-only rule (also
+enforced at plugin load by `validate_deadline_rules`). When the
+singleton isn't in the dossier yet, the resolver returns `None`
+and `validate_workflow_rules` treats the rule as inactive —
+letting plugins compose deadlines with `requirements.entities`.
+
+Complex scheduling logic that doesn't fit either DSL — multiple
+entities, business-day math — belongs in a handler; the handler
+returns a pre-formatted ISO string via `HandlerResult.tasks[...].scheduled_for`.
 
 ### `engine/state.py` (275 lines)
 
@@ -787,7 +810,7 @@ pipeline/
 
 Empty — marker file.
 
-### `engine/pipeline/authorization.py` (231 lines)
+### `engine/pipeline/authorization.py` (295 lines)
 
 Two reusable functions. Both return `(ok: bool, error_message: str | None)`
 so callers can raise or skip.
@@ -808,13 +831,22 @@ so callers can raise or skip.
      Used for owner-match checks.
 
 - `validate_workflow_rules(activity_def, repo, dossier_id,
-  known_status, known_activity_types)` checks structural
-  preconditions from `requirements` + `forbidden`: required
-  activities completed, required entity types exist, current
-  status in required / not in forbidden, no forbidden activity
-  already completed. Accepts pre-fetched status and type set to
-  avoid redundant queries inside the eligibility loop (which
-  evaluates many activities against the same dossier state).
+  known_status, known_activity_types, plugin, now)` checks
+  structural preconditions from `requirements` + `forbidden`:
+  required activities completed, required entity types exist,
+  current status in required / not in forbidden, no forbidden
+  activity already completed. Also evaluates **time-based rules**:
+  `requirements.not_before` (earliest legal moment) and
+  `forbidden.not_after` (deadline). Both delegate to
+  `engine.scheduling.resolve_deadline` and accept the same three
+  shapes (absolute ISO, entity-field dict, entity-field + offset).
+  Deadline checks are skipped when `plugin` isn't supplied, which
+  lets narrow unit tests of the non-deadline branches omit it.
+  `now` defaults to the current UTC time; preconditions passes
+  `state.now` for consistency with other time-sensitive phases.
+  Accepts pre-fetched status and type set to avoid redundant
+  queries inside the eligibility loop (which evaluates many
+  activities against the same dossier state).
 
 Also exports `_resolve_field(content, field_path)` — dot-notation
 path resolver that strips a leading `content.` segment if present
@@ -1101,7 +1133,7 @@ phases themselves:
 - `identity.py` — `resolve_handler_generated_identity` (shared by
   the handler phase and the side-effect persistence helper).
 
-### `engine/pipeline/_helpers/eligibility.py` (102 lines)
+### `engine/pipeline/_helpers/eligibility.py` (152 lines)
 
 Two layers of eligibility.
 
@@ -1110,11 +1142,31 @@ Two layers of eligibility.
   in the workflow, runs `validate_workflow_rules` against current
   dossier state, returns names. Result depends only on dossier
   state (not on user), so it's safe to cache on the dossier row.
+  Passes `plugin` through so deadline rules (`not_before` /
+  `not_after`) are evaluated — activities past their `not_after`
+  or before their `not_before` drop out of the eligible list.
 - `filter_by_user_auth(plugin, eligible, user, repo, dossier_id)` —
-  cheap per-request filter. Returns `[{type, label}, ...]`.
+  cheap per-request filter. Returns
+  `[{type, label, not_before?, not_after?}, ...]`. The optional
+  deadline fields are ISO strings, present only when the activity
+  declares the corresponding rule AND it resolves successfully
+  (singleton missing → field absent). Frontends use them for
+  "expires in 3 days" countdowns and disabled-but-visible hints.
+  Resolves each declared rule once via `resolve_deadline`, so
+  dict-form rules hit `lookup_singleton` once per activity — minor
+  cost given the typical activity count and singleton cache hits.
 - `derive_allowed_activities(plugin, repo, dossier_id, user)` —
   convenience wrapper that combines both. Used when no cache is
   available (replay responses, first-time response shaping).
+
+**Cache staleness.** The `eligible_activities` cache on the dossier
+row is invalidated on every activity execution, not on wall-clock
+passage. An activity whose `not_after` ticks over while the
+dossier is dormant stays in the cached list until the next activity
+runs. Acceptable because the execution path always runs
+`validate_workflow_rules` fresh — clicking a stale-listed expired
+activity returns 422, never runs the activity. Cache is a display
+optimisation; correctness is never stale.
 
 ### `engine/pipeline/_helpers/identity.py` (110 lines)
 
@@ -1539,11 +1591,11 @@ Public entry points:
 shared with the validators module; the keys accepted on a
 per-relation-type dict validator declaration.
 
-### `plugin/validators.py` (476 lines)
+### `plugin/validators.py` (614 lines)
 
-Five load-time validators that check the workflow contract before
+Six load-time validators that check the workflow contract before
 the engine accepts any request. Kept as one module (per the Round
-34 plan) because the five validators are independent concerns but
+34 plan) because the validators are independent concerns but
 cohesive.
 
 - `validate_workflow_version_references(workflow, entity_schemas)` —
@@ -1579,6 +1631,16 @@ cohesive.
   use declared relation-type names as keys (which would re-create
   the Style 3 by-type-name fallback that Bug 78 removed). Runs
   after the Plugin constructor.
+- `validate_deadline_rules(workflow)` — shape-checks every
+  `requirements.not_before` / `forbidden.not_after` declaration in
+  every activity. Rejects relative offsets (+Nd from now has no
+  meaning for deadlines), wrong types, unknown dict keys
+  (catches `offet:` typos), and — the main semantic rule — entity
+  references to non-singleton types (multi-cardinality types have
+  no unambiguous "which instance's deadline applies" answer). The
+  runtime resolver in `engine.scheduling.resolve_deadline` also
+  defends against non-singletons as defense-in-depth against test
+  harnesses that bypass the validator.
 
 Plus the four constants these validators key on:
 `_SIDE_EFFECT_CONDITION_REQUIRED`, `_VALID_RELATION_KINDS`,

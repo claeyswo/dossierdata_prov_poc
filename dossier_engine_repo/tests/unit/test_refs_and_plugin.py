@@ -1837,3 +1837,265 @@ class TestTaskEntityStatusAndKind:
             "default, update this test and add reasoning in "
             "the Round 32 writeup about why."
         )
+
+
+class TestDeadlineRuleValidation:
+    """``validate_deadline_rules`` runs at plugin load against the
+    raw workflow dict. It shape-checks every ``requirements.not_before``
+    and ``forbidden.not_after`` declaration in every activity and
+    enforces the core semantic rule: entity field references must
+    point at singleton types, because multi-cardinality types have
+    no unambiguous 'which instance's deadline applies' answer.
+
+    The runtime resolver in ``engine.scheduling.resolve_deadline``
+    also defends against non-singleton references, but this
+    startup-time check fails at deploy rather than at first-user-
+    click — which is usually what plugin authors want.
+    """
+
+    # --- accepted shapes ------------------------------------------
+
+    def test_no_rules_passes(self):
+        from dossier_engine.plugin import validate_deadline_rules
+        validate_deadline_rules({
+            "activities": [{"name": "x"}, {"name": "y"}],
+        })  # no raise
+
+    def test_iso_string_passes(self):
+        from dossier_engine.plugin import validate_deadline_rules
+        validate_deadline_rules({
+            "activities": [{
+                "name": "trekAanvraagIn",
+                "forbidden": {"not_after": "2026-12-31T23:59:59Z"},
+            }],
+        })
+
+    def test_dict_form_with_singleton_passes(self):
+        """Entity is declared with cardinality 'single' — the default.
+        Rule references it. Passes."""
+        from dossier_engine.plugin import validate_deadline_rules
+        validate_deadline_rules({
+            "entity_types": [
+                {"type": "oe:permit", "cardinality": "single"},
+            ],
+            "activities": [{
+                "name": "renewPermit",
+                "forbidden": {
+                    "not_after": {
+                        "from_entity": "oe:permit",
+                        "field": "expires_at",
+                    },
+                },
+            }],
+        })
+
+    def test_dict_form_undeclared_type_defaults_to_single(self):
+        """Type not in entity_types → default cardinality single →
+        passes. System / engine / external types work this way."""
+        from dossier_engine.plugin import validate_deadline_rules
+        validate_deadline_rules({
+            "activities": [{
+                "name": "x",
+                "forbidden": {
+                    "not_after": {
+                        "from_entity": "some_system_type",
+                        "field": "deadline",
+                    },
+                },
+            }],
+        })
+
+    def test_dict_form_with_offset_passes(self):
+        from dossier_engine.plugin import validate_deadline_rules
+        validate_deadline_rules({
+            "entity_types": [
+                {"type": "oe:permit", "cardinality": "single"},
+            ],
+            "activities": [{
+                "name": "sendReminder",
+                "forbidden": {
+                    "not_after": {
+                        "from_entity": "oe:permit",
+                        "field": "expires_at",
+                        "offset": "-7d",
+                    },
+                },
+            }],
+        })
+
+    def test_both_rules_on_same_activity_passes(self):
+        from dossier_engine.plugin import validate_deadline_rules
+        validate_deadline_rules({
+            "activities": [{
+                "name": "approvePermit",
+                "requirements": {"not_before": "2026-01-01T00:00:00Z"},
+                "forbidden": {"not_after": "2026-12-31T23:59:59Z"},
+            }],
+        })
+
+    # --- the big one: singletons-only ---------------------------
+
+    def test_multi_cardinality_type_rejected(self):
+        """The whole point of the validator. If the plugin author
+        puts a multi-cardinality type in a deadline rule, fail at
+        load with an actionable error."""
+        from dossier_engine.plugin import validate_deadline_rules
+        with pytest.raises(ValueError) as exc:
+            validate_deadline_rules({
+                "entity_types": [
+                    {"type": "oe:aanvraag", "cardinality": "multiple"},
+                ],
+                "activities": [{
+                    "name": "doSomething",
+                    "forbidden": {
+                        "not_after": {
+                            "from_entity": "oe:aanvraag",
+                            "field": "registered_at",
+                        },
+                    },
+                }],
+            })
+        msg = str(exc.value)
+        assert "doSomething" in msg
+        assert "oe:aanvraag" in msg
+        assert "not_after" in msg
+        assert "singleton" in msg
+
+    def test_multi_cardinality_rejected_on_not_before_too(self):
+        """Same check fires for requirements.not_before — we iterate
+        both rules. Also tests that the activity-name-in-message
+        branch works for not_before."""
+        from dossier_engine.plugin import validate_deadline_rules
+        with pytest.raises(ValueError) as exc:
+            validate_deadline_rules({
+                "entity_types": [
+                    {"type": "oe:beslissing", "cardinality": "multiple"},
+                ],
+                "activities": [{
+                    "name": "earliestAction",
+                    "requirements": {
+                        "not_before": {
+                            "from_entity": "oe:beslissing",
+                            "field": "taken_at",
+                        },
+                    },
+                }],
+            })
+        assert "earliestAction" in str(exc.value)
+        assert "not_before" in str(exc.value)
+
+    # --- shape errors --------------------------------------------
+
+    def test_relative_offset_string_rejected(self):
+        """'+20d' at the top level means 'relative to now' which
+        has no meaning for a deadline. Reject at load with a clear
+        explanation rather than letting it surface at runtime."""
+        from dossier_engine.plugin import validate_deadline_rules
+        with pytest.raises(ValueError, match="relative offset"):
+            validate_deadline_rules({
+                "activities": [{
+                    "name": "x",
+                    "forbidden": {"not_after": "+20d"},
+                }],
+            })
+
+    def test_wrong_type_rejected(self):
+        """List, int — not string and not dict."""
+        from dossier_engine.plugin import validate_deadline_rules
+        with pytest.raises(ValueError, match="must be an ISO 8601 string or a dict"):
+            validate_deadline_rules({
+                "activities": [{
+                    "name": "x",
+                    "forbidden": {"not_after": 42},
+                }],
+            })
+
+    def test_dict_missing_from_entity_rejected(self):
+        from dossier_engine.plugin import validate_deadline_rules
+        with pytest.raises(ValueError, match="'from_entity' and 'field'"):
+            validate_deadline_rules({
+                "activities": [{
+                    "name": "x",
+                    "forbidden": {"not_after": {"field": "expires_at"}},
+                }],
+            })
+
+    def test_dict_missing_field_rejected(self):
+        from dossier_engine.plugin import validate_deadline_rules
+        with pytest.raises(ValueError, match="'from_entity' and 'field'"):
+            validate_deadline_rules({
+                "activities": [{
+                    "name": "x",
+                    "forbidden": {"not_after": {"from_entity": "oe:permit"}},
+                }],
+            })
+
+    def test_unknown_dict_key_rejected(self):
+        """Catches ``offet:`` typos that would otherwise be silently
+        ignored at runtime. The validator rejects any unknown key
+        with the full allowed list in the error message so the
+        author sees what they meant."""
+        from dossier_engine.plugin import validate_deadline_rules
+        with pytest.raises(ValueError, match="unknown key"):
+            validate_deadline_rules({
+                "activities": [{
+                    "name": "x",
+                    "forbidden": {
+                        "not_after": {
+                            "from_entity": "oe:permit",
+                            "field": "expires_at",
+                            "offet": "-7d",  # typo
+                        },
+                    },
+                }],
+            })
+
+    def test_offset_wrong_type_rejected(self):
+        from dossier_engine.plugin import validate_deadline_rules
+        with pytest.raises(ValueError, match="offset must be a string"):
+            validate_deadline_rules({
+                "activities": [{
+                    "name": "x",
+                    "forbidden": {
+                        "not_after": {
+                            "from_entity": "oe:permit",
+                            "field": "expires_at",
+                            "offset": 7,  # should be "+7d"
+                        },
+                    },
+                }],
+            })
+
+    def test_from_entity_wrong_type_rejected(self):
+        from dossier_engine.plugin import validate_deadline_rules
+        with pytest.raises(ValueError, match="from_entity must be a string"):
+            validate_deadline_rules({
+                "activities": [{
+                    "name": "x",
+                    "forbidden": {
+                        "not_after": {
+                            "from_entity": ["oe:permit"],  # list, not str
+                            "field": "expires_at",
+                        },
+                    },
+                }],
+            })
+
+    # --- error message quality ---------------------------------
+
+    def test_error_mentions_activity_name(self):
+        """When a workflow has many activities, the author needs to
+        know which one has the bad rule. The activity name MUST be
+        in every error raised by this validator."""
+        from dossier_engine.plugin import validate_deadline_rules
+        with pytest.raises(ValueError, match="'badActivity'"):
+            validate_deadline_rules({
+                "activities": [
+                    {"name": "goodOne"},
+                    {"name": "alsoGood"},
+                    {
+                        "name": "badActivity",
+                        "forbidden": {"not_after": "+20d"},
+                    },
+                ],
+            })

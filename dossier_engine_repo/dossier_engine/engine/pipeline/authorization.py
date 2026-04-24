@@ -170,6 +170,8 @@ async def validate_workflow_rules(
     dossier_id: UUID,
     known_status: str | None = None,
     known_activity_types: set[str] | None = None,
+    plugin: Plugin | None = None,
+    now: "datetime | None" = None,
 ) -> tuple[bool, str | None]:
     """Check the activity's structural preconditions.
 
@@ -181,14 +183,47 @@ async def validate_workflow_rules(
     * The current dossier status is in the required set (if specified)
       and not in the forbidden set (if specified).
     * No forbidden activity has already been completed.
+    * `requirements.not_before` (if declared) resolves to a time
+      at-or-before `now` — i.e., the earliest legal time to run the
+      activity has arrived.
+    * `forbidden.not_after` (if declared) resolves to a time strictly
+      after `now` — i.e., the deadline hasn't passed yet.
+
+    Deadline rules accept three value shapes (see
+    ``engine.scheduling.resolve_deadline``):
+      - Absolute ISO 8601: ``"2026-12-31T23:59:59Z"``
+      - Entity field reference: ``{from_entity, field}``
+      - Entity field + offset: ``{from_entity, field, offset}``
+
+    Entity references must point to a singleton type; the plugin
+    validator rejects non-singletons at startup, and the resolver
+    also defends against them at runtime. When a declared rule's
+    anchor entity doesn't exist in the dossier, the resolver returns
+    None and the rule is treated as inactive — that lets plugins
+    compose the deadline with ``requirements.entities`` to gate the
+    activity behind the anchor's existence.
 
     Pass `known_status` and `known_activity_types` to avoid redundant
     queries when the caller has already fetched them (e.g. inside the
     eligibility loop, which evaluates many activities against the same
-    dossier state).
+    dossier state). Pass `plugin` whenever the activity might declare
+    deadline rules that reference entities (the plugin gives us
+    `is_singleton` and is needed by the singleton lookup); deadline
+    rules are silently skipped if no plugin is provided, which lets
+    narrow unit tests keep calling without it. ``now`` defaults to
+    the current UTC time; callers on the execution path pass their
+    ``state.now`` for consistency with other time-sensitive phases.
 
     Returns `(True, None)` on success, `(False, reason)` on failure.
+    Malformed deadline declarations raise `ValueError` so the caller
+    can wrap as 500 (it's a plugin-author bug, not a user error).
     """
+    from datetime import datetime, timezone
+    from ..scheduling import resolve_deadline
+
+    if now is None:
+        now = datetime.now(timezone.utc)
+
     requirements = activity_def.get("requirements", {})
     forbidden = activity_def.get("forbidden", {})
 
@@ -227,5 +262,34 @@ async def validate_workflow_rules(
     if forb_statuses and any(s for s in forb_statuses):
         if current_status in forb_statuses:
             return False, f"Dossier is in forbidden status '{current_status}'"
+
+    # Deadline rules. Resolved only when a plugin was supplied —
+    # without a plugin, the singleton lookup path can't run, so we
+    # skip the check entirely. Every production caller passes one;
+    # test callers that don't exercise deadlines can omit it.
+    if plugin is not None:
+        not_before_decl = requirements.get("not_before")
+        if not_before_decl is not None:
+            not_before = await resolve_deadline(
+                not_before_decl, plugin, repo, dossier_id,
+                rule_name="not_before",
+            )
+            if not_before is not None and now < not_before:
+                return False, (
+                    f"Activity not yet available (not_before: "
+                    f"{not_before.isoformat()})"
+                )
+
+        not_after_decl = forbidden.get("not_after")
+        if not_after_decl is not None:
+            not_after = await resolve_deadline(
+                not_after_decl, plugin, repo, dossier_id,
+                rule_name="not_after",
+            )
+            if not_after is not None and now >= not_after:
+                return False, (
+                    f"Activity deadline has passed (not_after: "
+                    f"{not_after.isoformat()})"
+                )
 
     return True, None

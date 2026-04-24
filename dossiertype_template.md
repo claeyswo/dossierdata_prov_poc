@@ -602,12 +602,38 @@ activities:
         - ""
       statuses:                   # dossier must be in one of these statuses
         - ""
+      # not_before (optional): earliest wall-clock moment the activity
+      # becomes legal. Before this, a 422 "not yet available" is
+      # returned. Accepts three forms — the same shape as the dict
+      # forms of `scheduled_for`, minus the "+Nd from now" string form
+      # (which has no fixed meaning at rule-evaluation time):
+      #   * Absolute ISO 8601: "2026-01-01T00:00:00Z"
+      #   * Entity field ref: {from_entity: "oe:x", field: "foo"} —
+      #     MUST be a singleton; multi-cardinality types are rejected
+      #     at plugin load.
+      #   * Entity field + offset: {from_entity, field, offset: "+30d"}
+      #     — the "30 days after X" idiom.
+      # When the anchor entity doesn't exist yet, the rule is treated
+      # as inactive (no deadline known → activity not blocked by it).
+      # not_before: "2026-01-01T00:00:00Z"
 
     forbidden:
       activities:                 # which activities must NOT have been completed
         - ""
       statuses:                   # dossier must NOT be in any of these statuses
         - ""
+      # not_after (optional): deadline past which the activity is no
+      # longer legal. Same three shapes as `not_before` above. The
+      # reminder idiom — "7 days before permit expiry" — is:
+      #   not_after: {from_entity: "oe:permit", field: "expires_at", offset: "-7d"}
+      # The resolved deadline surfaces in the eligible-activities
+      # response as a flat `not_after` ISO string for frontend
+      # countdowns. Eligibility cache is NOT time-aware: a stale
+      # cached list can show an already-expired activity until the
+      # next activity runs in the dossier — but the execution path
+      # always does a fresh check, so clicking a stale-listed
+      # expired activity returns 422, never lets it through.
+      # not_after: "2026-12-31T23:59:59Z"
 
     # --- Used: references this activity reads ---
     # Only for existing entities (references) or external URIs.

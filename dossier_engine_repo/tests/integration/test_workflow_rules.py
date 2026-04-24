@@ -274,3 +274,426 @@ class TestValidateWorkflowRules:
         # be in the error.
         assert "dienAanvraagIn" in err
         assert "not completed" in err
+
+
+# --------------------------------------------------------------------
+# Deadline rules (not_after / not_before)
+# --------------------------------------------------------------------
+
+
+class _StubPlugin:
+    """Minimal plugin stub for deadline tests. Only `is_singleton`
+    is touched — the singleton-enforcement in `resolve_deadline`
+    calls it, and `lookup_singleton` (which the same function
+    invokes) calls it again. Nothing else."""
+    def __init__(self, singletons: set[str] | None = None):
+        self._singletons = singletons or set()
+
+    def is_singleton(self, entity_type: str) -> bool:
+        return entity_type in self._singletons
+
+
+async def _seed_entity(
+    repo: Repository,
+    activity_id: UUID,
+    entity_type: str,
+    content: dict,
+) -> UUID:
+    """Seed one entity and return its entity_id. Used by deadline
+    tests that exercise the dict-form resolver's DB lookup path."""
+    eid = uuid4()
+    await repo.create_entity(
+        version_id=uuid4(), entity_id=eid, dossier_id=D1,
+        type=entity_type, generated_by=activity_id,
+        content=content, attributed_to="system",
+    )
+    await repo.session.flush()
+    return eid
+
+
+class TestDeadlineRules:
+    """Tests for `forbidden.not_after` and `requirements.not_before`
+    in `validate_workflow_rules`.
+
+    These rules accept the same three forms as scheduled_for's dict
+    grammar (no relative-offset-from-now): absolute ISO 8601,
+    `{from_entity, field}`, `{from_entity, field, offset}`. When a
+    plugin isn't supplied, the deadline checks are skipped entirely
+    — every test here passes one explicitly.
+
+    Time source: the function accepts a `now` kwarg; tests pass a
+    fixed instant so pass/fail boundaries are deterministic. In
+    production, preconditions supplies `state.now` and eligibility
+    lets it default to `datetime.now(UTC)`.
+    """
+
+    # --- not_after, absolute ISO ---------------------------------
+
+    async def test_not_after_future_iso_passes(self, repo):
+        """Deadline is in the future relative to `now` → activity
+        still allowed."""
+        await _bootstrap_dossier(repo)
+        now = datetime(2026, 4, 24, 12, 0, tzinfo=timezone.utc)
+        valid, err = await validate_workflow_rules(
+            activity_def={
+                "forbidden": {"not_after": "2026-12-31T23:59:59Z"},
+            },
+            repo=repo, dossier_id=D1,
+            known_activity_types=set(),
+            plugin=_StubPlugin(),
+            now=now,
+        )
+        assert valid is True
+        assert err is None
+
+    async def test_not_after_past_iso_fails(self, repo):
+        """Deadline has passed → activity rejected with a deadline-
+        specific error message that names the resolved ISO time so
+        the user can see which deadline it was."""
+        await _bootstrap_dossier(repo)
+        now = datetime(2026, 4, 24, 12, 0, tzinfo=timezone.utc)
+        valid, err = await validate_workflow_rules(
+            activity_def={
+                "forbidden": {"not_after": "2026-01-01T00:00:00Z"},
+            },
+            repo=repo, dossier_id=D1,
+            known_activity_types=set(),
+            plugin=_StubPlugin(),
+            now=now,
+        )
+        assert valid is False
+        assert "deadline has passed" in err
+        assert "2026-01-01" in err
+
+    async def test_not_after_exact_boundary_fails(self, repo):
+        """At the exact instant the deadline hits, the activity is
+        no longer allowed. We use `now >= not_after` (inclusive) so
+        '23:59:59' means 'last allowed second' — past that it's
+        rejected. Lock this in so nobody accidentally flips to `>`
+        without a conscious decision."""
+        await _bootstrap_dossier(repo)
+        boundary = datetime(2026, 4, 24, 12, 0, tzinfo=timezone.utc)
+        valid, err = await validate_workflow_rules(
+            activity_def={
+                "forbidden": {"not_after": "2026-04-24T12:00:00Z"},
+            },
+            repo=repo, dossier_id=D1,
+            known_activity_types=set(),
+            plugin=_StubPlugin(),
+            now=boundary,
+        )
+        assert valid is False
+        assert "deadline has passed" in err
+
+    # --- not_after, entity-field dict ---------------------------
+
+    async def test_not_after_from_entity_field_passes(self, repo):
+        """Singleton has a datetime field in the future. Rule reads
+        it via DB lookup and the deadline hasn't passed."""
+        boot = await _bootstrap_dossier(repo)
+        await _seed_entity(repo, boot, "oe:permit", {
+            "expires_at": "2026-12-31T00:00:00Z",
+        })
+        now = datetime(2026, 4, 24, 12, 0, tzinfo=timezone.utc)
+        valid, err = await validate_workflow_rules(
+            activity_def={
+                "forbidden": {
+                    "not_after": {
+                        "from_entity": "oe:permit",
+                        "field": "expires_at",
+                    },
+                },
+            },
+            repo=repo, dossier_id=D1,
+            known_activity_types=set(),
+            plugin=_StubPlugin({"oe:permit"}),
+            now=now,
+        )
+        assert valid is True
+        assert err is None
+
+    async def test_not_after_from_entity_field_fails(self, repo):
+        boot = await _bootstrap_dossier(repo)
+        await _seed_entity(repo, boot, "oe:permit", {
+            "expires_at": "2026-01-01T00:00:00Z",  # already past
+        })
+        now = datetime(2026, 4, 24, 12, 0, tzinfo=timezone.utc)
+        valid, err = await validate_workflow_rules(
+            activity_def={
+                "forbidden": {
+                    "not_after": {
+                        "from_entity": "oe:permit",
+                        "field": "expires_at",
+                    },
+                },
+            },
+            repo=repo, dossier_id=D1,
+            known_activity_types=set(),
+            plugin=_StubPlugin({"oe:permit"}),
+            now=now,
+        )
+        assert valid is False
+        assert "deadline has passed" in err
+
+    async def test_not_after_with_negative_offset(self, repo):
+        """The killer reminder case — 'fire 7 days before permit
+        expires'. Sibling feature to scheduled_for's dict+offset.
+        Sanity-check that the offset subtracts correctly: expiry
+        is Dec 31, offset -7d, so the effective deadline is Dec 24.
+        At Dec 20 (before the effective deadline) → passes."""
+        boot = await _bootstrap_dossier(repo)
+        await _seed_entity(repo, boot, "oe:permit", {
+            "expires_at": "2026-12-31T00:00:00Z",
+        })
+        now = datetime(2026, 12, 20, 12, 0, tzinfo=timezone.utc)
+        valid, _ = await validate_workflow_rules(
+            activity_def={
+                "forbidden": {
+                    "not_after": {
+                        "from_entity": "oe:permit",
+                        "field": "expires_at",
+                        "offset": "-7d",
+                    },
+                },
+            },
+            repo=repo, dossier_id=D1,
+            known_activity_types=set(),
+            plugin=_StubPlugin({"oe:permit"}),
+            now=now,
+        )
+        assert valid is True
+        # And at Dec 28 (after the effective deadline of Dec 24) → fails.
+        now = datetime(2026, 12, 28, 0, 0, tzinfo=timezone.utc)
+        valid, err = await validate_workflow_rules(
+            activity_def={
+                "forbidden": {
+                    "not_after": {
+                        "from_entity": "oe:permit",
+                        "field": "expires_at",
+                        "offset": "-7d",
+                    },
+                },
+            },
+            repo=repo, dossier_id=D1,
+            known_activity_types=set(),
+            plugin=_StubPlugin({"oe:permit"}),
+            now=now,
+        )
+        assert valid is False
+        # The resolved effective deadline (2026-12-24) should be in
+        # the error message.
+        assert "2026-12-24" in err
+
+    async def test_not_after_singleton_missing_treats_rule_as_inactive(self, repo):
+        """When the deadline rule references a singleton that
+        doesn't exist in the dossier yet, the resolver returns None
+        and the rule is treated as 'no deadline applies'. The
+        activity passes despite the declared rule. Plugins that
+        want 'activity only allowed once anchor exists' compose
+        `not_after` with `requirements.entities`."""
+        await _bootstrap_dossier(repo)
+        # NOTE: we do NOT seed oe:permit.
+        now = datetime(2026, 4, 24, 12, 0, tzinfo=timezone.utc)
+        valid, err = await validate_workflow_rules(
+            activity_def={
+                "forbidden": {
+                    "not_after": {
+                        "from_entity": "oe:permit",
+                        "field": "expires_at",
+                    },
+                },
+            },
+            repo=repo, dossier_id=D1,
+            known_activity_types=set(),
+            plugin=_StubPlugin({"oe:permit"}),
+            now=now,
+        )
+        assert valid is True
+        assert err is None
+
+    # --- not_before -------------------------------------------------
+
+    async def test_not_before_future_iso_fails(self, repo):
+        """Activity can't run yet — the earliest-allowed time is
+        in the future."""
+        await _bootstrap_dossier(repo)
+        now = datetime(2026, 4, 24, 12, 0, tzinfo=timezone.utc)
+        valid, err = await validate_workflow_rules(
+            activity_def={
+                "requirements": {"not_before": "2026-05-01T00:00:00Z"},
+            },
+            repo=repo, dossier_id=D1,
+            known_activity_types=set(),
+            plugin=_StubPlugin(),
+            now=now,
+        )
+        assert valid is False
+        assert "not yet available" in err
+        assert "2026-05-01" in err
+
+    async def test_not_before_past_iso_passes(self, repo):
+        await _bootstrap_dossier(repo)
+        now = datetime(2026, 4, 24, 12, 0, tzinfo=timezone.utc)
+        valid, err = await validate_workflow_rules(
+            activity_def={
+                "requirements": {"not_before": "2026-01-01T00:00:00Z"},
+            },
+            repo=repo, dossier_id=D1,
+            known_activity_types=set(),
+            plugin=_StubPlugin(),
+            now=now,
+        )
+        assert valid is True
+        assert err is None
+
+    async def test_not_before_exact_boundary_passes(self, repo):
+        """Opposite boundary from not_after — the earliest allowed
+        second is the one that matches exactly. `now < not_before`
+        is strict, so at the boundary the activity becomes legal."""
+        await _bootstrap_dossier(repo)
+        boundary = datetime(2026, 4, 24, 12, 0, tzinfo=timezone.utc)
+        valid, _ = await validate_workflow_rules(
+            activity_def={
+                "requirements": {"not_before": "2026-04-24T12:00:00Z"},
+            },
+            repo=repo, dossier_id=D1,
+            known_activity_types=set(),
+            plugin=_StubPlugin(),
+            now=boundary,
+        )
+        assert valid is True
+
+    async def test_not_before_from_entity_field_offset(self, repo):
+        """'Activity legal starting 30 days after aanvraag was
+        registered.' At day 15 → not yet. At day 45 → yes."""
+        boot = await _bootstrap_dossier(repo)
+        await _seed_entity(repo, boot, "oe:aanvraag", {
+            "registered_at": "2026-04-01T00:00:00Z",
+        })
+        # Day 15 — too early.
+        valid, err = await validate_workflow_rules(
+            activity_def={
+                "requirements": {
+                    "not_before": {
+                        "from_entity": "oe:aanvraag",
+                        "field": "registered_at",
+                        "offset": "+30d",
+                    },
+                },
+            },
+            repo=repo, dossier_id=D1,
+            known_activity_types=set(),
+            plugin=_StubPlugin({"oe:aanvraag"}),
+            now=datetime(2026, 4, 15, 12, 0, tzinfo=timezone.utc),
+        )
+        assert valid is False
+        assert "not yet available" in err
+        # Day 45 — allowed.
+        valid, _ = await validate_workflow_rules(
+            activity_def={
+                "requirements": {
+                    "not_before": {
+                        "from_entity": "oe:aanvraag",
+                        "field": "registered_at",
+                        "offset": "+30d",
+                    },
+                },
+            },
+            repo=repo, dossier_id=D1,
+            known_activity_types=set(),
+            plugin=_StubPlugin({"oe:aanvraag"}),
+            now=datetime(2026, 5, 15, 12, 0, tzinfo=timezone.utc),
+        )
+        assert valid is True
+
+    # --- combined ---------------------------------------------------
+
+    async def test_both_rules_both_pass(self, repo):
+        await _bootstrap_dossier(repo)
+        now = datetime(2026, 4, 24, 12, 0, tzinfo=timezone.utc)
+        valid, err = await validate_workflow_rules(
+            activity_def={
+                "requirements": {"not_before": "2026-01-01T00:00:00Z"},
+                "forbidden": {"not_after": "2026-12-31T00:00:00Z"},
+            },
+            repo=repo, dossier_id=D1,
+            known_activity_types=set(),
+            plugin=_StubPlugin(),
+            now=now,
+        )
+        assert valid is True
+
+    async def test_not_before_checked_before_not_after(self, repo):
+        """When both declared and both fail, not_before is evaluated
+        first and its error surfaces. Locks in the evaluation order
+        so a future refactor doesn't silently change which rule wins
+        in the error message."""
+        await _bootstrap_dossier(repo)
+        now = datetime(2030, 4, 24, 12, 0, tzinfo=timezone.utc)
+        valid, err = await validate_workflow_rules(
+            activity_def={
+                "requirements": {"not_before": "2035-01-01T00:00:00Z"},
+                "forbidden": {"not_after": "2025-01-01T00:00:00Z"},
+            },
+            repo=repo, dossier_id=D1,
+            known_activity_types=set(),
+            plugin=_StubPlugin(),
+            now=now,
+        )
+        assert valid is False
+        assert "not yet available" in err
+
+    # --- plumbing edge cases ----------------------------------------
+
+    async def test_skipped_when_plugin_not_supplied(self, repo):
+        """When no plugin is passed, deadline checks are skipped
+        entirely — even a clearly-failing rule doesn't fire. This
+        lets narrow unit tests of the non-deadline branches keep
+        calling the function without plumbing a plugin through.
+        Every production caller passes one."""
+        await _bootstrap_dossier(repo)
+        valid, err = await validate_workflow_rules(
+            activity_def={
+                "forbidden": {"not_after": "2020-01-01T00:00:00Z"},
+            },
+            repo=repo, dossier_id=D1,
+            known_activity_types=set(),
+            # plugin=None (default)
+        )
+        assert valid is True
+        assert err is None
+
+    async def test_malformed_deadline_raises(self, repo):
+        """Runtime malformation (a rule that snuck past the plugin
+        validator somehow) raises ValueError out of
+        validate_workflow_rules. Caller wraps as 500. We assert
+        the raise, not the return, because the contract is 'plugin-
+        author bug, not user error'."""
+        await _bootstrap_dossier(repo)
+        now = datetime(2026, 4, 24, 12, 0, tzinfo=timezone.utc)
+        with pytest.raises(ValueError, match="not_after"):
+            await validate_workflow_rules(
+                activity_def={
+                    "forbidden": {"not_after": "not a date at all"},
+                },
+                repo=repo, dossier_id=D1,
+                known_activity_types=set(),
+                plugin=_StubPlugin(),
+                now=now,
+            )
+
+    async def test_relative_offset_as_top_level_rejected(self, repo):
+        """'+20d' has no meaning at deadline-check time — there's no
+        fixed anchor for 'now'. Resolver raises loudly."""
+        await _bootstrap_dossier(repo)
+        now = datetime(2026, 4, 24, 12, 0, tzinfo=timezone.utc)
+        with pytest.raises(ValueError, match="relative offsets are not supported"):
+            await validate_workflow_rules(
+                activity_def={
+                    "forbidden": {"not_after": "+20d"},
+                },
+                repo=repo, dossier_id=D1,
+                known_activity_types=set(),
+                plugin=_StubPlugin(),
+                now=now,
+            )

@@ -55,6 +55,7 @@ async def compute_eligible_activities(
             act_def, repo, dossier_id,
             known_status=status,
             known_activity_types=activity_types,
+            plugin=plugin,
         )
         if valid:
             eligible.append(act_def["name"])
@@ -70,10 +71,30 @@ async def filter_by_user_auth(
 ) -> list[dict]:
     """Filter a list of eligible activity names by user authorization.
 
-    Returns a list of `{type, label}` dicts, ready to drop into a
-    response body. Cheap to call per-request — does one
-    `authorize_activity` call per eligible activity.
+    Returns a list of ``{type, label}`` dicts — with optional flat
+    ``not_before`` / ``not_after`` ISO-string fields when the activity
+    declares deadline rules. Fields are present only when the
+    activity_def declares the corresponding rule AND the rule
+    resolves successfully (singleton missing → field omitted, because
+    no deadline can be computed). Frontends use the fields to show
+    countdowns / grey-out-soon UI hints; absence of a field means
+    "no relevant deadline, don't display anything".
+
+    The returned list already passed ``validate_workflow_rules``, so
+    any ``not_after`` included here is strictly in the future and any
+    ``not_before`` is strictly in the past (otherwise the activity
+    wouldn't be eligible). No frontend needs to re-check the
+    boundary — just display.
+
+    Cheap to call per-request: one ``authorize_activity`` call per
+    eligible activity, plus a ``resolve_deadline`` call per declared
+    rule (ISO-only rules don't hit the DB; dict-form rules do one
+    ``lookup_singleton``). For typical dossiers with a handful of
+    activities and at most one or two deadline rules each, this is
+    a few extra queries per response.
     """
+    from ...scheduling import resolve_deadline
+
     allowed = []
     act_def_map = {a["name"]: a for a in plugin.workflow.get("activities", [])}
     for act_name in eligible:
@@ -81,11 +102,40 @@ async def filter_by_user_auth(
         if not act_def:
             continue
         authorized, _ = await authorize_activity(plugin, act_def, user, repo, dossier_id)
-        if authorized:
-            allowed.append({
-                "type": act_def["name"],
-                "label": act_def.get("label", act_def["name"]),
-            })
+        if not authorized:
+            continue
+
+        entry: dict = {
+            "type": act_def["name"],
+            "label": act_def.get("label", act_def["name"]),
+        }
+
+        # Resolve declared deadlines — add as flat ISO-string fields.
+        # Malformed declarations would have been caught by the
+        # plugin validator at startup; we pass any remaining
+        # resolution errors through (the same activity would fail
+        # at execution time too, so silencing here would mask the
+        # real bug). Missing-singleton returns None → field stays
+        # absent, which is the documented "rule inactive" shape.
+        not_before_decl = (act_def.get("requirements") or {}).get("not_before")
+        if not_before_decl is not None:
+            resolved = await resolve_deadline(
+                not_before_decl, plugin, repo, dossier_id,
+                rule_name="not_before",
+            )
+            if resolved is not None:
+                entry["not_before"] = resolved.isoformat()
+
+        not_after_decl = (act_def.get("forbidden") or {}).get("not_after")
+        if not_after_decl is not None:
+            resolved = await resolve_deadline(
+                not_after_decl, plugin, repo, dossier_id,
+                rule_name="not_after",
+            )
+            if resolved is not None:
+                entry["not_after"] = resolved.isoformat()
+
+        allowed.append(entry)
     return allowed
 
 

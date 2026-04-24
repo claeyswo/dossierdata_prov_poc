@@ -488,15 +488,18 @@ The worker:
 
 - **Relative offset** — `+Nd` / `+Nh` / `+Nm` / `+Nw` (days, hours, minutes, weeks). The sign is required and can be `+` or `-`; it's what tells the parser this is an offset rather than a malformed date. Resolved against the activity's start time. Negative offsets resolve to a time in the past, which the worker picks up on its next poll — useful for "fire immediately" semantics or for deadlines that have already elapsed.
 - **Absolute ISO 8601** — `"2026-12-31T23:59:59Z"`, `"2026-05-01T12:00:00+02:00"`.
-- **Entity field reference** — a dict reading a datetime from an entity this activity uses or generates:
-  ```yaml
-  scheduled_for:
-    from_entity: "oe:aanvraag"
-    field: "content.registered_at"   # or "registered_at" — the leading "content." is optional
-  ```
-  The field must contain an ISO 8601 datetime string, a date-only string (`"2026-05-01"` → midnight UTC), or a Python `datetime` (for handler-built tasks that insert one directly). Uses the same `from_entity`/`field` idiom you already know from authorization scopes and finalization status mappings. Raises 500 at scheduling time if the entity isn't in the activity's `used`/`generated` block, or if the field is null/missing/unparseable.
+- **Entity field reference** — a dict `{from_entity, field}` reading a datetime from an entity this activity uses or generates. The field must contain an ISO 8601 datetime string, a date-only string (`"2026-05-01"` → midnight UTC), or a Python `datetime` (for handler-built tasks that insert one directly). Uses the same `from_entity`/`field` idiom you already know from authorization scopes and finalization status mappings. Raises 500 at scheduling time if the entity isn't in the activity's `used`/`generated` block, or if the field is null/missing/unparseable.
 - **Entity field + offset** — the same dict with an additional signed offset. The killer use case for reminders: *"fire 7 days before the permit expires"* is `{from_entity: ..., field: expires_at, offset: "-7d"}`. The offset uses the same signed-relative grammar (`+20d` / `-7d`).
 - **Omit** — the task runs immediately after the activity completes.
+
+Shape of the entity-field form:
+
+```yaml
+scheduled_for:
+  from_entity: "oe:aanvraag"
+  field: "content.registered_at"   # or "registered_at" — leading "content." is optional
+  offset: "+7d"                    # optional; signed (+ or -)
+```
 
 For schedules depending on more than one entity, or needing arithmetic the DSL doesn't cover, compute `scheduled_for` inside a handler and return a pre-formatted ISO string.
 
@@ -533,6 +536,78 @@ Each sub-key is optional; any combination works.
 The engine checks `requirements` before running the activity and raises 422 on failure. `forbidden` is the inverse — the activity is rejected if any listed item *does* apply. The failing requirement is named in the error so the client knows what they're missing.
 
 **When to use:** any time the activity has a precondition that isn't purely about input validation. If the activity's validity depends on the dossier's history, use `requirements`. If it depends on the dossier's history *not* containing certain events, use `forbidden`.
+
+#### Time-based rules — `not_before` and `not_after`
+
+Activities can declare temporal windows inside the same `requirements` / `forbidden` blocks:
+
+- `requirements.not_before` — the earliest wall-clock moment the activity becomes legal. Before that, the activity is blocked with a "not yet available" error.
+- `forbidden.not_after` — the deadline past which the activity is no longer legal. After that, it's blocked with a "deadline has passed" error.
+
+Both accept the same three value shapes:
+
+```yaml
+activities:
+  - name: "objectionWindow"
+    # Absolute ISO 8601 — known fixed deadline.
+    requirements:
+      not_before: "2026-01-01T00:00:00Z"
+    forbidden:
+      not_after: "2026-12-31T23:59:59Z"
+```
+
+```yaml
+activities:
+  - name: "renewPermit"
+    # Entity field reference — deadline comes from a singleton.
+    forbidden:
+      not_after:
+        from_entity: "oe:permit"
+        field: "expires_at"
+```
+
+```yaml
+activities:
+  - name: "sendExpiryReminder"
+    # Entity field + signed offset — the reminder idiom.
+    # "fire 7 days before permit expiry"
+    forbidden:
+      not_after:
+        from_entity: "oe:permit"
+        field: "expires_at"
+        offset: "-7d"
+```
+
+**Singletons only** for the entity-field forms. Multi-cardinality types don't work — "which instance's deadline applies?" has no unambiguous answer. The plugin validator rejects non-singleton references at startup; the runtime resolver also defends against them. If you need per-instance deadlines, compute them in a handler and return a pre-formatted ISO string via `scheduled_for` (for tasks) or gate the activity via a custom status check.
+
+**Relative offsets from "now" are not supported** on deadlines. `"+20d"` at check time has no fixed anchor — the deadline would slide every time the check ran. Use an absolute ISO string or anchor to an entity field instead.
+
+**Anchor missing = rule inactive.** When a dict-form rule points at a singleton type the dossier doesn't have yet, the resolver returns `None` and the rule is treated as not firing. Combine with `requirements.entities: [oe:permit]` to gate the activity behind the anchor's existence:
+
+```yaml
+activities:
+  - name: "renewPermit"
+    requirements:
+      entities: ["oe:permit"]         # activity requires a permit to exist…
+    forbidden:
+      not_after:                      # …and can only run before it expires.
+        from_entity: "oe:permit"
+        field: "expires_at"
+```
+
+**Eligible-activities response.** When an activity declares a deadline rule and is currently eligible, the resolved ISO deadline is included in the allowed-activities response as a flat `not_before` / `not_after` field:
+
+```json
+{
+  "type": "renewPermit",
+  "label": "Renew Permit",
+  "not_after": "2026-12-31T00:00:00+00:00"
+}
+```
+
+Frontends can use it for "expires in 3 days" countdowns or disabled-but-visible hints. Fields are only present when the declaration resolves successfully — missing (for singleton-missing cases) rather than null.
+
+**Cache staleness.** The `eligible_activities` cache on the dossier row is invalidated on every activity execution, not on wall-clock passage. That means an activity whose `not_after` just ticked over stays in the cached list until something else runs in the dossier. The **execution path always does a fresh check** — if a user clicks the stale-but-now-expired activity, the engine returns 422 from the full `validate_workflow_rules` call. Stale list is a display concern; correctness is never stale.
 
 ### Access control — roles and authorization
 

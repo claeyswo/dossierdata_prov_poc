@@ -228,10 +228,12 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
     from .plugin import (
         validate_relation_declarations,
         validate_relation_validator_registrations,
+        validate_deadline_rules,
     )
     for plugin in registry.all_plugins():
         validate_relation_declarations(plugin.workflow)
         validate_relation_validator_registrations(plugin)
+        validate_deadline_rules(plugin.workflow)
 
     set_namespaces(ns_registry)
 

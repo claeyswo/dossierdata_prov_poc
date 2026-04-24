@@ -109,12 +109,14 @@ def _read_datetime_from_entity(
     resolved_entities: Mapping[str, Any],
     entity_type: str,
     field_path: str,
+    *,
+    context_name: str = "scheduled_for",
 ) -> datetime:
     """Resolve an entity field to an aware UTC datetime.
 
-    `resolved_entities` is the activity's state.resolved_entities:
-    a dict of entity_type → entity-like object (either a persisted
-    row or a ``_PendingEntity``). Each has a ``.content`` dict we
+    `resolved_entities` is a dict of entity_type → entity-like object
+    (a persisted row, a ``_PendingEntity``, or — for deadlines — a
+    freshly-fetched singleton row). Each has a ``.content`` dict we
     walk with dot notation, matching how authorization / finalization
     read entity fields.
 
@@ -124,14 +126,21 @@ def _read_datetime_from_entity(
     other shape (ints, None, missing field, missing entity) raises
     ValueError with a context-specific message so the 500 the engine
     wraps this in points the plugin author at the actual problem.
+
+    `context_name` is woven into every error message — defaults to
+    ``"scheduled_for"`` because that's the historical caller, but
+    deadline resolution passes ``"not_after"`` / ``"not_before"`` so
+    the error points to the rule the author actually wrote.
     """
     entity = resolved_entities.get(entity_type)
     if entity is None:
         raise ValueError(
-            f"scheduled_for references entity type {entity_type!r} "
-            f"but this activity doesn't use or generate it. Add "
-            f"{entity_type!r} to the activity's 'used' or 'generated' "
-            f"block, or compute the deadline in a handler instead."
+            f"{context_name} references entity type {entity_type!r} "
+            f"but it couldn't be resolved for this check. For "
+            f"scheduled_for, the entity must be in the activity's "
+            f"'used' or 'generated' block. For not_after/not_before, "
+            f"the entity must be a declared singleton and must exist "
+            f"in the dossier."
         )
 
     # Import locally to avoid a module-level circular (authorization
@@ -142,14 +151,14 @@ def _read_datetime_from_entity(
     content = getattr(entity, "content", None)
     if content is None:
         raise ValueError(
-            f"scheduled_for entity {entity_type!r} has no content "
+            f"{context_name} entity {entity_type!r} has no content "
             f"to read field {field_path!r} from"
         )
 
     raw = _resolve_field(content, field_path)
     if raw is None:
         raise ValueError(
-            f"scheduled_for field {field_path!r} on {entity_type!r} "
+            f"{context_name} field {field_path!r} on {entity_type!r} "
             f"is null or missing; a datetime is required"
         )
 
@@ -164,13 +173,13 @@ def _read_datetime_from_entity(
             return _parse_iso(raw)
         except ValueError as e:
             raise ValueError(
-                f"scheduled_for field {field_path!r} on {entity_type!r} "
+                f"{context_name} field {field_path!r} on {entity_type!r} "
                 f"is {raw!r}; expected an ISO 8601 datetime or date "
                 f"(e.g. '2026-05-01T12:00:00Z' or '2026-05-01')"
             ) from e
 
     raise ValueError(
-        f"scheduled_for field {field_path!r} on {entity_type!r} is "
+        f"{context_name} field {field_path!r} on {entity_type!r} is "
         f"{type(raw).__name__}; expected an ISO 8601 string"
     )
 
@@ -269,3 +278,127 @@ def resolve_scheduled_for(
     if dt.tzinfo is None:
         return dt.replace(tzinfo=timezone.utc).isoformat()
     return value
+
+
+# --------------------------------------------------------------------
+# Deadline resolution for workflow rules (not_after / not_before)
+# --------------------------------------------------------------------
+
+
+async def resolve_deadline(
+    value: str | dict | None,
+    plugin: "Any",
+    repo: "Any",
+    dossier_id: "Any",
+    *,
+    rule_name: str,
+) -> datetime | None:
+    """Resolve a workflow-rule deadline declaration to an aware UTC
+    datetime (or None if the rule is absent).
+
+    Used by ``validate_workflow_rules`` for ``forbidden.not_after`` and
+    ``requirements.not_before``. Three accepted forms — **no relative
+    offset from "now"**, because "now" at rule-evaluation time is not
+    a meaningful anchor for a deadline (the deadline would slide every
+    time the check ran).
+
+    - Absolute ISO 8601 — ``"2026-12-31T23:59:59Z"``.
+    - Entity field reference — ``{from_entity, field}``. The entity
+      **must be a singleton type** (plugin.is_singleton). The engine
+      fetches it via ``lookup_singleton``; if the dossier has no
+      instance, the rule is treated as "no deadline applies" and this
+      function returns None. Plugin validator rejects non-singleton
+      types at startup so this path never has to defend against them.
+    - Entity field + offset — ``{from_entity, field, offset}``. Same
+      singleton lookup, then the field value is shifted by the signed
+      offset (``+30d`` / ``-7d``).
+
+    Returns ``None`` when:
+      - ``value`` is None / empty (rule not declared).
+      - The singleton entity isn't in the dossier yet (rule can't
+        fire — no anchor to compute against). Callers treat this
+        as "deadline rule not active".
+
+    Raises ``ValueError`` when the declaration is malformed, when
+    the referenced type isn't a singleton, or when the field is
+    unparseable. ``validate_workflow_rules`` catches and wraps as a
+    422 so plugin authors get a clear error.
+    """
+    if value is None:
+        return None
+
+    # Absolute ISO 8601 form — no entity lookup needed.
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return None
+        # Reject relative offsets explicitly: the grammar doesn't
+        # include "+Nd from now" for deadlines.
+        if _OFFSET_PATTERN.match(s):
+            raise ValueError(
+                f"Invalid {rule_name} value {value!r}: relative "
+                f"offsets are not supported for deadlines (offset "
+                f"from 'now' has no fixed meaning in a deadline "
+                f"check). Use an absolute ISO 8601 datetime or a "
+                f"{{from_entity, field, offset?}} dict."
+            )
+        try:
+            return _parse_iso(s)
+        except ValueError as e:
+            raise ValueError(
+                f"Invalid {rule_name} value {value!r}: expected an "
+                f"ISO 8601 datetime (e.g. '2026-12-31T23:59:59Z') or "
+                f"a dict {{from_entity, field, offset?}}"
+            ) from e
+
+    if not isinstance(value, dict):
+        raise ValueError(
+            f"{rule_name} must be a string or a dict, got "
+            f"{type(value).__name__}: {value!r}"
+        )
+
+    # Dict form — entity field reference, optionally with offset.
+    try:
+        entity_type = value["from_entity"]
+        field_path = value["field"]
+    except KeyError as e:
+        raise ValueError(
+            f"{rule_name} dict form requires 'from_entity' and "
+            f"'field' keys; got {value!r}"
+        ) from e
+
+    # Singletons-only enforcement. The plugin validator also rejects
+    # non-singleton types at startup, but this runtime check protects
+    # against the case where someone bypassed the validator (direct
+    # Plugin construction in tests, workflow reload without restart,
+    # etc.). The two layers are deliberate.
+    if not plugin.is_singleton(entity_type):
+        raise ValueError(
+            f"{rule_name} references {entity_type!r}, which is "
+            f"not a singleton. Only singleton entity types can be "
+            f"used in deadline rules — for multi-cardinality types, "
+            f"'which instance's deadline applies' has no answer."
+        )
+
+    from .lookups import lookup_singleton
+    entity = await lookup_singleton(plugin, repo, dossier_id, entity_type)
+    if entity is None:
+        # Singleton not yet in the dossier → the deadline rule has
+        # no anchor and can't fire. Return None; caller treats that
+        # as "rule inactive for now". Plugins can still compose this
+        # with other rules (e.g. requirements.entities) to gate
+        # activities behind the existence of the entity.
+        return None
+
+    # Reuse the shared entity-datetime resolver — it already handles
+    # the content / field / type-check path. Pass our rule_name as
+    # context so errors point at the right rule.
+    base = _read_datetime_from_entity(
+        {entity_type: entity}, entity_type, field_path,
+        context_name=rule_name,
+    )
+
+    offset_str = value.get("offset")
+    if offset_str:
+        base = base + _parse_offset(offset_str)
+    return base
