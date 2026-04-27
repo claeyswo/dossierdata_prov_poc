@@ -37,11 +37,20 @@ from __future__ import annotations
 
 # Built-in RDF/PROV namespaces always available. `dossier:` is
 # handled specially (per-dossier template) by prov_iris.
+#
+# `system:` covers engine-provided entity and activity types
+# (system:task, system:note, system:exception). These types are
+# baked into the engine, not declared by plugin YAML, so plugins
+# can use them in their entity_types/used/generated lists without
+# also declaring the prefix in their `namespaces:` block. The IRI
+# anchors at the engine's own ontology root rather than any plugin's
+# domain — this is mechanism, not policy.
 _BUILTIN_NAMESPACES: dict[str, str] = {
     "prov": "http://www.w3.org/ns/prov#",
     "xsd": "http://www.w3.org/2001/XMLSchema#",
     "rdf": "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
     "rdfs": "http://www.w3.org/2000/01/rdf-schema#",
+    "system": "https://dossier-platform.example/vocab/system#",
 }
 
 

@@ -629,7 +629,9 @@ class TestComputeEligibleActivities:
         ])
 
         result = await compute_eligible_activities(plugin, repo, D1)
-        assert set(result) == {"a", "b", "c"}
+        assert {e["name"] for e in result} == {"a", "b", "c"}
+        # No exceptions in play → no entry should carry the field.
+        assert all("exempted_by_exception" not in e for e in result)
 
     async def test_non_client_callable_excluded(self, repo):
         """Activities marked `client_callable: false` are
@@ -644,8 +646,9 @@ class TestComputeEligibleActivities:
         ])
 
         result = await compute_eligible_activities(plugin, repo, D1)
-        assert set(result) == {"a", "b"}
-        assert "internal" not in result
+        names = {e["name"] for e in result}
+        assert names == {"a", "b"}
+        assert "internal" not in names
 
     async def test_failing_workflow_rules_excludes(self, repo):
         """Activities whose structural preconditions fail don't
@@ -658,8 +661,9 @@ class TestComputeEligibleActivities:
         ])
 
         result = await compute_eligible_activities(plugin, repo, D1)
-        assert "a" in result
-        assert "b" not in result
+        names = {e["name"] for e in result}
+        assert "a" in names
+        assert "b" not in names
 
 
 class TestFilterByUserAuth:
@@ -676,7 +680,7 @@ class TestFilterByUserAuth:
         ])
 
         result = await filter_by_user_auth(
-            plugin, ["a", "b"], _user(), repo, D1,
+            plugin, [{"name": "a"}, {"name": "b"}], _user(), repo, D1,
         )
 
         assert result == [
@@ -700,7 +704,7 @@ class TestFilterByUserAuth:
         ])
 
         result = await filter_by_user_auth(
-            plugin, ["a", "b"], _user(), repo, D1,
+            plugin, [{"name": "a"}, {"name": "b"}], _user(), repo, D1,
         )
 
         assert [a["type"] for a in result] == ["b"]
@@ -715,7 +719,7 @@ class TestFilterByUserAuth:
         ])
 
         result = await filter_by_user_auth(
-            plugin, ["a", "ghost"], _user(), repo, D1,
+            plugin, [{"name": "a"}, {"name": "ghost"}], _user(), repo, D1,
         )
 
         assert [a["type"] for a in result] == ["a"]
@@ -740,7 +744,7 @@ class TestFilterByUserAuth:
         }])
 
         result = await filter_by_user_auth(
-            plugin, ["renew"], _user(), repo, D1,
+            plugin, [{"name": "renew"}], _user(), repo, D1,
         )
 
         assert len(result) == 1
@@ -763,7 +767,7 @@ class TestFilterByUserAuth:
         }])
 
         result = await filter_by_user_auth(
-            plugin, ["earlyAction"], _user(), repo, D1,
+            plugin, [{"name": "earlyAction"}], _user(), repo, D1,
         )
 
         assert len(result) == 1
@@ -784,7 +788,7 @@ class TestFilterByUserAuth:
         }])
 
         result = await filter_by_user_auth(
-            plugin, ["windowedAction"], _user(), repo, D1,
+            plugin, [{"name": "windowedAction"}], _user(), repo, D1,
         )
 
         assert len(result) == 1
@@ -804,7 +808,7 @@ class TestFilterByUserAuth:
         }])
 
         result = await filter_by_user_auth(
-            plugin, ["plain"], _user(), repo, D1,
+            plugin, [{"name": "plain"}], _user(), repo, D1,
         )
 
         assert result == [{"type": "plain", "label": "plain"}]
@@ -850,7 +854,7 @@ class TestFilterByUserAuth:
         )
 
         result = await filter_by_user_auth(
-            plugin, ["renew"], _user(), repo, D1,
+            plugin, [{"name": "renew"}], _user(), repo, D1,
         )
 
         assert len(result) == 1
@@ -880,7 +884,7 @@ class TestFilterByUserAuth:
         )
 
         result = await filter_by_user_auth(
-            plugin, ["renew"], _user(), repo, D1,
+            plugin, [{"name": "renew"}], _user(), repo, D1,
         )
 
         # Activity is still eligible (rule treated as inactive when

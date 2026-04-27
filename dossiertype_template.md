@@ -945,6 +945,34 @@ activities:
 
 ---
 
+## Engine-provided activities
+
+The engine auto-registers two activity-set features that any workflow can opt into. Both follow the same pattern: a top-level YAML block declares which roles may use the feature; the engine handles everything else — entity types, activity definitions, validators, handlers, pipeline phases.
+
+### Tombstone
+
+```yaml
+tombstone:
+  allowed_roles: ["beheerder"]
+```
+
+Registers a `tombstone` activity that redacts entities (nulls content, stamps `tombstoned_by`) and produces replacement rows. Omit the block to disable.
+
+### Exception grants
+
+```yaml
+exceptions:
+  grant_allowed_roles: ["beheerder"]
+  retract_allowed_roles: ["beheerder"]
+```
+
+Registers `grantException`, `retractException`, `consumeException` and the `system:exception` entity type. Lets an administrator legally authorize one-shot bypass of the workflow-rules layer (`requirements` / `forbidden` / `not_before` / `not_after`) for a specific activity. Single-use by default — when the exempted activity runs, the engine auto-injects `consumeException` to flip the exception's status from `active` to `consumed`. See the Plugin Guidebook's "Exception grants" reference entry for the lifecycle.
+
+The `system:exception` Pydantic model lives in `dossier_engine.entities` (`Exception_` class). Its `status` field is required, no default — every grant payload must send `status: "active"` explicitly. This is a PROV invariant: the engine validates content but doesn't persist Pydantic-coerced output, so a default here would produce stored content that doesn't match what the agent submitted.
+
+---
+
+
 ## Task Functions
 
 Task functions are defined in the plugin's `tasks/` module and referenced from the

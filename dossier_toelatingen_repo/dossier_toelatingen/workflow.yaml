@@ -147,6 +147,17 @@ authorization:
 tombstone:
   allowed_roles: ["beheerder"]
 
+# Built-in exception-grant activities. The engine registers
+# `grantException`, `retractException`, and `consumeException` for
+# every workflow that opts in here; `grant_allowed_roles` and
+# `retract_allowed_roles` declare which roles may call them (consume
+# is system-only and always system-authorized). Absent block =
+# exceptions not registered for this workflow (deny by default, same
+# convention as tombstone).
+exceptions:
+  grant_allowed_roles: ["beheerder"]
+  retract_allowed_roles: ["beheerder"]
+
 # Static reference data served via GET /{workflow}/reference/{list_name}.
 # Loaded into memory at startup, sub-millisecond response, no DB hit.
 reference_data:

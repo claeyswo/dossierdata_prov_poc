@@ -1172,7 +1172,9 @@ The test script (`test_requests.sh`) creates 9 dossiers:
 
 - **D9 — Tombstone.** Full shape check: the tombstone activity accepts one or more versions of a single logical entity in `used`, nulls their content, stamps `tombstoned_by`, and produces a generated replacement row. GETs on a tombstoned version 301-redirect to the live replacement. Re-tombstoning a later version is allowed.
 
-Expected result: **25 OKs, 0 failures.**
+- **D10 — Exception grants.** End-to-end legally-audited bypass lifecycle: a beheerder grants a `system:exception` for `oe:trekAanvraagIn` (blocked by status rule in this dossier), the read-side eligibility computation surfaces the activity in `allowedActivities` with an `exempted_by_exception` field naming the exception's version_id (so frontends can render "via exception" badging or confirmation prompts before consuming the single-use bypass), the aanvrager then runs the blocked activity and succeeds via the bypass, the engine auto-injects a `consumeException` side-effect that revises the exception to `status: consumed`, the beheerder re-grants via a revision of the same logical entity (same `entity_id`), and finally retracts it — ending with `status: cancelled`. Exercises `check_exceptions`, used-list injection, side-effect auto-injection, per-activity uniqueness, activity-field immutability across revisions, and bidirectional read/write consistency (eligibility surfacing matches bypass execution). The whole exception mechanism (model, three activities, validator, two handlers, bypass phase, eligibility surfacing) lives in the engine — toelatingen opts in via a 3-line `exceptions:` block in its workflow YAML.
+
+Expected result: **36 OKs, 0 failures.**
 
 ### Running the full test suite from scratch
 

@@ -23,6 +23,7 @@ dossier_engine/
 ├── migrations.py              — data migration framework
 ├── archive/                   — PDF/A-3 archive generation
 ├── auth/                      — authentication middleware
+├── builtins/                  — engine-provided plugin-agnostic features (exception grants)
 ├── db/                        — Postgres rows, repository, session, graph loader, Alembic runner
 ├── engine/                    — activity execution pipeline
 ├── observability/             — audit logging + Sentry integration
@@ -307,6 +308,81 @@ Re-exported by `dossier_engine.app` for back-compat.
 
 ---
 
+## `builtins/` — engine-provided plugin-agnostic features
+
+```
+builtins/
+├── __init__.py        — package marker; explains the subpackage's role
+└── exceptions.py      — exception-grant validator + handlers + overlay helper
+```
+
+Mechanism, not policy. Each module here implements a feature that
+plugins opt into via a top-level YAML block — the engine handles
+everything else (entity types, activity definitions, validators,
+handlers, pipeline phase wiring). Currently only one module:
+
+### `exceptions.py` (~270 lines)
+
+Implements the exception-grant lifecycle. A plugin opts in by adding
+an `exceptions:` block to its workflow YAML:
+
+```yaml
+exceptions:
+  grant_allowed_roles: ["beheerder"]
+  retract_allowed_roles: ["beheerder"]
+```
+
+This module exports:
+
+* `valideer_exception(context)` — validator wired onto
+  `grantException` and `retractException`. Enforces (1) submitted
+  status must be `"active"` (a missing field rejects with a 422
+  pointing at the PROV-no-default rule), (2) the `activity` field
+  names a declared workflow activity, (3) at most one logical
+  `system:exception` per activity in the dossier across all time —
+  re-grants must revise the existing entity_id, (4) the `activity`
+  field is immutable across revisions.
+
+* `handle_consume_exception(context, content)` — auto-fired
+  side-effect handler. Reads the `system:exception` from the trigger
+  activity's used scope (where `check_exceptions` injected it),
+  returns a revision with `status: "consumed"` preserving all other
+  content fields. Multi-cardinality means the handler must supply
+  `entity_id` and `derived_from` explicitly to avoid creating a
+  parallel exception entity.
+
+* `handle_retract_exception(context, content)` — admin-initiated
+  cancel. Same revision shape, forces `status: "cancelled"`. Raises
+  422 if no exception is in the used block — silent no-op would
+  let the retract "succeed" without changing anything, which is
+  worse than a loud failure.
+
+* `register_exception_activities_on_plugin(plugin)` — overlay helper
+  shared between production (`app.py`'s `load_config_and_registry`)
+  and test fixtures that build Plugin instances directly. Reads the
+  plugin's `workflow["exceptions"]` block and (if present) appends
+  the three engine-provided activity defs to the plugin's activities
+  list with `allowed_roles` / `authorization.roles` / `default_role`
+  overlaid from the plugin's grant/retract role configuration,
+  registers `system:exception` in `plugin.entity_models`, and wires
+  the three callables above into `plugin.handlers` /
+  `plugin.validators` under their dotted-path keys (so the engine's
+  callable-registry lookup finds them through the normal path —
+  no special-case dispatch in the pipeline). One source of truth
+  for the overlay; tests can't drift from production behavior by
+  forgetting to inject one of the callables.
+
+The activity defs themselves (`GRANT_EXCEPTION_ACTIVITY_DEF`,
+`RETRACT_EXCEPTION_ACTIVITY_DEF`, `CONSUME_EXCEPTION_ACTIVITY_DEF`)
+live in `dossier_engine/entities.py` next to `TOMBSTONE_ACTIVITY_DEF`,
+since they're constants — same convention as the tombstone def.
+
+The pipeline phase that detects bypass-eligibility lives in
+`engine/pipeline/exceptions.py` (see below); it's a separate concern
+from this module's validators/handlers.
+
+---
+
 ## `db/` — Postgres rows, repository, session, graph loader, Alembic
 
 ```
@@ -539,44 +615,58 @@ Phase order:
 3. `authorize` — `authorize_activity` over the activity's
    authorization block.
 4. `resolve_role` — default or validate the PROV functional role.
-5. `check_workflow_rules` — `validate_workflow_rules` against
+5. `check_exceptions` — new phase: peek at workflow rules;
+   if they would fail AND an active matching `system:exception`
+   exists, set `state.exempted_by_exception` and inject the
+   exception into the activity's used-refs. Bypass-or-nothing:
+   no-op when rules pass, leaving granted exceptions untouched
+   for future use.
+6. `check_workflow_rules` — `validate_workflow_rules` against
    `requirements`/`forbidden` blocks; skipped on the very first
-   activity of a brand-new dossier.
-6. `resolve_used` — turn raw used refs into `EntityRow` objects,
+   activity of a brand-new dossier AND when `exempted_by_exception`
+   is set (the bypass made the rules check moot for this run).
+7. `resolve_used` — turn raw used refs into `EntityRow` objects,
    persist externals, auto-resolve system-caller slots.
-7. `enforce_used_generated_disjoint` — structural check that a
+8. `enforce_used_generated_disjoint` — structural check that a
    logical entity isn't in both blocks.
-8. `process_generated` — type gate, derivation validation, schema
+9. `process_generated` — type gate, derivation validation, schema
    version resolution, content validation, pending-entity
    registration.
-9. `process_relations` — parse + dispatch-by-kind + validator
-   firing.
-10. `run_custom_validators` — activity-declared YAML validators.
-11. `validate_tombstone` — shape-check for the built-in tombstone
+10. `process_relations` — parse + dispatch-by-kind + validator
+    firing.
+11. `run_custom_validators` — activity-declared YAML validators.
+12. `validate_tombstone` — shape-check for the built-in tombstone
     activity (no-op otherwise).
-12. `create_activity_row` — `ensure_agent`, then persist the
+13. `create_activity_row` — `ensure_agent`, then persist the
     activity + `wasAssociatedWith` association.
-13. `run_handler` — invoke the activity's handler if any, append
+14. `run_handler` — invoke the activity's handler if any, append
     handler-generated entities, stash `handler_result`.
-14. `run_split_hooks` — invoke `status_resolver` / `task_builders`
+15. `run_split_hooks` — invoke `status_resolver` / `task_builders`
     if the activity opted into the split style.
-15. `persist_outputs` — local generated entities, externals,
+16. `persist_outputs` — local generated entities, externals,
     tombstone redactions, `used` links, relation rows, domain
     relations (add + supersede).
-16. `determine_status` — resolve the literal / handler / mapped
+17. `determine_status` — resolve the literal / handler / mapped
     status and stamp `activity_row.computed_status`.
-17. `flush` + `execute_side_effects` — recursive side-effect chain
-    (up to depth 10).
-18. `process_tasks` — schedule recorded/scheduled/cross-dossier
+18. `flush` + `execute_side_effects` — recursive side-effect chain
+    (up to depth 10). When `state.exempted_by_exception` is set,
+    the orchestrator looks up the workflow's qualified name for the
+    engine-provided `consumeException` activity (via
+    `plugin.find_activity_def("consumeException")`, which does local-
+    name matching so it works regardless of default prefix) and
+    appends `{"activity": <qualified_name>}` to the effective list.
+    Workflow-agnostic mechanical enforcement of the single-use-by-
+    default contract — plugin authors can't accidentally opt out.
+19. `process_tasks` — schedule recorded/scheduled/cross-dossier
     tasks, fire-and-forget inline execution.
-19. `cancel_matching_tasks` — cancel prior scheduled tasks whose
+20. `cancel_matching_tasks` — cancel prior scheduled tasks whose
     `cancel_if_activities` includes the current activity.
-20. `run_pre_commit_hooks` — plugin-declared synchronous hooks;
+21. `run_pre_commit_hooks` — plugin-declared synchronous hooks;
     exceptions propagate and roll the whole activity back.
-21. `finalize_dossier` — derive status, call `post_activity_hook`,
+22. `finalize_dossier` — derive status, call `post_activity_hook`,
     cache status + eligible activities, compute user-filtered
     allowed list. Skipped on the bulk path.
-22. `build_full_response` — assemble the JSON-serializable response.
+23. `build_full_response` — assemble the JSON-serializable response.
 
 Also re-exports every public pipeline symbol so callers can import
 `execute_activity`, `ActivityError`, `ActivityContext`,
@@ -779,7 +869,12 @@ legacy string-based call sites still compare equal).
 
 `ActivityState` fields are grouped as inputs (set by the
 orchestrator from request parameters) and phase outputs (each one
-documented with which phase produces it).
+documented with which phase produces it). One phase-bridge field
+worth flagging: `exempted_by_exception: UUID | None` — set by
+`check_exceptions` when a bypass fires, read by
+`check_workflow_rules` (to skip its raise) and by the orchestrator
+(to auto-append `consumeException` to the effective side-effects
+list).
 
 ---
 
@@ -796,6 +891,7 @@ pipeline/
 ├── persistence.py     — create_activity_row + persist_outputs
 ├── preconditions.py   — check_idempotency, ensure_dossier, authorize, resolve_role,
 │                        check_workflow_rules
+├── exceptions.py      — check_exceptions (bypass-or-nothing for system:exception)
 ├── split_hooks.py     — run_split_hooks (status_resolver + task_builders)
 ├── tasks.py           — process_tasks + cancel_matching_tasks + supersession
 ├── tombstone.py       — validate_tombstone (shape rules for the built-in activity)
@@ -997,8 +1093,59 @@ can proceed at all.
   rejects 422 if the supplied role isn't in `allowed_roles`.
 - `check_workflow_rules(state)` — runs `validate_workflow_rules`,
   skipped on the very first activity of a brand-new dossier (no
-  prior activities to satisfy `requirements.activities`). 409 on
-  violation.
+  prior activities to satisfy `requirements.activities`) AND
+  when `state.exempted_by_exception` is set by the preceding
+  `check_exceptions` phase. 409 on violation.
+
+### `engine/pipeline/exceptions.py` (~190 lines)
+
+Two pieces:
+
+* The `check_exceptions(state)` phase, inserted between `resolve_role`
+  and `check_workflow_rules` by the orchestrator. Implements the
+  bypass-or-nothing contract for `system:exception` entities (see
+  bullet list below).
+* The `find_active_exception_for_activity(repo, dossier_id,
+  activity_name, now)` module-level helper, the single source of
+  truth for the matching predicate. Shared between this phase
+  (write-side bypass) and `compute_eligible_activities` (read-side
+  surfacing in `GET /dossiers/{id}.allowedActivities`). Without the
+  shared helper, eligibility and execution could drift on the
+  activity-name comparison, status filter, or deadline semantics —
+  the frontend could be told an activity is runnable that actually
+  isn't, or vice versa. The helper takes plain
+  `(repo, dossier_id, activity_name, now=None)` arguments rather
+  than an `ActivityState` so the eligibility computation (which has
+  no state object) can call it.
+
+Phase semantics:
+
+- Peeks at `validate_workflow_rules` internally. If rules pass →
+  no-op; granted exceptions stay on ice until something's actually
+  blocking.
+- If rules would fail AND `find_active_exception_for_activity`
+  returns a match (active, non-expired, qualified-name match on
+  `content.activity`), sets `state.exempted_by_exception` to the
+  exception's version_id and appends the exception to
+  `state.used_refs` / `state.resolved_entities` /
+  `state.used_rows_by_ref`. That usage edge in the PROV graph is
+  what unlocks `consumeException`'s auto-resolve (its
+  `used: [system:exception, auto_resolve: latest]` slot fills from
+  the trigger's used list).
+- Short-circuits on the first activity of a fresh dossier —
+  structurally identical to the check_workflow_rules skip and
+  necessary for the same reason.
+- Expired-deadline semantics match `forbidden.not_after`:
+  `>=` makes the deadline exclusive (the last valid instant is
+  one tick before the declared one).
+- Malformed `granted_until` values are treated as not-a-match;
+  the plugin validator should catch them at grant time, but the
+  phase doesn't crash if something slips through.
+
+Entity-ref format for the injected used entry is the shorthand
+`prefix:type/<entity_id>@<version_id>` (no `local:` prefix).
+Producing a non-parseable ref here would break downstream
+`EntityRef.parse` calls.
 
 ### `engine/pipeline/split_hooks.py` (117 lines)
 
@@ -1133,28 +1280,59 @@ phases themselves:
 - `identity.py` — `resolve_handler_generated_identity` (shared by
   the handler phase and the side-effect persistence helper).
 
-### `engine/pipeline/_helpers/eligibility.py` (152 lines)
+### `engine/pipeline/_helpers/eligibility.py` (~205 lines)
 
 Two layers of eligibility.
 
 - `compute_eligible_activities(plugin, repo, dossier_id,
   known_status=None)` — loops over every `client_callable` activity
   in the workflow, runs `validate_workflow_rules` against current
-  dossier state, returns names. Result depends only on dossier
-  state (not on user), so it's safe to cache on the dossier row.
-  Passes `plugin` through so deadline rules (`not_before` /
-  `not_after`) are evaluated — activities past their `not_after`
-  or before their `not_before` drop out of the eligible list.
+  dossier state. Returns `list[dict]`: each entry is
+  `{"name": <qualified>}` plus an optional
+  `"exempted_by_exception": <version_id_str>` when the activity
+  passes only thanks to a granted exception. The dict shape is the
+  durable answer — frontends often need to know *why* an activity
+  is eligible to render appropriate UI (a confirmation prompt
+  before consuming a single-use bypass, for instance). Result
+  depends only on dossier state (not on user), so it's safe to
+  cache on the dossier row.
+
+  Exception-aware branch: when `validate_workflow_rules` returns
+  invalid, calls
+  `pipeline.exceptions.find_active_exception_for_activity` —
+  the same predicate `check_exceptions` runs at activity-time. If
+  it finds a match, the activity is added to the eligible list with
+  the exception's version_id in `exempted_by_exception`. Eligibility
+  surfacing and bypass execution use one source of truth, so
+  they can't drift on activity-name comparison, status filter, or
+  deadline semantics. Without this, granted exceptions would be
+  invisible to the frontend — the user would see no "you can do this"
+  affordance for the very activity the exception was granted to
+  unblock.
+
+  The cost of the new branch: one extra DB read per
+  rules-failing activity to look up the exception. For typical
+  dossiers most activities fail rules (only a handful are eligible
+  at any time), so this multiplies the failing-rule activities by
+  one query each. Mitigations: cache hit rates on the
+  `eligible_activities` row are high; the lookup short-circuits on
+  the at-most-one-per-activity invariant.
+
 - `filter_by_user_auth(plugin, eligible, user, repo, dossier_id)` —
-  cheap per-request filter. Returns
-  `[{type, label, not_before?, not_after?}, ...]`. The optional
-  deadline fields are ISO strings, present only when the activity
-  declares the corresponding rule AND it resolves successfully
-  (singleton missing → field absent). Frontends use them for
-  "expires in 3 days" countdowns and disabled-but-visible hints.
-  Resolves each declared rule once via `resolve_deadline`, so
-  dict-form rules hit `lookup_singleton` once per activity — minor
-  cost given the typical activity count and singleton cache hits.
+  cheap per-request filter. Input is the dict-shape list from
+  `compute_eligible_activities`. Returns
+  `[{type, label, not_before?, not_after?, exempted_by_exception?},
+  ...]`. The optional `not_before` / `not_after` fields are ISO
+  strings; the `exempted_by_exception` field is the version_id of
+  the granting exception. All three appear only when applicable
+  — absence is a meaningful signal ("no relevant deadline / no
+  exception involved"). Resolves each declared deadline rule once
+  via `resolve_deadline`. The exception field passes through from
+  input to output unchanged; auth filtering doesn't gate on it
+  (exceptions never confer role-elevation, only rule-bypass — a
+  user who can't call the activity in principle still can't call
+  it via exception, which is correct).
+
 - `derive_allowed_activities(plugin, repo, dossier_id, user)` —
   convenience wrapper that combines both. Used when no cache is
   available (replay responses, first-time response shaping).
@@ -1163,10 +1341,13 @@ Two layers of eligibility.
 row is invalidated on every activity execution, not on wall-clock
 passage. An activity whose `not_after` ticks over while the
 dossier is dormant stays in the cached list until the next activity
-runs. Acceptable because the execution path always runs
-`validate_workflow_rules` fresh — clicking a stale-listed expired
-activity returns 422, never runs the activity. Cache is a display
-optimisation; correctness is never stale.
+runs. Same applies to exception expiry: an exception whose
+`granted_until` passes while the dossier is dormant stays "active"
+in the cached eligibility list. Acceptable because the execution
+path always runs `validate_workflow_rules` and re-evaluates the
+exception fresh — clicking a stale-listed expired activity returns
+422, never runs the activity. Cache is a display optimisation;
+correctness is never stale.
 
 ### `engine/pipeline/_helpers/identity.py` (110 lines)
 

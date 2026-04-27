@@ -5,6 +5,8 @@ These are shared across all workflow plugins.
 
 from __future__ import annotations
 
+from enum import Enum
+
 from pydantic import BaseModel
 from typing import Literal, Optional, Union
 
@@ -187,3 +189,181 @@ class SystemNote(BaseModel):
     """Content model for system:note entities — describes why a systemAction was performed."""
     text: str
     ticket: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Exception grants — engine-provided entity type
+# ---------------------------------------------------------------------------
+# Exceptions let a workflow's administrator legally authorize one-shot
+# bypass of the workflow-rules layer (requirements / forbidden /
+# not_before / not_after) for a specific activity. The mechanism is
+# workflow-agnostic: plugins opt in by declaring `exceptions:` at the
+# top level of their workflow YAML with grant_allowed_roles and
+# retract_allowed_roles. Everything else — the entity type, the three
+# activities, the validator, the bypass phase — is engine-provided.
+# See docs/plugin_guidebook.md under "Exception grants" for the full
+# lifecycle.
+#
+# One logical oe:exception per (activity) in a dossier, across all
+# time. Re-grants after consume or cancel are revisions of the same
+# entity_id. The status field is REQUIRED (no default) — PROV
+# integrity: the engine validates submissions but does not inject
+# defaults into stored content, so a default would mean "engine
+# silently fabricated an assertion the agent never made."
+
+
+class ExceptionStatus(str, Enum):
+    active = "active"
+    consumed = "consumed"
+    cancelled = "cancelled"
+
+
+class Exception_(BaseModel):
+    """Content model for ``system:exception`` entities.
+
+    Trailing underscore because ``Exception`` is a Python builtin —
+    shadowing it inside the engine package would be unfortunate. Every
+    reference site uses ``Exception_`` explicitly.
+    """
+    # The activity this exception grants a bypass for. Stored in
+    # qualified form (``oe:trekAanvraagIn``, not ``trekAanvraagIn``).
+    # The engine compares against qualified activity names; the
+    # validator auto-qualifies bare names at grant time so stored
+    # content is always canonical.
+    activity: str
+
+    # Deadline past which the exception auto-invalidates. ``None`` is
+    # a meaningful assertion — "no deadline, active until consumed or
+    # cancelled." This is one of the few fields where a default is
+    # OK: absence genuinely means "no deadline applies."
+    granted_until: Optional[str] = None  # ISO 8601 datetime
+
+    # Free-text justification. Required — this is the audit trail the
+    # whole exception mechanism exists for.
+    reason: str
+
+    # Lifecycle status. REQUIRED — no default. See the module-level
+    # docstring for why; summarizing: the engine's content-validation
+    # phase validates but does not persist coerced content, so a
+    # default here would falsify PROV.
+    status: ExceptionStatus
+
+
+# ---------------------------------------------------------------------------
+# Exception grant activities
+# ---------------------------------------------------------------------------
+# Three built-in activities for the exception lifecycle. Registered
+# per-workflow at app boot based on the YAML's top-level ``exceptions:``
+# block:
+#
+#   exceptions:
+#     grant_allowed_roles: ["beheerder"]
+#     retract_allowed_roles: ["beheerder"]
+#
+# Absence of the block = exceptions not registered for this workflow
+# (deny by default, same convention as tombstone). ``consumeException``
+# is system-only and doesn't take a configurable role — it's auto-
+# invoked by the engine as a side-effect of an exception-bypassed
+# activity, never user-callable.
+#
+# Authorization on the activity defs is left with empty ``roles: []``;
+# the loader overlays the plugin-supplied roles at boot time. Default
+# deny-all is enforced by the empty list, same as tombstone.
+
+GRANT_EXCEPTION_ACTIVITY_DEF = {
+    "name": "grantException",
+    "label": "Grant exception",
+    "description": (
+        "Administratively authorize bypass of the workflow-rules layer "
+        "(requirements / forbidden / not_before / not_after) for a "
+        "specific activity on this dossier. See the Plugin Guidebook's "
+        "\"Exception grants\" section for the full lifecycle. Creates "
+        "a fresh system:exception for activities never previously "
+        "granted one; revises the existing entity for subsequent "
+        "grants (same entity_id, new version_id, derivedFrom pointing "
+        "at the prior version)."
+    ),
+    "built_in": True,
+    "can_create_dossier": False,
+    "client_callable": True,
+    "default_role": "granter",
+    "allowed_roles": ["granter"],
+    # Overlaid at app boot from ``workflow.exceptions.grant_allowed_roles``.
+    # Empty default enforces deny-all for workflows that don't opt in.
+    "authorization": {"access": "roles", "roles": []},
+    "used": [],
+    "generates": ["system:exception"],
+    "status": None,
+    "validators": [
+        {
+            "name": "dossier_engine.builtins.exceptions.valideer_exception",
+            "description": (
+                "Enforces at-most-one-logical-exception-per-activity, "
+                "activity immutability across revisions, required "
+                "status=active on submission, and declared-activity "
+                "name check."
+            ),
+        },
+    ],
+    "side_effects": [],
+    "tasks": [],
+}
+
+RETRACT_EXCEPTION_ACTIVITY_DEF = {
+    "name": "retractException",
+    "label": "Retract exception",
+    "description": (
+        "Administratively cancel a granted exception. The client "
+        "supplies the system:exception reference in the used block; "
+        "the handler revises it with status=cancelled, preserving "
+        "the activity and reason fields for audit."
+    ),
+    "built_in": True,
+    "can_create_dossier": False,
+    "client_callable": True,
+    "default_role": "granter",
+    "allowed_roles": ["granter"],
+    # Overlaid at app boot from ``workflow.exceptions.retract_allowed_roles``.
+    "authorization": {"access": "roles", "roles": []},
+    "used": [{"type": "system:exception"}],
+    "generates": [],
+    "status": None,
+    "handler": "dossier_engine.builtins.exceptions.handle_retract_exception",
+    "validators": [
+        {
+            "name": "dossier_engine.builtins.exceptions.valideer_exception",
+            "description": (
+                "No-op on retract's empty generated block; shared with "
+                "grantException to keep the invariant dispatch uniform."
+            ),
+        },
+    ],
+    "side_effects": [],
+    "tasks": [],
+}
+
+CONSUME_EXCEPTION_ACTIVITY_DEF = {
+    "name": "consumeException",
+    "label": "Consume exception",
+    "description": (
+        "System-only activity. The engine auto-injects this as a "
+        "side-effect whenever an exempted activity runs, revising the "
+        "system:exception with status=consumed. Never user-callable — "
+        "the mechanical enforcement of single-use-by-default."
+    ),
+    "built_in": True,
+    "can_create_dossier": False,
+    "client_callable": False,
+    "default_role": "systeem",
+    "allowed_roles": ["systeem"],
+    "authorization": {"access": "roles", "roles": [{"role": "systeem"}]},
+    "used": [
+        {"type": "system:exception", "auto_resolve": "latest"},
+    ],
+    "generates": [],
+    "status": None,
+    "handler": "dossier_engine.builtins.exceptions.handle_consume_exception",
+    "validators": [],
+    "side_effects": [],
+    "tasks": [],
+}

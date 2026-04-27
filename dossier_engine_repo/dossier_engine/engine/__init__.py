@@ -32,6 +32,7 @@ from .pipeline.preconditions import (
     ensure_dossier,
     resolve_role,
 )
+from .pipeline.exceptions import check_exceptions
 from .pipeline.generated import process_generated
 from .pipeline.finalization import (
     build_full_response,
@@ -144,6 +145,11 @@ async def execute_activity(
     await ensure_dossier(state)
     await authorize(state)
     resolve_role(state)
+    # Exception grants may legally bypass the structural workflow
+    # rules on the next line. This phase is a no-op for activities
+    # without a matching active oe:exception. See
+    # ``pipeline/exceptions.py`` for the lifecycle.
+    await check_exceptions(state)
     await check_workflow_rules(state)
 
     # Resolve the activity's `used` block: turn raw refs into EntityRows,
@@ -208,12 +214,51 @@ async def execute_activity(
     # via a pared-down version of this same pipeline. Side effects
     # carry their own role and run as the system caller.
     await repo.session.flush()
+
+    # Build the effective side-effects list. When the activity ran
+    # thanks to an exception bypass (``state.exempted_by_exception``
+    # set by ``check_exceptions``), the engine unconditionally
+    # appends a ``consumeException`` side-effect to revise the
+    # exception with ``status: consumed``. This is mechanical —
+    # plugin authors don't declare it per exception-eligible
+    # activity, and can't accidentally opt out of single-use
+    # semantics. The ``consumeException`` activity's handler auto-
+    # resolves ``system:exception`` from the trigger's used list (which
+    # ``check_exceptions`` populated), so the side-effect runner
+    # finds the right exception without any extra plumbing.
+    #
+    # Resolve to the qualified name the plugin actually has on the
+    # activity def (e.g. ``oe:consumeException`` in toelatingen,
+    # ``pa:consumeException`` in a hypothetical premies plugin), not
+    # the bare ``consumeException`` — the side-effect executor
+    # persists the activity row's type field with whatever string we
+    # pass here, and PROV consumers expect qualified activity types
+    # consistently. ``find_activity_def`` matches by local name, so
+    # passing the bare name and reading back the registered def's
+    # full name is the clean way to get the qualified form.
+    effective_side_effects = list(activity_def.get("side_effects", []))
+    if state.exempted_by_exception is not None:
+        consume_def = plugin.find_activity_def("consumeException")
+        if consume_def is not None:
+            effective_side_effects.append({"activity": consume_def["name"]})
+        else:
+            # The plugin didn't opt into exceptions but we somehow
+            # got a bypass. check_exceptions only fires bypass when
+            # an active exception is found, which requires the
+            # entity type (and thus the mechanism) to be registered
+            # — so this branch is unreachable in practice. Append
+            # the bare name as a last resort; the side-effect
+            # executor will 404 on lookup and the parent activity
+            # will roll back, which is the right behavior for an
+            # internally-inconsistent state.
+            effective_side_effects.append({"activity": "consumeException"})
+
     await execute_side_effects(
         plugin=plugin,
         repo=repo,
         dossier_id=dossier_id,
         trigger_activity_id=activity_id,
-        side_effects=activity_def.get("side_effects", []),
+        side_effects=effective_side_effects,
         # Side effects run as the system caller (see the two-field
         # attribution model on ``ActivityContext``). The triggering
         # user is the one who made the request that spawned the

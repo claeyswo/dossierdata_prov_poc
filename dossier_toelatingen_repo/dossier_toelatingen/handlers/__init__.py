@@ -348,6 +348,8 @@ async def duid_behandelaar_aan(context: ActivityContext, content: dict | None) -
     )
 
 
+
+
 # Obs 95 / Round 28: registry dicts (``HANDLERS``, ``STATUS_RESOLVERS``,
 # ``TASK_BUILDERS``, ``SIDE_EFFECT_CONDITIONS``) previously lived here
 # and were passed to ``Plugin(...)`` by ``create_plugin()``. They've

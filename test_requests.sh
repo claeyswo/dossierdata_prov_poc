@@ -1592,3 +1592,296 @@ print('  OK: re-tombstoning the replacement is allowed (200)')
 echo ""
 
 echo "D9 summary: tombstone mechanism verified end-to-end"
+
+# ============================================================================
+# DOSSIER 10: exception grant lifecycle
+# ============================================================================
+# Validates the system:exception mechanism end-to-end with a real
+# blocked activity (oe:trekAanvraagIn).
+#
+# After a successful dienAanvraagIn the dossier is in status
+# ``klaar_voor_behandeling`` (via the chain: dienAanvraagIn →
+# duidVerantwoordelijkeOrganisatieAan → setSystemFields). But
+# ``oe:trekAanvraagIn`` requires ``aanvraag_onvolledig`` — so it
+# legitimately 409s from this state, giving us a clean blocked
+# activity for the exception scenario.
+#
+# PROV-first design note: we explicitly send ``status: "active"``
+# in every grant payload. The engine's content-validation phase
+# only VALIDATES submissions (it doesn't coerce defaults into the
+# stored content) — so stored system:exception content equals the
+# agent's literal assertion, nothing more. A default-filled status
+# would be an engine-invented claim the granting agent never
+# actually made.
+#
+# Flow:
+#   1. dienAanvraagIn — dossier ends in klaar_voor_behandeling
+#   2. sanity: trekAanvraagIn as aanvrager fails 409 (wrong status)
+#   3. beheerder grants exception for oe:trekAanvraagIn
+#   4. aanvrager runs trekAanvraagIn — succeeds via bypass
+#   5. verify: consumeException fired + system:exception is consumed
+#   6. re-grant by revising the same logical entity
+#   7. beheerder retracts it via retractException
+#   8. final sanity: a new trekAanvraagIn still would 409 (status
+#      isn't aanvraag_onvolledig and the exception is cancelled)
+# ============================================================================
+
+echo "============================================"
+echo "DOSSIER 10: exception grant lifecycle"
+echo "============================================"
+echo ""
+
+# --- D10 Step 1: dienAanvraagIn ---
+# After side-effects the dossier is in klaar_voor_behandeling,
+# which is exactly the wrong status for trekAanvraagIn.
+echo "--- D10 Step 1: dienAanvraagIn (sets dossier status=klaar_voor_behandeling) ---"
+D10_BIJLAGE_FID=$(upload_file "jan.aanvrager" "D10 detailplan." "d10-plan.pdf" "daa00000-0000-0000-0000-000000000001")
+curl -s -X PUT "$BASE_URL/toelatingen/dossiers/daa00000-0000-0000-0000-000000000001/activities/aa000000-0000-0000-0000-000000000001/oe:dienAanvraagIn" \
+  -H "Content-Type: application/json" \
+  -H "X-POC-User: jan.aanvrager" \
+  -d "{
+    \"workflow\": \"toelatingen\",
+    \"used\": [
+      { \"entity\": \"https://id.erfgoed.net/erfgoedobjecten/20001\" }
+    ],
+    \"generated\": [
+      {
+        \"entity\": \"oe:aanvraag/ea000000-0000-0000-0000-000000000001@fa000000-0000-0000-0000-000000000001\",
+        \"content\": {
+          \"onderwerp\": \"D10: heritage permit with exception grant lifecycle\",
+          \"handeling\": \"renovatie\",
+          \"aanvrager\": { \"rrn\": \"85010100123\" },
+          \"gemeente\": \"Brugge\",
+          \"object\": \"https://id.erfgoed.net/erfgoedobjecten/20001\",
+          \"bijlagen\": [
+            { \"file_id\": \"$D10_BIJLAGE_FID\", \"filename\": \"d10-plan.pdf\", \"content_type\": \"application/pdf\", \"size\": 32 }
+          ]
+        }
+      }
+    ]
+  }" > /tmp/d10_s1.json
+python3 -c "
+import json
+d = json.load(open('/tmp/d10_s1.json'))
+st = d.get('dossier', {}).get('status')
+assert st == 'klaar_voor_behandeling', f'expected klaar_voor_behandeling after dien + side-effects, got {st!r}'
+print('  OK: dossier in klaar_voor_behandeling (trekAanvraagIn requires aanvraag_onvolledig — will be blocked)')
+"
+echo ""
+
+# --- D10 Step 2: sanity — trekAanvraagIn as aanvrager 409s ---
+# The aanvrager (jan.aanvrager) can authorize this activity thanks
+# to the RRN match, so the 409 we get is purely from workflow
+# rules — which is what the exception mechanism exists to bypass.
+echo "--- D10 Step 2: sanity — trekAanvraagIn as jan.aanvrager 409s without exception ---"
+D10_S2_CODE=$(curl -s -o /tmp/d10_s2.json -w "%{http_code}" \
+  -X PUT "$BASE_URL/toelatingen/dossiers/daa00000-0000-0000-0000-000000000001/activities/aa000000-0000-0000-0000-000000000002/oe:trekAanvraagIn" \
+  -H "Content-Type: application/json" \
+  -H "X-POC-User: jan.aanvrager" \
+  -d "{
+    \"workflow\": \"toelatingen\",
+    \"used\": [],
+    \"generated\": []
+  }")
+python3 -c "
+assert '$D10_S2_CODE' == '409', f'expected 409 baseline, got $D10_S2_CODE: {open(\"/tmp/d10_s2.json\").read()}'
+print('  OK: trekAanvraagIn blocked (409) — wrong status and no exception')
+"
+echo ""
+
+# --- D10 Step 3: beheerder grants exception for oe:trekAanvraagIn ---
+# ``status: active`` is sent explicitly. Pydantic's Exception_
+# model has no default for status so the engine would reject a
+# submission without it; even if it accepted, the stored content
+# wouldn't carry the field — and that would weaken the PROV
+# audit trail.
+echo "--- D10 Step 3: grantException (beheerder → oe:trekAanvraagIn) ---"
+D10_S3_CODE=$(curl -s -o /tmp/d10_s3.json -w "%{http_code}" \
+  -X PUT "$BASE_URL/toelatingen/dossiers/daa00000-0000-0000-0000-000000000001/activities/aa000000-0000-0000-0000-000000000003/oe:grantException" \
+  -H "Content-Type: application/json" \
+  -H "X-POC-User: claeyswo" \
+  -d "{
+    \"workflow\": \"toelatingen\",
+    \"used\": [],
+    \"generated\": [
+      {
+        \"entity\": \"system:exception/eb000000-0000-0000-0000-000000000001@fb000000-0000-0000-0000-000000000001\",
+        \"content\": {
+          \"activity\": \"oe:trekAanvraagIn\",
+          \"status\": \"active\",
+          \"reason\": \"Legal authorization #D10: applicant requested withdrawal, status-requirement waived per legal opinion.\"
+        }
+      }
+    ]
+  }")
+python3 -c "
+assert '$D10_S3_CODE' == '200', f'grantException failed: $D10_S3_CODE {open(\"/tmp/d10_s3.json\").read()}'
+print('  OK: grantException accepted; system:exception entity created with status=active')
+"
+echo ""
+
+# --- D10 Step 4: GET /dossiers/{id} as aanvrager surfaces the bypass ---
+# Without this surfacing, the frontend would hide the bypassed activity
+# and the user could never know the granted exception exists. The
+# eligibility computation must include trekAanvraagIn with an
+# exempted_by_exception field naming the version_id of the active
+# system:exception. Fetched as the aanvrager (not the beheerder) to
+# verify auth filtering still includes the entry — exceptions help
+# users who could otherwise call the activity, never role-elevate.
+echo "--- D10 Step 4: GET /dossiers/daa surfaces trekAanvraagIn with exempted_by_exception ---"
+D10_S4_CODE=$(curl -s -o /tmp/d10_s4.json -w "%{http_code}" \
+  -H "X-POC-User: jan.aanvrager" \
+  "$BASE_URL/dossiers/daa00000-0000-0000-0000-000000000001")
+python3 -c "
+import json
+assert '$D10_S4_CODE' == '200', f'GET dossier failed: $D10_S4_CODE'
+d = json.load(open('/tmp/d10_s4.json'))
+allowed = d.get('allowedActivities', [])
+trek = [a for a in allowed if a.get('type') == 'oe:trekAanvraagIn']
+assert len(trek) == 1, f'expected oe:trekAanvraagIn in allowedActivities, got {[a.get(\"type\") for a in allowed]}'
+entry = trek[0]
+assert 'exempted_by_exception' in entry, (
+    f'entry should carry exempted_by_exception field; got {entry}'
+)
+print('  OK: trekAanvraagIn surfaces in allowedActivities with exempted_by_exception=' + entry['exempted_by_exception'])
+"
+echo ""
+
+# --- D10 Step 5: aanvrager runs trekAanvraagIn — bypass ---
+# check_exceptions finds the active exception, appends it to the
+# activity's used set, check_workflow_rules skips. Engine auto-
+# injects consumeException after persistence.
+echo "--- D10 Step 5: trekAanvraagIn succeeds via exception bypass ---"
+D10_S5_CODE=$(curl -s -o /tmp/d10_s5.json -w "%{http_code}" \
+  -X PUT "$BASE_URL/toelatingen/dossiers/daa00000-0000-0000-0000-000000000001/activities/aa000000-0000-0000-0000-000000000004/oe:trekAanvraagIn" \
+  -H "Content-Type: application/json" \
+  -H "X-POC-User: jan.aanvrager" \
+  -d "{
+    \"workflow\": \"toelatingen\",
+    \"used\": [],
+    \"generated\": []
+  }")
+python3 -c "
+import json
+assert '$D10_S5_CODE' == '200', f'expected 200 via bypass, got $D10_S5_CODE: {open(\"/tmp/d10_s5.json\").read()}'
+d = json.load(open('/tmp/d10_s5.json'))
+st = d.get('dossier', {}).get('status')
+assert st == 'aanvraag_ingetrokken', f'expected aanvraag_ingetrokken, got {st!r}'
+print('  OK: trekAanvraagIn succeeded via exception bypass — dossier now aanvraag_ingetrokken')
+"
+echo ""
+
+# --- D10 Step 6: verify consumeException fired + exception is consumed ---
+echo "--- D10 Step 6: verify consumeException activity ran + system:exception is consumed ---"
+curl -s "$BASE_URL/dossiers/daa00000-0000-0000-0000-000000000001" \
+  -H "X-POC-User: claeyswo" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+ents = d.get('currentEntities', [])
+exs = [e for e in ents if e.get('type') == 'system:exception']
+assert len(exs) == 1, f'expected 1 system:exception, got {len(exs)}'
+ex = exs[0]
+c = ex['content']
+assert c.get('status') == 'consumed', f'expected status=consumed, got {c.get(\"status\")}: {c}'
+assert c.get('activity') == 'oe:trekAanvraagIn', f'activity field drifted across revisions: {c}'
+assert 'Legal authorization #D10' in (c.get('reason') or ''), f'reason lost: {c}'
+assert ex.get('entityId') == 'eb000000-0000-0000-0000-000000000001', f'entity_id drifted: {ex}'
+# Activity log is nested in the dossier response.
+types = [a.get('type') for a in d.get('activities', [])]
+for needed in ('oe:grantException', 'oe:trekAanvraagIn', 'oe:consumeException'):
+    assert needed in types, f'expected {needed} in activity log, got {types}'
+print('  OK: system:exception latest = consumed; same logical entity_id; activity/reason preserved')
+print('  OK: PROV graph contains grantException, trekAanvraagIn, consumeException')
+"
+echo ""
+
+# --- D10 Step 7: re-grant via revision of same logical entity ---
+# Revises the SAME logical system:exception (status=consumed) back to
+# status=active. Same entity_id, new version_id, derivedFrom
+# points at the consumed version.
+echo "--- D10 Step 7: re-grant by revision (same entity_id) ---"
+D10_EXC_VID=$(curl -s "$BASE_URL/dossiers/daa00000-0000-0000-0000-000000000001" \
+  -H "X-POC-User: claeyswo" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+for e in d.get('currentEntities', []):
+    if e.get('type') == 'system:exception':
+        print(e.get('versionId', ''))
+        break
+")
+D10_S6_CODE=$(curl -s -o /tmp/d10_s6.json -w "%{http_code}" \
+  -X PUT "$BASE_URL/toelatingen/dossiers/daa00000-0000-0000-0000-000000000001/activities/aa000000-0000-0000-0000-000000000006/oe:grantException" \
+  -H "Content-Type: application/json" \
+  -H "X-POC-User: claeyswo" \
+  -d "{
+    \"workflow\": \"toelatingen\",
+    \"used\": [],
+    \"generated\": [
+      {
+        \"entity\": \"system:exception/eb000000-0000-0000-0000-000000000001@fb000000-0000-0000-0000-000000000006\",
+        \"derivedFrom\": \"system:exception/eb000000-0000-0000-0000-000000000001@$D10_EXC_VID\",
+        \"content\": {
+          \"activity\": \"oe:trekAanvraagIn\",
+          \"status\": \"active\",
+          \"reason\": \"Re-grant after consume — revisiting withdrawal authorization.\"
+        }
+      }
+    ]
+  }")
+python3 -c "
+assert '$D10_S6_CODE' == '200', f're-grant failed: $D10_S6_CODE {open(\"/tmp/d10_s6.json\").read()}'
+print('  OK: re-grant accepted (200)')
+"
+curl -s "$BASE_URL/dossiers/daa00000-0000-0000-0000-000000000001" \
+  -H "X-POC-User: claeyswo" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+exs = [e for e in d.get('currentEntities', []) if e.get('type') == 'system:exception']
+assert len(exs) == 1, f'expected 1 system:exception (revised), got {len(exs)}'
+c = exs[0]['content']
+assert c.get('status') == 'active', f'expected re-granted status=active, got {c}'
+assert exs[0].get('entityId') == 'eb000000-0000-0000-0000-000000000001', f'entity_id drifted on revision: {exs[0]}'
+print('  OK: re-grant revised the same logical entity; status back to active')
+"
+echo ""
+
+# --- D10 Step 8: retract instead of using it ---
+echo "--- D10 Step 8: retractException cancels the re-granted exception ---"
+D10_EXC_VID2=$(curl -s "$BASE_URL/dossiers/daa00000-0000-0000-0000-000000000001" \
+  -H "X-POC-User: claeyswo" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+for e in d.get('currentEntities', []):
+    if e.get('type') == 'system:exception':
+        print(e.get('versionId', ''))
+        break
+")
+D10_S7_CODE=$(curl -s -o /tmp/d10_s7.json -w "%{http_code}" \
+  -X PUT "$BASE_URL/toelatingen/dossiers/daa00000-0000-0000-0000-000000000001/activities/aa000000-0000-0000-0000-000000000007/oe:retractException" \
+  -H "Content-Type: application/json" \
+  -H "X-POC-User: claeyswo" \
+  -d "{
+    \"workflow\": \"toelatingen\",
+    \"used\": [
+      { \"entity\": \"system:exception/eb000000-0000-0000-0000-000000000001@$D10_EXC_VID2\" }
+    ],
+    \"generated\": []
+  }")
+python3 -c "
+assert '$D10_S7_CODE' == '200', f'retract failed: $D10_S7_CODE {open(\"/tmp/d10_s7.json\").read()}'
+print('  OK: retractException accepted (200)')
+"
+curl -s "$BASE_URL/dossiers/daa00000-0000-0000-0000-000000000001" \
+  -H "X-POC-User: claeyswo" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+exs = [e for e in d.get('currentEntities', []) if e.get('type') == 'system:exception']
+assert len(exs) == 1
+c = exs[0]['content']
+assert c.get('status') == 'cancelled', f'expected status=cancelled, got {c}'
+print('  OK: retractException revised system:exception to status=cancelled')
+"
+echo ""
+
+echo "D10 summary: exception grant lifecycle verified end-to-end (grant → bypass → auto-consume → re-grant → retract)"
+

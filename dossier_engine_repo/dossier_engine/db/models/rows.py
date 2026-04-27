@@ -45,7 +45,7 @@ class DossierRow(Base):
     id = Column(UUID_DB(), primary_key=True)
     workflow = Column(Text, nullable=False)
     cached_status = Column(Text, nullable=True)  # denormalized, updated per activity
-    eligible_activities = Column(Text, nullable=True)  # JSON list of activity names, updated per activity
+    eligible_activities = Column(Text, nullable=True)  # JSON list of dicts (name + optional exempted_by_exception), updated per activity
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     activities = relationship("ActivityRow", back_populates="dossier", order_by="ActivityRow.started_at")

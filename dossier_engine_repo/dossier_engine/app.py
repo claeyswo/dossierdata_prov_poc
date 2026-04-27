@@ -60,7 +60,10 @@ def load_config_and_registry(config_path: str = "config.yaml") -> tuple[dict, Pl
 
     registry = PluginRegistry()
 
-    from .entities import TaskEntity, SystemNote, SYSTEM_ACTION_DEF, TOMBSTONE_ACTIVITY_DEF
+    from .entities import (
+        TaskEntity, SystemNote, SYSTEM_ACTION_DEF, TOMBSTONE_ACTIVITY_DEF,
+    )
+    from .builtins.exceptions import register_exception_activities_on_plugin
 
     for plugin_module_name in config.get("plugins", []):
         module = importlib.import_module(plugin_module_name)
@@ -81,6 +84,15 @@ def load_config_and_registry(config_path: str = "config.yaml") -> tuple[dict, Pl
             ts_def["authorization"]["roles"] = [{"role": r} for r in ts_roles]
             ts_def["default_role"] = ts_roles[0]
         plugin.workflow["activities"].append(ts_def)
+
+        # Built-in exception-grant activities. Per-workflow opt-in via
+        # the YAML's top-level `exceptions:` block. Absent block or
+        # empty role lists = exceptions not registered for this
+        # workflow (deny by default, same convention as tombstone).
+        # The overlay helper lives in builtins/exceptions.py so the
+        # same code-path runs for test fixtures that build Plugin
+        # instances without going through this loader.
+        register_exception_activities_on_plugin(plugin)
 
         registry.register(plugin)
 

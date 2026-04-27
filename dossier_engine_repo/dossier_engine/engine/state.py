@@ -226,6 +226,25 @@ class ActivityState:
     # nulled after the replacement is persisted.
     tombstone_version_ids: list[UUID] = field(default_factory=list)
 
+    # Set by the `check_exceptions` phase when the activity's workflow
+    # rules would fail but an active matching ``oe:exception`` exists.
+    # Carries the exception's version_id so later phases can identify
+    # which exception to consume. When non-None:
+    #   * ``check_workflow_rules`` skips the structural-rules check —
+    #     the exception is an explicit administrative override.
+    #   * ``execute_side_effects`` injects a ``consumeException``
+    #     follow-up activity into the effective side-effect list,
+    #     which revises the exception with ``status: consumed`` —
+    #     enforcing the single-use-by-default contract.
+    # The exception itself is appended to ``used_refs`` /
+    # ``resolved_entities`` / ``used_rows_by_ref`` by the same phase
+    # so the PROV graph correctly records "this activity used the
+    # exception". That usage edge is what makes ``consumeException``'s
+    # side-effect auto-resolve work: its ``used: [oe:exception]``
+    # slot gets filled from the trigger's used list via
+    # ``resolve_from_prefetched``.
+    exempted_by_exception: UUID | None = None
+
     # Set by the persistence phase. The list of dicts that goes into
     # the activity response's `generated` array — one entry per
     # persisted entity (local + external), with `entity` ref string,

@@ -878,33 +878,6 @@ namespaces:
 
 Then in your YAML and code, write `dcterms:created` instead of the full URL. The engine expands prefixes on input, preserves them on display.
 
-## What you don't need to think about
-
-The engine handles, without any plugin code:
-
-- **HTTP layer** — routing, JSON deserialization, Pydantic validation of request bodies against your entity models, error handling, OpenAPI generation.
-- **Persistence** — the PROV graph (activity / entity / used / generated / association rows), dossier status, schema versioning, transaction boundaries.
-- **Worker loop** — task polling, claiming, execution, retry, cross-dossier coordination. Your task functions are just async callables.
-- **Authentication** — POC auth via HTTP Basic (dev/test), real auth via whatever the deployment wires in. Your plugin receives `User` objects; you don't parse headers.
-- **Authorization mechanics** — the three role-matching shapes, the scope resolution, the caching. Your plugin declares rules in YAML; the engine evaluates them.
-- **Search infrastructure** — the common index, admin endpoints, ACL derivation. You write the workflow-specific per-dossier doc builder; the engine handles the rest.
-- **Audit logging** — SIEM-worthy events for access denials, failed authorizations, tombstone activities. Your plugin just does its thing.
-- **Pipeline phases** — the ordered sequence of validation, handler invocation, relations processing, persistence, projection. You plug into specific points; you don't orchestrate.
-
-If you find yourself needing to know about any of the above in detail, it's probably for debugging — `docs/pipeline_architecture.md` has the engine internals.
-
----
-
-# Part 2 — Reference
-
-Part 2 is scan-oriented: exhaustive tables with minimal narrative, cross-linked back to the tutorial sections that teach each feature. Skim for what you need; read the tutorial for the "why" and "when."
-
-## The Plugin dataclass
-
-The `Plugin` dataclass is the runtime registration object. Your `create_plugin()` constructs one and returns it; the engine stores it in the `PluginRegistry` under the workflow's name.
-
-Source: `dossier_engine/plugin.py`.
-
 ### Required fields
 
 | Field | Type | Description |
@@ -1309,6 +1282,24 @@ tombstone:
 Auto-registers `oe:tombstone` activity in the workflow's activity list at plugin load. Tombstone execution nulls every entity's content, stamps them tombstoned, and records a tombstone activity in the PROV graph.
 
 Omit the block entirely to disable tombstoning for the workflow.
+
+### Exception grants
+
+```yaml
+exceptions:
+  grant_allowed_roles: ["beheerder"]
+  retract_allowed_roles: ["beheerder"]
+```
+
+Auto-registers three activities — `grantException`, `retractException`, `consumeException` — and the `system:exception` entity type. Lets an administrator authorize one-shot legal bypass of the workflow-rules layer (`requirements` / `forbidden` / `not_before` / `not_after`) for a specific activity without disabling those rules for the dossier as a whole. Single-use by default: when an exempted activity runs, the engine auto-injects `consumeException` as a side-effect to flip the exception's status from `active` to `consumed`.
+
+`grant_allowed_roles` and `retract_allowed_roles` are independent — a workflow can permit grants without permitting retracts (or vice versa). `consumeException` is system-only and runs on engine-injection, never user-callable. Omit the block entirely to disable exceptions for the workflow.
+
+Lifecycle: an admin grants an `system:exception` with `content.activity` naming the qualified activity to bypass and `content.status: "active"`. When a user runs that activity and the workflow rules would block them, the engine's `check_exceptions` phase finds the active exception, injects it into the activity's used scope, and skips the workflow-rules raise. After the activity persists, the orchestrator auto-fires `consumeException` which revises the exception with `status: consumed`. Re-grants for the same activity revise the existing entity (one logical exception per activity, ever); admins can also `retractException` to flip status to `cancelled` while the exception is still active.
+
+The `status` field on `system:exception` is REQUIRED (no Pydantic default). The engine validates submitted content but does not persist Pydantic-coerced output, so a default would mean stored content lacks the field — which would falsify PROV by stripping an assertion the granting agent supposedly made. Every grant payload must send `status: "active"` explicitly; the validator catches missing-status with a 422 pointing at exactly this reasoning.
+
+**Surfacing in `GET /dossiers/{id}`.** The eligibility computation is exception-aware. When workflow rules would block an activity but an active matching exception covers the gap, the activity appears in `allowedActivities` with an additional flat field `exempted_by_exception: <UUID>` naming the exception's version_id. The same predicate runs at execution time (in `check_exceptions`) and at read time (in `compute_eligible_activities`), so eligibility surfacing and bypass execution stay consistent — a frontend that hides activities not in `allowedActivities` would otherwise hide exception-eligible activities and make granted exceptions functionally invisible to users. With the field, frontends can also branch on it: render a "via exception" badge, require explicit confirmation before consuming a single-use bypass, etc. Absence of the field on a normal entry means standard eligibility; presence means "this is only runnable thanks to the named exception."
 
 ### Namespaces
 
