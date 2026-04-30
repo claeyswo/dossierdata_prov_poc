@@ -464,8 +464,7 @@ activities:
 
     used:
       - type: "oe:beslissing"
-        required: false
-        auto_resolve: "latest"
+        required: true
         description: "De beslissing die getekend wordt"
 
     generates:

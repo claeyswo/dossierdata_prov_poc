@@ -1,0 +1,29 @@
+{
+  "name": "dossier-generic-ui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Generic Vue frontend for the dossier platform — renders activity forms from the engine's form-schema endpoint.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@jsonforms/core": "^3.3.0",
+    "@jsonforms/vue": "^3.3.0",
+    "@jsonforms/vue-vanilla": "^3.3.0",
+    "ol": "^10.9.0",
+    "pinia": "^2.2.6",
+    "proj4": "^2.20.8",
+    "vue": "^3.5.13",
+    "vue-router": "^4.5.0"
+  },
+  "devDependencies": {
+    "@types/proj4": "^2.5.6",
+    "@vitejs/plugin-vue": "^5.2.1",
+    "typescript": "~5.6.3",
+    "vite": "^5.4.11",
+    "vue-tsc": "^2.1.10"
+  }
+}

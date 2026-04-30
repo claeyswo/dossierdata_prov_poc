@@ -1,0 +1,533 @@
+/*
+ * Dossier Register — Onroerend Erfgoed
+ *
+ * Aesthetic now: clean institutional, matching the look of Vlaanderen's
+ * existing premies portal. White-card-on-light-grey, saturated purple
+ * navigation strip, restrained type. The earlier "warm cream archival"
+ * direction is gone — this version sits closer to a working government
+ * application than to a printed register.
+ *
+ * Type pairing kept:
+ *   - Newsreader for headlines (the variable serif gives display
+ *     weight without feeling like a corporate dashboard).
+ *   - IBM Plex Sans for UI furniture.
+ *   - IBM Plex Mono for IDs and version_ids.
+ */
+
+:root {
+  /* ===== Onroerend Erfgoed palette — saturated purple anchor ===== */
+  --plum:         #944EA1;  /* primary brand purple */
+  --plum-deep:    #6B3672;  /* hover, deeper purple */
+  --plum-soft:    #F5EAF7;  /* very-light purple tint for hover surfaces */
+  --plum-line:    #C9A6CF;  /* tinted divider */
+
+  /* Neutral surfaces */
+  --bg:           #f5f4f6;  /* page background — light cool grey */
+  --bg-deep:      #ECEAEE;  /* nested surface */
+  --surface:      #FFFFFF;  /* card */
+  --line:         #DCD7DF;  /* subtle borders */
+  --line-strong:  #B9B0C0;  /* hover/active borders */
+
+  /* Ink */
+  --ink:          #1F1A2A;
+  --ink-soft:     #4D4658;
+  --ink-faint:    #847A95;
+
+  /* Functional accents — kept from the brand theme */
+  --moss:         #37876D;  /* success / completed */
+  --moss-soft:    #DCEEE7;
+  --teal:         #176D8A;  /* informational accent */
+  --teal-soft:    #D6E6EC;
+  --olive:        #867B3D;  /* tertiary metadata */
+  --gold:         #C2B049;  /* warning / via-exception */
+  --gold-soft:    #F5EFCC;
+  --crimson:      #8B2A2A;  /* errors */
+  --crimson-soft: #F1D8D8;
+
+  /* ===== Type ===== */
+  --font-display: 'Newsreader', 'Times New Roman', Georgia, serif;
+  --font-ui:      'IBM Plex Sans', system-ui, sans-serif;
+  --font-mono:    'IBM Plex Mono', 'SF Mono', Menlo, monospace;
+
+  /* ===== Spacing ===== */
+  --gap-1: 4px;
+  --gap-2: 8px;
+  --gap-3: 12px;
+  --gap-4: 16px;
+  --gap-5: 24px;
+  --gap-6: 32px;
+  --gap-7: 48px;
+  --gap-8: 64px;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-ui);
+  font-size: 15px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+a {
+  color: var(--plum);
+  text-decoration: none;
+  transition: color 120ms ease;
+}
+a:hover { color: var(--plum-deep); text-decoration: underline; }
+
+button {
+  font-family: var(--font-ui);
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  border: 1px solid var(--plum);
+  background: var(--plum);
+  color: white;
+  padding: 9px 18px;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease, transform 60ms ease;
+  border-radius: 2px;
+}
+button:hover { background: var(--plum-deep); border-color: var(--plum-deep); }
+button:active { transform: translateY(1px); }
+button:disabled {
+  background: var(--bg-deep);
+  color: var(--ink-faint);
+  border-color: var(--line);
+  cursor: not-allowed;
+}
+
+button.ghost {
+  background: transparent;
+  color: var(--plum);
+  border-color: var(--plum);
+}
+button.ghost:hover { background: var(--plum-soft); color: var(--plum-deep); border-color: var(--plum-deep); }
+
+button.subtle {
+  background: white;
+  color: var(--ink);
+  border: 1px solid var(--line);
+}
+button.subtle:hover { border-color: var(--line-strong); background: var(--bg-deep); }
+
+button.compact { padding: 6px 12px; font-size: 13px; }
+
+input[type=text], input[type=url], input[type=email], input[type=date],
+input[type=datetime-local], input[type=number], input[type=search], textarea, select {
+  font-family: var(--font-ui);
+  font-size: 14px;
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  background: white;
+  color: var(--ink);
+  border-radius: 2px;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+  width: 100%;
+}
+input:focus, textarea:focus, select:focus {
+  outline: none;
+  border-color: var(--plum);
+  box-shadow: 0 0 0 3px var(--plum-soft);
+}
+
+textarea {
+  font-family: var(--font-ui);
+  font-size: 14px;
+  line-height: 1.5;
+  min-height: 96px;
+  resize: vertical;
+}
+
+label {
+  display: block;
+  font-family: var(--font-ui);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ink-soft);
+  margin-bottom: 6px;
+}
+
+code, pre, .mono {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+}
+
+hr {
+  border: none;
+  border-top: 1px solid var(--line);
+  margin: var(--gap-5) 0;
+}
+
+/* ===== App shell — masthead + nav bar like the screenshot ===== */
+.app-shell {
+  min-height: 100vh;
+  display: grid;
+  grid-template-rows: auto auto 1fr;
+  background: var(--bg);
+}
+
+/* Top white masthead with brand */
+.masthead {
+  background: white;
+  padding: var(--gap-5) var(--gap-6);
+  display: flex;
+  align-items: center;
+  gap: var(--gap-5);
+}
+.masthead .brand-title {
+  font-family: var(--font-display);
+  font-size: 30px;
+  font-weight: 600;
+  color: var(--plum);
+  letter-spacing: -0.005em;
+  margin: 0;
+}
+.masthead .brand-title small {
+  display: block;
+  font-family: var(--font-ui);
+  font-size: 11px;
+  font-weight: 400;
+  font-style: normal;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  margin-top: 2px;
+}
+
+/* Wordmark "Vlaanderen — is erfgoed" — text-only here, the screenshot
+   uses an actual logo. Setting it up so a real SVG can drop in later. */
+.masthead .vlaanderen-mark {
+  margin-left: auto;
+  font-family: var(--font-ui);
+  font-size: 13px;
+  color: var(--ink-faint);
+  text-align: right;
+  line-height: 1.2;
+}
+.masthead .vlaanderen-mark strong {
+  display: block;
+  color: var(--plum);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+/* Saturated purple navigation strip */
+.nav-strip {
+  background: var(--plum);
+  color: white;
+  padding: 0 var(--gap-6);
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+}
+.nav-strip a {
+  color: white;
+  font-family: var(--font-ui);
+  font-size: 14px;
+  font-weight: 400;
+  padding: 14px 20px;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: background 120ms ease;
+  border: none;
+}
+.nav-strip a.home { background: rgba(0, 0, 0, 0.18); padding: 14px 18px; }
+.nav-strip a:hover { background: rgba(255, 255, 255, 0.12); text-decoration: none; }
+.nav-strip a.active { background: rgba(255, 255, 255, 0.18); }
+.nav-strip .right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--gap-3);
+  padding: 6px 0;
+}
+.nav-strip .right .user-pill {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.nav-strip .right select {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: rgba(255, 255, 255, 0.12);
+  color: white;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  padding: 5px 8px;
+  width: auto;
+}
+.nav-strip .right select option { color: var(--ink); background: white; }
+
+/* ===== Main content ===== */
+.app-main {
+  padding: var(--gap-6) var(--gap-6) var(--gap-8);
+  max-width: 1240px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+/* ===== Headings ===== */
+h1.page-title, .display-1 {
+  font-family: var(--font-display);
+  font-size: 32px;
+  font-weight: 600;
+  line-height: 1.15;
+  letter-spacing: -0.01em;
+  margin: 0 0 var(--gap-3);
+  color: var(--plum);
+  font-variation-settings: 'opsz' 32;
+}
+h1.page-title em {
+  font-style: italic;
+  font-weight: 500;
+  color: var(--ink);
+}
+
+h2.section-title, .display-2 {
+  font-family: var(--font-display);
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+  margin: var(--gap-5) 0 var(--gap-3);
+  color: var(--plum);
+  font-variation-settings: 'opsz' 24;
+}
+h3 {
+  font-family: var(--font-ui);
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  margin: var(--gap-4) 0 var(--gap-2);
+  color: var(--ink);
+}
+
+.eyebrow {
+  display: block;
+  font-family: var(--font-ui);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--plum);
+  margin-bottom: var(--gap-3);
+}
+
+/* ===== Surface containers — white card with subtle border ===== */
+.surface {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: var(--gap-5);
+}
+.surface.tinted-paper {
+  background: var(--bg-deep);
+  border-color: var(--line);
+}
+.surface.tinted-plum {
+  background: var(--plum-soft);
+  border-color: var(--plum-line);
+}
+
+/* Strip-style accent on cards (mimicking the screenshot's left rail
+   on overview blocks). Apply with class "accent-left". */
+.surface.accent-left {
+  border-left: 4px solid var(--plum);
+}
+
+/* ===== Status badges ===== */
+.badge {
+  display: inline-block;
+  font-family: var(--font-ui);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 3px 8px;
+  border-radius: 2px;
+  border: 1px solid currentColor;
+}
+.badge.plum   { color: var(--plum);     background: var(--plum-soft); border-color: var(--plum-line); }
+.badge.moss   { color: var(--moss);     background: var(--moss-soft); border-color: var(--moss); }
+.badge.teal   { color: var(--teal);     background: var(--teal-soft); border-color: var(--teal); }
+.badge.gold   { color: var(--gold);     background: var(--gold-soft); border-color: var(--gold); }
+.badge.olive  { color: var(--olive);    background: var(--bg-deep);   border-color: var(--olive); }
+.badge.crimson{ color: var(--crimson);  background: var(--crimson-soft); border-color: var(--crimson); }
+.badge.mute   { color: var(--ink-faint); background: var(--bg-deep);  border-color: var(--line); }
+
+/* ===== Utilities ===== */
+.muted { color: var(--ink-soft); }
+.faint { color: var(--ink-faint); }
+.right { text-align: right; }
+.row   { display: flex; gap: var(--gap-4); align-items: center; }
+.row.between { justify-content: space-between; }
+.col   { display: flex; flex-direction: column; gap: var(--gap-3); }
+.gap-2 { gap: var(--gap-2); }
+.gap-3 { gap: var(--gap-3); }
+.gap-4 { gap: var(--gap-4); }
+.gap-5 { gap: var(--gap-5); }
+.flex-1 { flex: 1; }
+
+/* Definition list pattern */
+.dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--gap-3) var(--gap-5);
+  font-size: 14px;
+}
+.dl dt {
+  font-family: var(--font-ui);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  align-self: center;
+}
+.dl dd {
+  margin: 0;
+  font-family: var(--font-ui);
+  font-size: 14px;
+  color: var(--ink);
+}
+
+/* Banners */
+.banner {
+  padding: var(--gap-3) var(--gap-4);
+  border-left: 3px solid currentColor;
+  font-size: 14px;
+  margin-bottom: var(--gap-4);
+  border-radius: 2px;
+}
+.banner.error  { color: var(--crimson); background: var(--crimson-soft); }
+.banner.info   { color: var(--teal);    background: var(--teal-soft); }
+.banner.success{ color: var(--moss);    background: var(--moss-soft); }
+.banner.warn   { color: var(--gold);    background: var(--gold-soft); }
+.banner pre {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: rgba(0,0,0,.05);
+  padding: var(--gap-2) var(--gap-3);
+  margin: var(--gap-2) 0 0;
+  overflow-x: auto;
+  white-space: pre-wrap;
+}
+
+/* ===== JSONForms vanilla overrides — kept simple ===== */
+.vertical-layout, .horizontal-layout, .group-layout {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-4);
+}
+.horizontal-layout { flex-direction: row; flex-wrap: wrap; }
+.horizontal-layout > * { flex: 1 1 200px; }
+.group-layout {
+  background: var(--bg-deep);
+  padding: var(--gap-4);
+  border-left: 3px solid var(--plum-line);
+  border-radius: 2px;
+}
+.group-layout > .group-layout-label,
+.group-layout > h3 {
+  font-family: var(--font-ui);
+  font-size: 13px;
+  font-weight: 600;
+  margin: 0 0 var(--gap-3);
+  color: var(--ink-soft);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.control { display: flex; flex-direction: column; gap: 4px; }
+.control > label { margin-bottom: 0; }
+.control > input,
+.control > select,
+.control > textarea { width: 100%; }
+.validation { color: var(--crimson); font-size: 12px; margin-top: 2px; }
+
+.array-list { display: flex; flex-direction: column; gap: var(--gap-3); }
+.array-list-toolbar { display: flex; gap: var(--gap-2); align-items: center; }
+
+/* Spinner */
+.spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--line);
+  border-top-color: var(--plum);
+  border-radius: 50%;
+  animation: spin 700ms linear infinite;
+  vertical-align: middle;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Compact list rows for search results, recent dossiers, etc. */
+.list-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: var(--gap-3);
+  align-items: center;
+  padding: var(--gap-3) var(--gap-4);
+  background: white;
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  text-decoration: none;
+  color: inherit;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+.list-row:hover {
+  border-color: var(--plum);
+  background: var(--plum-soft);
+  text-decoration: none;
+}
+.list-row .primary {
+  font-family: var(--font-display);
+  font-size: 16px;
+  font-weight: 500;
+  color: var(--ink);
+}
+.list-row .secondary {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-faint);
+  margin-top: 2px;
+}
+
+/* Sidebar entity cards. Native <button> reset (textAlign, font, etc.)
+   plus a surface look so they read as cards but behave as buttons.
+   The browser's default button styling — centered text, focus ring,
+   monospace font in some browsers — would otherwise leak through. */
+.entity-card {
+  display: block;
+  width: 100%;
+  text-align: left;
+  font-family: var(--font-ui);
+  font-size: 13px;
+  font-weight: 400;
+  letter-spacing: 0;
+  color: inherit;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  padding: var(--gap-3);
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease, transform 60ms ease;
+}
+.entity-card:hover {
+  border-color: var(--plum);
+  background: var(--plum-soft);
+}
+.entity-card:active {
+  transform: translateY(1px);
+}
+.entity-card:focus-visible {
+  outline: none;
+  border-color: var(--plum);
+  box-shadow: 0 0 0 3px var(--plum-soft);
+}
